@@ -1,0 +1,33 @@
+# Compiled plugins (binaries)
+*.so
+*.dll
+*.dylib
+*.exe
+
+# Go build artifacts
+plugins/*/bin/
+plugins/*/dist/
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (never commit)
+.env
+.env.local
+*.key
+*.pem
+auths/
+data/

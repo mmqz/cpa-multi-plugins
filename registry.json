@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "codebuddy-cn",
+      "name": "CodeBuddy CN",
+      "description": "Tencent CodeBuddy CN (copilot.tencent.com) provider for CPA: OAuth device flow, OpenAI-compatible chat executor, daily check-in with streak days, credit lifecycle management, multi-account pool.",
+      "author": "mmqz",
+      "version": "0.1.0",
+      "repository": "https://github.com/mmqz/cpa-multi-plugins",
+      "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/codebuddy-cn",
+      "license": "MIT",
+      "tags": ["Provider", "OAuth", "CodeBuddy", "CheckIn"]
+    },
+    {
+      "id": "codebuddy-intl",
+      "name": "CodeBuddy Intl",
+      "description": "CodeBuddy Intl (codebuddy.ai) provider for CPA: OAuth device flow, OpenAI-compatible chat executor.",
+      "author": "mmqz",
+      "version": "0.1.0",
+      "repository": "https://github.com/mmqz/cpa-multi-plugins",
+      "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/codebuddy-intl",
+      "license": "MIT",
+      "tags": ["Provider", "OAuth", "CodeBuddy"]
+    },
+    {
+      "id": "workbuddy",
+      "name": "WorkBuddy",
+      "description": "Tencent WorkBuddy provider for CPA: shares CodeBuddy CN protocol with platform=workbuddy, OAuth device flow, OpenAI-compatible chat, daily check-in, credit lifecycle.",
+      "author": "mmqz",
+      "version": "0.1.0",
+      "repository": "https://github.com/mmqz/cpa-multi-plugins",
+      "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/workbuddy",
+      "license": "MIT",
+      "tags": ["Provider", "OAuth", "WorkBuddy", "CheckIn"]
+    },
+    {
+      "id": "trae-intl",
+      "name": "Trae Intl",
+      "description": "Trae Intl (api.marscode.com) provider for CPA: GetLoginGuidance OAuth, Web SOLO remote chat_sessions/events protocol, Cloud-IDE-JWT auth, multi-account pool.",
+      "author": "mmqz",
+      "version": "0.1.0",
+      "repository": "https://github.com/mmqz/cpa-multi-plugins",
+      "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/trae-intl",
+      "license": "MIT",
+      "tags": ["Provider", "OAuth", "Trae"]
+    },
+    {
+      "id": "trae-cn",
+      "name": "Trae CN",
+      "description": "Trae Code CN (api.trae.cn) provider for CPA: OAuth via api.trae.cn, llm_utils_chat + function=inline_chat, v2 credit API, daily check-in via checkin_credits.",
+      "author": "mmqz",
+      "version": "0.1.0",
+      "repository": "https://github.com/mmqz/cpa-multi-plugins",
+      "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/trae-cn",
+      "license": "MIT",
+      "tags": ["Provider", "OAuth", "Trae", "CheckIn"]
+    },
+    {
+      "id": "trae-solo-cn",
+      "name": "Trae Work CN / SOLO CN",
+      "description": "Trae Work CN (= Trae SOLO CN) provider for CPA: OAuth via api.trae.cn (client_id=en1oxy7wnw8j9n), llm_utils_chat + function=solo_work_lite, v2 credit API, daily check-in.",
+      "author": "mmqz",
+      "version": "0.1.0",
+      "repository": "https://github.com/mmqz/cpa-multi-plugins",
+      "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/trae-solo-cn",
+      "license": "MIT",
+      "tags": ["Provider", "OAuth", "Trae", "TraeWork", "CheckIn"]
+    },
+    {
+      "id": "qoder-intl",
+      "name": "Qoder Intl",
+      "description": "Qoder Intl (qoder.com) provider for CPA: OAuth device flow, COSY-signed chat executor, RSA-wrapped AES session key, custom base64 encoding.",
+      "author": "mmqz",
+      "version": "0.1.0",
+      "repository": "https://github.com/mmqz/cpa-multi-plugins",
+      "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/qoder-intl",
+      "license": "MIT",
+      "tags": ["Provider", "OAuth", "Qoder"]
+    },
+    {
+      "id": "qoder-cn",
+      "name": "QoderWork CN",
+      "description": "QoderWork CN (qoder.com.cn) provider for CPA: OAuth device flow + PAT import, COSY-signed chat, daily check-in with streak, Pro upgrade claim, token keepalive.",
+      "author": "mmqz",
+      "version": "0.1.0",
+      "repository": "https://github.com/mmqz/cpa-multi-plugins",
+      "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/qoder-cn",
+      "license": "MIT",
+      "tags": ["Provider", "OAuth", "Qoder", "QoderWork", "CheckIn"]
+    }
+  ]
+}
