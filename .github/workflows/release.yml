@@ -44,6 +44,7 @@ jobs:
             goarch: amd64
             cc: clang
             ext: dylib
+            optional: true
           - os: darwin
             arch: arm64
             runner: macos-14
@@ -58,6 +59,7 @@ jobs:
             goarch: amd64
             cc: mingw-w64-x86_64-gcc
             ext: dll
+    continue-on-error: ${{ matrix.optional || false }}
 
     steps:
       - name: Checkout
@@ -162,7 +164,7 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: ${{ !cancelled() }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
