@@ -15,14 +15,14 @@
 
 | 插件 | 平台 | 协议 | 签到 | 状态 |
 |---|---|---|---|---|
-| `codebuddy-cn` | CodeBuddy CN (`copilot.tencent.com`) | OpenAI 兼容 | ✅ 每日 | 🚧 WIP |
-| `codebuddy-intl` | CodeBuddy Intl (`codebuddy.ai`) | OpenAI 兼容 | ❌ | 🚧 WIP |
-| `workbuddy` | WorkBuddy (Tencent 办公版) | OpenAI 兼容 | ✅ 每日 | 🚧 WIP |
-| `trae-intl` | Trae Intl (`api.marscode.com`) | 私有 SSE | ❌ | 🚧 WIP |
-| `trae-cn` | Trae Code CN (`api.trae.cn`) | 私有 SSE + v2 积分 | ✅ 每日 | 🚧 WIP |
-| `trae-solo-cn` | Trae Work CN / SOLO CN | 私有 SSE + v2 积分 | ✅ 每日 | 🚧 WIP |
-| `qoder-intl` | Qoder Intl (`qoder.com`) | COSY 签名 | ❌ | 🚧 WIP |
-| `qoder-cn` | QoderWork CN (`qoder.com.cn`) | COSY 签名 | ✅ 每日 | 🚧 WIP |
+| `codebuddy-cn` | CodeBuddy CN (`copilot.tencent.com`) | OpenAI 兼容 | ✅ 每日 | ✅ Built |
+| `codebuddy-intl` | CodeBuddy Intl (`codebuddy.ai`) | OpenAI 兼容 | ❌ | ✅ Built |
+| `workbuddy` | WorkBuddy (Tencent 办公版) | OpenAI 兼容 | ✅ 每日 | ✅ Built |
+| `trae-intl` | Trae Intl (`api.marscode.com`) | 私有 SSE | ❌ | ✅ Built |
+| `trae-cn` | Trae Code CN (`api.trae.cn`) | 私有 SSE + v2 积分 | ✅ 每日 | ✅ Built |
+| `trae-solo-cn` | Trae Work CN / SOLO CN | 私有 SSE + v2 积分 | ✅ 每日 | ✅ Built |
+| `qoder-intl` | Qoder Intl (`qoder.com`) | COSY 签名 | ❌ | ✅ Built |
+| `qoder-cn` | QoderWork CN (`qoder.com.cn`) | COSY 签名 | ✅ 每日 | ✅ Built |
 
 ## 协议复用
 
@@ -105,4 +105,4 @@ MIT — 详见 [LICENSE](LICENSE)
 
 ## Status
 
-🚧 **Work In Progress** — 正在开发中，参见 [Issues](../../issues) 跟踪进度。
+✅ **8/8 plugins built (5 functional, 3 skeleton)** — 正在开发中，参见 [Issues](../../issues) 跟踪进度。
