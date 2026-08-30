@@ -76,20 +76,44 @@ jobs:
           msystem: MINGW64
           install: mingw-w64-x86_64-gcc
           update: false
+          path-type: inherit
 
-      - name: Build all plugins
+      - name: Build all plugins (Windows)
+        if: matrix.os == 'windows'
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
-          CC: ${{ matrix.os == 'windows' && 'C:\msys64\mingw64\bin\gcc.exe' || matrix.cc }}
+          CC: gcc
         run: |
-          # Debug: verify gcc is reachable
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            echo "PATH=$PATH"
-            ls -la "C:/msys64/mingw64/bin/gcc.exe" 2>&1 || echo "gcc not at expected path"
-            "C:/msys64/mingw64/bin/gcc.exe" --version 2>&1 | head -1 || echo "gcc invocation failed"
-          fi
+          which gcc 2>&1 || echo "which gcc failed"
+          gcc --version 2>&1 | head -1 || echo "gcc invocation failed"
+          mkdir -p dist/${{ matrix.os }}-${{ matrix.arch }}
+          PLUGINS="workbuddy codebuddy-cn codebuddy-intl trae-cn trae-solo-cn trae-intl qoder-cn qoder-intl"
+          for plugin in $PLUGINS; do
+            echo "=== Building $plugin ==="
+            cd plugins/$plugin
+            go mod download
+            OUTPUT="../../dist/${{ matrix.os }}-${{ matrix.arch }}/${plugin}.${{ matrix.ext }}"
+            go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o "$OUTPUT" .
+            if [ $? -eq 0 ]; then
+              echo "  ✅ $plugin built"
+            else
+              echo "  ❌ $plugin failed"
+              exit 1
+            fi
+            cd ../..
+          done
+        shell: msys2 {0}
+
+      - name: Build all plugins (non-Windows)
+        if: matrix.os != 'windows'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+          CC: ${{ matrix.cc }}
+        run: |
           mkdir -p dist/${{ matrix.os }}-${{ matrix.arch }}
           PLUGINS="workbuddy codebuddy-cn codebuddy-intl trae-cn trae-solo-cn trae-intl qoder-cn qoder-intl"
           for plugin in $PLUGINS; do
