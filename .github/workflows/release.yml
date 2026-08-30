@@ -84,6 +84,12 @@ jobs:
           CGO_ENABLED: 1
           CC: ${{ matrix.os == 'windows' && 'C:\msys64\mingw64\bin\gcc.exe' || matrix.cc }}
         run: |
+          # Debug: verify gcc is reachable
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            echo "PATH=$PATH"
+            ls -la "C:/msys64/mingw64/bin/gcc.exe" 2>&1 || echo "gcc not at expected path"
+            "C:/msys64/mingw64/bin/gcc.exe" --version 2>&1 | head -1 || echo "gcc invocation failed"
+          fi
           mkdir -p dist/${{ matrix.os }}-${{ matrix.arch }}
           PLUGINS="workbuddy codebuddy-cn codebuddy-intl trae-cn trae-solo-cn trae-intl qoder-cn qoder-intl"
           for plugin in $PLUGINS; do
