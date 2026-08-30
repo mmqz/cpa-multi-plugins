@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trae CN Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0d1117;color:#c9d1d9;padding:20px}
+h1{font-size:24px;margin-bottom:16px;color:#58a6ff}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:12px}
+.card h2{font-size:16px;margin-bottom:8px;color:#f0f6fc}
+.info{font-size:14px;line-height:1.6;color:#8b949e}
+.info code{background:#21262d;padding:2px 6px;border-radius:4px;color:#f0883e}
+.btn{display:inline-block;padding:6px 16px;background:#238636;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:14px;margin-right:8px}
+.btn:hover{background:#2ea043}
+.btn:disabled{background:#21262d;color:#8b949e;cursor:not-allowed}
+.status{font-size:12px;padding:2px 8px;border-radius:12px;display:inline-block}
+.status.ok{background:#1a7f37;color:#fff}
+.status.warn{background:#9e6a03;color:#fff}
+.status.err{background:#cf222e;color:#fff}
+</style>
+</head>
+<body>
+<h1 id="title">Trae CN</h1>
+<div class="card">
+<h2>插件信息</h2>
+<div class="info">
+<p>Provider: <code id="provider">-</code></p>
+<p>版本: <code id="version">-</code></p>
+<p>协议: <code id="proto">llm_utils_chat + inline_chat</code></p>
+<p>签到: <span class="status ok">已启用 (09:00)</span></p>
+<p>Token 刷新: <span class="status ok">已启用 (03:00)</span></p>
+</div>
+</div>
+<div class="card">
+<h2>使用说明</h2>
+<div class="info">
+<p>1. 在 CPA Management 面板点击「登录」按钮触发 OAuth</p>
+<p>2. 浏览器会打开 Trae CN 登录页面</p>
+<p>3. 登录完成后回调本地端口，自动获取 token</p>
+<p>4. Token 自动刷新（24h skew + 每天 03:00 全量）</p>
+<p>5. 每天 09:00 自动签到领取积分</p>
+<p>6. 多账号轮询（积分降序挑选 + 4 档 cooldown）</p>
+</div>
+</div>
+<div class="card">
+<h2>API 端点</h2>
+<div class="info">
+<p>Chat: <code>POST /v1/chat/completions</code></p>
+<p>Models: <code>GET /v1/models</code></p>
+<p>管理 API: <code>/v0/management/plugins/trae-cn/*</code></p>
+</div>
+</div>
+<div class="card">
+<h2>已知限制</h2>
+<div class="info">
+<p>• DevicePublicKey 为空字符串（简化实现，未生成 ECDSA P-256 key pair）</p>
+<p>• 如 Trae 后端要求 device key proof，可能需要升级</p>
+<p>• 9074 限流会自动跳过本轮，下一轮重试</p>
+</div>
+</div>
+<script>
+const PROVIDER = window.location.pathname.split('/')[4] || 'trae-cn';
+document.getElementById('provider').textContent = PROVIDER;
+document.getElementById('version').textContent = 'v0.2.1';
+if (PROVIDER === 'trae-solo-cn') {
+  document.getElementById('title').textContent = 'Trae Work CN / SOLO CN';
+  document.getElementById('proto').textContent = 'llm_utils_chat + solo_work_lite';
+}
+</script>
+</body>
+</html>

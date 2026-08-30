@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trae Intl Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0d1117;color:#c9d1d9;padding:20px}
+h1{font-size:24px;margin-bottom:16px;color:#58a6ff}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:12px}
+.card h2{font-size:16px;margin-bottom:8px;color:#f0f6fc}
+.info{font-size:14px;line-height:1.6;color:#8b949e}
+.info code{background:#21262d;padding:2px 6px;border-radius:4px;color:#f0883e}
+.status{font-size:12px;padding:2px 8px;border-radius:12px;display:inline-block}
+.status.ok{background:#1a7f37;color:#fff}
+.status.warn{background:#9e6a03;color:#fff}
+</style>
+</head>
+<body>
+<h1>Trae Intl</h1>
+<div class="card">
+<h2>插件信息</h2>
+<div class="info">
+<p>Provider: <code>trae-intl</code></p>
+<p>版本: <code>v0.2.1</code></p>
+<p>协议: <code>Web SOLO remote (core-normal.trae.ai)</code></p>
+<p>签到: <span class="status warn">Intl 无签到</span></p>
+<p>Token 刷新: <span class="status ok">已启用</span></p>
+</div>
+</div>
+<div class="card">
+<h2>使用说明</h2>
+<div class="info">
+<p>1. 在 CPA Management 面板点击「登录」触发 OAuth</p>
+<p>2. 浏览器打开 Trae Intl 登录页（api.marscode.com）</p>
+<p>3. 登录完成回调本地端口，自动获取 token</p>
+<p>4. 支持 model: <code>auto</code> / <code>work</code> / 具体模型名</p>
+<p>5. Web SOLO remote 协议（chat_sessions + events SSE）</p>
+</div>
+</div>
+<div class="card">
+<h2>API 端点</h2>
+<div class="info">
+<p>Chat: <code>POST /v1/chat/completions</code></p>
+<p>Models: <code>GET /v1/models</code></p>
+<p>管理 API: <code>/v0/management/plugins/trae-intl/*</code></p>
+</div>
+</div>
+</body>
+</html>

@@ -74,8 +74,8 @@ import (
 )
 
 const (
-	providerName  = "qoderwork"
-	authFileName  = "qoderwork.json"
+	providerName  = "qoder-cn"
+	authFileName  = "qoder-cn.json"
 	pluginLogoURL = "https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/QoderWork.png"
 	// QoderWork CN: OpenAPI for auth/billing, gateway for COSY-signed inference.
 	// See /root/qoderwork/KNOWLEDGE.md §1-§5.
@@ -588,7 +588,7 @@ func handleParseAuth(raw []byte) ([]byte, error) {
 	if declared == "" {
 		// No type declared: only claim when the host already routed this to us
 		// (req.Provider == qoderwork) or the filename carries our prefix.
-		routed := strings.EqualFold(strings.TrimSpace(req.Provider), providerName)
+		routed := strings.EqualFold(strings.TrimSpace(req.Provider), providerName) || strings.EqualFold(strings.TrimSpace(req.Provider), "qoderwork") // 兼容旧名
 		prefixed := strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.FileName)), providerName+"-")
 		if !routed && !prefixed {
 			return okEnvelope(pluginapi.AuthParseResponse{Handled: false})
