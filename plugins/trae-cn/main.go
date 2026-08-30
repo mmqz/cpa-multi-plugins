@@ -1,9 +1,9 @@
 // Package main implements the trae-cn CLIProxyAPI dynamic plugin.
 //
-// trae-cn wraps Trae Code CN (api.trae.cn + trae-api-cn.mchost.guru +
+// trae-solo-cn wraps TRAE Work CN / SOLO CN (trae-api-cn.mchost.guru +
 // api.trae.cn) as a cliproxy provider: Trae OAuth (GetLoginGuidance +
 // AuthCode ExchangeToken), Cloud-IDE-JWT auth, llm_utils_chat +
-// function=inline_chat chat executor, daily check-in via checkin_credits,
+// function=solo_work_lite chat executor, daily check-in via checkin_credits,
 // v2 credit API query, multi-account pool with credit-aware scheduler.
 //
 // Protocol layer based on Sliverkiss/traework2api (MIT). Adapted to CPA
@@ -442,7 +442,7 @@ func handleParseAuth(request []byte) ([]byte, error) {
                         Provider:    providerName,
                         ID:          a.UID,
                         FileName:    nonEmpty(req.FileName, authFileName),
-                        Label:       nonEmpty(a.Nickname, "Trae Code CN "+a.UID),
+                        Label:       nonEmpty(a.Nickname, "Trae SOLO CN "+a.UID),
                         StorageJSON: req.StorageJSON,
                         Metadata:    map[string]any{"type": providerName, "uid": a.UID},
                 },
@@ -733,7 +733,7 @@ func handlePollLogin(request []byte) ([]byte, error) {
                         Provider:    providerName,
                         ID:          a.UID,
                         FileName:    fmt.Sprintf("%s-%s.json", providerName, a.UID),
-                        Label:       nonEmpty(a.Nickname, "Trae Code CN "+a.UID),
+                        Label:       nonEmpty(a.Nickname, "Trae SOLO CN "+a.UID),
                         StorageJSON: storageJSON,
                         Metadata:    map[string]any{"type": providerName, "uid": a.UID, "nickname": a.Nickname},
                 },
@@ -773,7 +773,7 @@ func handleRefreshAuth(request []byte) ([]byte, error) {
                         Provider:    providerName,
                         ID:          a.UID,
                         FileName:    fmt.Sprintf("%s-%s.json", providerName, a.UID),
-                        Label:       nonEmpty(a.Nickname, "Trae Code CN "+a.UID),
+                        Label:       nonEmpty(a.Nickname, "Trae SOLO CN "+a.UID),
                         StorageJSON: storageJSON,
                         Metadata:    map[string]any{"type": providerName, "uid": a.UID},
                 },
