@@ -1,0 +1,197 @@
+name: Build & Release Plugins
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0-dev'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cc: gcc
+            ext: so
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            cc: gcc
+            ext: so
+          - os: darwin
+            arch: amd64
+            runner: macos-13
+            goos: darwin
+            goarch: amd64
+            cc: clang
+            ext: dylib
+          - os: darwin
+            arch: arm64
+            runner: macos-14
+            goos: darwin
+            goarch: arm64
+            cc: clang
+            ext: dylib
+          - os: windows
+            arch: amd64
+            runner: windows-latest
+            goos: windows
+            goarch: amd64
+            cc: mingw-w64-x86_64-gcc
+            ext: dll
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+
+      - name: Install cross C compiler (Windows only)
+        if: matrix.os == 'windows'
+        run: choco install mingw -y --no-progress
+
+      - name: Build all plugins
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+          CC: ${{ matrix.cc }}
+        run: |
+          mkdir -p dist/${{ matrix.os }}-${{ matrix.arch }}
+          PLUGINS="workbuddy codebuddy-cn codebuddy-intl trae-cn trae-solo-cn trae-intl qoder-cn qoder-intl"
+          for plugin in $PLUGINS; do
+            echo "=== Building $plugin ==="
+            cd plugins/$plugin
+            go mod download
+            OUTPUT="../../dist/${{ matrix.os }}-${{ matrix.arch }}/${plugin}.${{ matrix.ext }}"
+            go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o "$OUTPUT" .
+            if [ $? -eq 0 ]; then
+              echo "  ✅ $plugin built"
+            else
+              echo "  ❌ $plugin failed"
+              exit 1
+            fi
+            cd ../..
+          done
+        shell: bash
+
+      - name: Package artifacts
+        run: |
+          cd dist/${{ matrix.os }}-${{ matrix.arch }}
+          # Remove generated .h headers (only ship binaries)
+          rm -f *.h
+          zip -r ../../cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}.zip .
+          cd ../..
+          ls -lh cpa-multi-plugins-*.zip
+        shell: bash
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}
+          path: cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}.zip
+          retention-days: 30
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -name "*.zip" -exec cp {} release/ \;
+          ls -lh release/
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: cpa-multi-plugins ${{ steps.version.outputs.version }}
+          body: |
+            # cpa-multi-plugins ${{ steps.version.outputs.version }}
+
+            8 CPA plugins for CodeBuddy / WorkBuddy / Trae / Qoder (CN + Intl versions).
+
+            ## Downloads
+            - `cpa-multi-plugins-linux-amd64.zip` — Linux x86_64
+            - `cpa-multi-plugins-linux-arm64.zip` — Linux ARM64
+            - `cpa-multi-plugins-darwin-amd64.zip` — macOS Intel
+            - `cpa-multi-plugins-darwin-arm64.zip` — macOS Apple Silicon
+            - `cpa-multi-plugins-windows-amd64.zip` — Windows x86_64
+
+            ## Installation
+            1. Download and unzip the archive for your platform.
+            2. Copy the `.so`/`.dylib`/`.dll` files to your CPA `plugins/` directory.
+            3. Enable plugins in `config.yaml`:
+               ```yaml
+               plugins:
+                 enabled: true
+                 dir: "./plugins"
+                 configs:
+                   codebuddy-cn: { enabled: true }
+                   trae-cn: { enabled: true }
+                   trae-solo-cn: { enabled: true }
+                   # ... etc
+               ```
+            4. Restart CPA. Login accounts via CPAMP or Management API.
+
+            ## Plugins
+            | Plugin | Platform | Protocol | Check-in |
+            |---|---|---|---|
+            | workbuddy | CodeBuddy CN/WorkBuddy | OpenAI compat | ✅ |
+            | codebuddy-cn | CodeBuddy CN | OpenAI compat | ✅ |
+            | codebuddy-intl | CodeBuddy Intl | OpenAI compat | ❌ |
+            | trae-cn | Trae Code CN | llm_utils_chat | ✅ |
+            | trae-solo-cn | Trae Work CN/SOLO CN | llm_utils_chat | ✅ |
+            | trae-intl | Trae Intl | Web SOLO remote | ❌ |
+            | qoder-cn | QoderWork CN | COSY-signed | ✅ |
+            | qoder-intl | Qoder Intl | COSY-signed | ❌ |
+
+            See [README](https://github.com/mmqz/cpa-multi-plugins#readme) for details.
+          files: release/*.zip
+          draft: false
+          prerelease: false
