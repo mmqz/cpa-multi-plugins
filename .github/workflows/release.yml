@@ -69,16 +69,21 @@ jobs:
           go-version: '1.23'
           cache: false
 
-      - name: Install cross C compiler (Windows only)
+      - name: Install Go toolchain (Windows ARM64 cross-compile workaround)
         if: matrix.os == 'windows'
-        run: choco install mingw -y --no-progress
+        run: |
+          # Go's CGO requires a C compiler. On Windows runners, we use the
+          # built-in MSYS2 mingw-w64-x86_64-gcc via chocolatey.
+          choco install msys2 -y --no-progress --params "/InstallDir:C:\msys64"
+          echo "C:\msys64\mingw64\bin" >> $GITHUB_PATH
+        shell: powershell
 
       - name: Build all plugins
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
-          CC: ${{ matrix.cc }}
+          CC: ${{ matrix.os == 'windows' && 'gcc' || matrix.cc }}
         run: |
           mkdir -p dist/${{ matrix.os }}-${{ matrix.arch }}
           PLUGINS="workbuddy codebuddy-cn codebuddy-intl trae-cn trae-solo-cn trae-intl qoder-cn qoder-intl"
