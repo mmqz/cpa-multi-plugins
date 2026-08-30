@@ -307,6 +307,20 @@ func handleMethod(method string, request []byte) ([]byte, error) {
         case pluginabi.MethodExecutorCountTokens:
                 return okEnvelope(pluginapi.ExecutorResponse{Payload: []byte(`{"input_tokens":0}`)})
 
+        case pluginabi.MethodManagementRegister:
+                // Cache host-injected BasePath so handleManagement doesn't hardcode
+                // /v0/management (tolerate future host path changes).
+                var regReq pluginapi.ManagementRegistrationRequest
+                if err := json.Unmarshal(request, &regReq); err == nil {
+                        if regReq.BasePath != "" {
+                                setManagementBasePath(regReq.BasePath)
+                        }
+                }
+                return okEnvelope(managementRegistration())
+
+        case pluginabi.MethodManagementHandle:
+                return handleManagement(request)
+
         default:
                 return errorEnvelope("unknown_method", "unknown method: "+method), nil
         }
@@ -344,6 +358,7 @@ type registrationCapability struct {
         ExecutorInputFormats  []string                     `json:"executor_input_formats,omitempty"`
         ExecutorOutputFormats []string                     `json:"executor_output_formats,omitempty"`
         Scheduler             bool                         `json:"scheduler"`
+        ManagementAPI         bool                         `json:"management_api"`
         UsagePlugin           bool                         `json:"usage_plugin"`
 }
 
@@ -369,6 +384,7 @@ func buildRegistration() registrationPayload {
                         ExecutorInputFormats:  []string{"chat-completions"},
                         ExecutorOutputFormats: []string{"chat-completions"},
                         Scheduler:             true,
+                        ManagementAPI:         true,
                         UsagePlugin:           true,
                 },
         }
