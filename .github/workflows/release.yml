@@ -132,10 +132,19 @@ jobs:
           done
         shell: bash
 
-      - name: Package artifacts
+      - name: Package artifacts (Windows)
+        if: matrix.os == 'windows'
+        shell: powershell
+        run: |
+          Get-ChildItem dist/${{ matrix.os }}-${{ matrix.arch }} -Filter *.dll | ForEach-Object { Write-Host "  $($_.Name)" }
+          Compress-Archive -Path "dist/${{ matrix.os }}-${{ matrix.arch }}/*.dll" -DestinationPath "cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}.zip" -Force
+          Write-Host "Created zip:"
+          Get-Item "cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}.zip" | Select-Object Name, Length
+
+      - name: Package artifacts (non-Windows)
+        if: matrix.os != 'windows'
         run: |
           cd dist/${{ matrix.os }}-${{ matrix.arch }}
-          # Remove generated .h headers (only ship binaries)
           rm -f *.h
           zip -r ../../cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}.zip .
           cd ../..
