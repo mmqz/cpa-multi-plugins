@@ -1,0 +1,24 @@
+# Build artifacts
+*.so
+*.h
+bin/
+dist/
+
+# Test artifacts
+*.test
+coverage.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local dev
+.env
+.env.local
