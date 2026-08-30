@@ -87,7 +87,7 @@ import (
 const (
 	providerName  = "trae-intl"
 	authFileName  = "trae-intl.json"
-	pluginLogoURL = "https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/Trae.png"
+	pluginLogoURL = ""
 
 	loginTTL = 5 * time.Minute
 )

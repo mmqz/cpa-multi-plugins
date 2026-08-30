@@ -77,20 +77,47 @@
 - 非流式：上游 SSE 聚合 → 单个 `chat.completion` 对象
 - 流式：实时转发 OpenAI SSE chunks（`plan_item` → `delta.content`，`token_usage` → `usage`）
 
-## 协议复用
+## 为什么是 8 个独立插件而不是合并？
 
-基于代码事实，3 套核心实现覆盖 8 个 provider：
+CPA 的插件架构基于 `auth.identifier` + `executor.identifier`——**每个 `.so` 只能注册一个 provider name**。CPA 的 `HasAuthProvider(provider)` 按 identifier 精确匹配，所以一个插件无法同时响应 `qoder-cn` 和 `qoder-intl` 两个 provider key。
 
+### 如果你想减少插件数量
+
+**方案 1：用 `openai-compatibility` 配置替代插件**（推荐给 OpenAI 兼容协议的平台）
+
+CodeBuddy（CN/Intl）和 Trae Intl 走 OpenAI 兼容协议，可以不装插件，直接在 CPA `config.yaml` 配置：
+
+```yaml
+openai-compatibility:
+  - name: "codebuddy-cn"
+    base-url: "https://copilot.tencent.com/v2"
+    api-key-entries:
+      - api-key: "<你的 CodeBuddy access_token>"
+    models:
+      - name: "hy3"
+      - name: "glm-5.2"
 ```
-codebuddy-core  →  workbuddy / codebuddy-cn / codebuddy-intl
-                   （仅 platform + host + has_checkin 不同）
-trae-cn-core    →  trae-cn / trae-solo-cn
-                   （仅 client_id + function 不同）
-trae-intl-core  →  trae-intl
-                   （独立 Web SOLO remote 协议）
-qoder-core     →  qoder-cn / qoder-intl
-                   （仅 host + client_id 不同）
-```
+
+**代价**：失去 OAuth 自动登录、token 自动刷新、签到、content filter 规避、多账号 pool 等插件功能。适合"只用一个账号、手动管理 token"的场景。
+
+**方案 2：只装你需要的插件**
+
+8 个插件互相独立，不需要全装。按需选择：
+
+| 你的需求 | 装哪些插件 |
+|---|---|
+| 只用 Trae Work CN（薅羊毛） | `trae-solo-cn` |
+| 只用 Trae Code CN | `trae-cn` |
+| 只用 Trae Intl | `trae-intl` |
+| 只用 CodeBuddy CN | `codebuddy-cn`（或 `workbuddy`，两者协议相同） |
+| 只用 CodeBuddy Intl | `codebuddy-intl` |
+| 只用 QoderWork CN | `qoder-cn` |
+| 只用 Qoder Intl | `qoder-intl` |
+| 全都要 | 全部 8 个 |
+
+**方案 3：等 CPA 上游支持多 provider 插件**
+
+如果 CPA 未来支持单插件多 provider（`auth.identifier` 返回数组），可以合并。目前上游无此计划。
 
 ## 安装
 

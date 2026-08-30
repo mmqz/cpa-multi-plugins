@@ -91,7 +91,7 @@ import (
 const (
         providerName  = "trae-cn"
         authFileName  = "trae-cn.json"
-        pluginLogoURL = "https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/Trae.png"
+        pluginLogoURL = ""
 
         // OAuth login flow timeout (5 min).
         loginTTL = 5 * time.Minute
@@ -102,6 +102,28 @@ const (
 
         // Account cache TTL for credits/checkin status.
         accountCacheTTL = 5 * time.Minute
+
+        // ---- cockpit-tools aligned OAuth constants (Trae Code CN platform) ----
+        // GetLoginGuidance URL — first entry of TRAE_CN_LOGIN_GUIDANCE_URLS.
+        oauthLoginGuidanceURL = "https://api.trae.cn/cloudide/api/v3/trae/GetLoginGuidance"
+        // ExchangeToken base URL — /trae/api/v3/oauth/ExchangeToken (NOT /cloudide/api/v3/trae/).
+        oauthExchangeTokenURL = "https://api.trae.cn/trae/api/v3/oauth/ExchangeToken"
+        // Fallback ExchangeToken host if callback does not return loginHost.
+        oauthDefaultHost = "https://api.trae.cn"
+
+        // Platform-specific flags (non-SOLO Trae Code CN).
+        oauthAuthFrom       = "trae"    // non-SOLO uses "trae"; SOLO uses "solo".
+        oauthPlatformCode   = "IDE_PC"  // non-SOLO uses IDE_PC; SOLO uses SOLO_PC.
+        oauthHideSaasLogin  = false     // non-SOLO omits this param; SOLO sets true.
+
+        // Default device fingerprint values (mirrors cockpit-tools defaults).
+        oauthPluginVersion = "1.0.0"
+        oauthDeviceName    = "DESKTOP-CPACN"
+        oauthDeviceType    = "windows"
+        oauthDeviceBrand   = "83DG"
+        oauthOSVersion     = "Windows 11 Pro"
+        oauthEnv           = "prod"
+        oauthAppType       = "trae"
 )
 
 // version is injected at build time via -ldflags "-X main.version=...".
@@ -449,36 +471,46 @@ func handleParseAuth(request []byte) ([]byte, error) {
         })
 }
 
-// handleStartLogin initiates Trae OAuth via GetLoginGuidance.
-// We spin up a local HTTP listener on a random port to receive the authCode
-// callback, then poll the listener from handlePollLogin.
+// handleStartLogin initiates Trae OAuth via GetLoginGuidance + PKCE.
+// Mirrors cockpit-tools trae_oauth.rs:1762-1845 (GetLoginGuidance) and
+// :1851-1945 (build_verification_uri).
+//
+// Flow:
+//  1. Generate login_trace_id (UUID v4) and PKCE pair (verifier + challenge).
+//  2. Allocate local callback port.
+//  3. POST GetLoginGuidance to api.trae.cn (body: {loginTraceID, login_trace_id}).
+//  4. Parse LoginHost from response (multiple JSON paths checked).
+//  5. Build verification URI: {loginHost}/authorization?... with PKCE challenge.
+//  6. Persist login state (state = login_trace_id) and start callback server.
+//  7. Return AuthLoginStartResponse{URL: verificationURI, State: loginTraceID}.
 func handleStartLogin(_ []byte) ([]byte, error) {
-        // Allocate a random local port for the OAuth callback.
+        // Step 1: PKCE + login_trace_id.
+        loginTraceID := newLoginTraceID()
+        codeVerifier, codeChallenge := generatePKCEPair()
+
+        // Step 2: Allocate local callback port.
         ln, err := netListen("tcp", "127.0.0.1:0")
         if err != nil {
                 return nil, fmt.Errorf("allocate callback port: %w", err)
         }
         port := ln.Addr().(*netTCPAddr).Port
-
-        // Build the GetLoginGuidance request to api.trae.cn.
-        guidanceURL := upstream.OAuthHost + "/cloudide/api/v3/trae/GetLoginGuidance"
         cbURL := fmt.Sprintf("http://127.0.0.1:%d/authorize", port)
-        body := map[string]any{
-                "ClientID":         upstream.ClientID,
-                "RedirectUri":      cbURL,
-                "State":            "", // server-generated
-                "CodeChallenge":    "",
-                "CodeVerifier":     "",
-                "DeviceInfo":       map[string]any{"DeviceId": newDeviceID(), "MachineId": newMachineID()},
-                "IDEVersion":       upstream.IdeVersion,
-        }
-        bodyBytes, _ := json.Marshal(body)
-        req, err := http.NewRequest(http.MethodPost, guidanceURL, bytes.NewReader(bodyBytes))
+
+        // Step 3: POST GetLoginGuidance.
+        // cockpit-tools sends both camelCase and snake_case keys for max compatibility.
+        guidanceBody, _ := json.Marshal(map[string]any{
+                "loginTraceID":   loginTraceID,
+                "login_trace_id": loginTraceID,
+        })
+        req, err := http.NewRequest(http.MethodPost, oauthLoginGuidanceURL, bytes.NewReader(guidanceBody))
         if err != nil {
                 ln.Close()
                 return nil, err
         }
-        upstream.OAuthHeaders(req)
+        req.Header.Set("Content-Type", "application/json")
+        req.Header.Set("Accept", "application/json")
+        req.Header.Set("User-Agent", "Trae/"+oauthPluginVersion+" antigravity-cockpit-tools")
+
         resp, err := http.DefaultClient.Do(req)
         if err != nil {
                 ln.Close()
@@ -490,39 +522,62 @@ func handleStartLogin(_ []byte) ([]byte, error) {
                 ln.Close()
                 return nil, fmt.Errorf("GetLoginGuidance upstream %d: %s", resp.StatusCode, truncate(string(raw), 200))
         }
-        var env struct {
-                Result struct {
-                        LoginURL string `json:"LoginUrl"`
-                        State    string `json:"State"`
-                } `json:"Result"`
-        }
-        if err := json.Unmarshal(raw, &env); err != nil {
+
+        // Step 4: Parse LoginHost from response (multiple JSON paths checked).
+        loginHost := extractLoginHost(raw)
+        if loginHost == "" {
                 ln.Close()
-                return nil, fmt.Errorf("parse GetLoginGuidance: %w", err)
-        }
-        if env.Result.LoginURL == "" || env.Result.State == "" {
-                ln.Close()
-                return nil, fmt.Errorf("GetLoginGuidance: missing LoginURL or State")
+                return nil, fmt.Errorf("GetLoginGuidance: missing LoginHost (body=%s)", truncate(string(raw), 200))
         }
 
-        // State to track this login flow.
-        state := env.Result.State
-        loginStates.Store(state, &loginCtx{
-                listener: ln,
-                state:    state,
-                cbURL:    cbURL,
-                expires:  time.Now().Add(loginTTL),
+        // Step 5: Build verification URI with PKCE challenge.
+        deviceID := newDeviceID()
+        machineID := newMachineID()
+        verificationURI := buildVerificationURI(loginHost, verificationURIParams{
+                AuthFrom:      oauthAuthFrom,
+                PluginVersion: oauthPluginVersion,
+                ClientID:      upstream.ClientID,
+                LoginTraceID:  loginTraceID,
+                CallbackURL:   cbURL,
+                MachineID:     machineID,
+                DeviceID:      deviceID,
+                DeviceBrand:   oauthDeviceBrand,
+                DeviceType:    oauthDeviceType,
+                OSVersion:     oauthOSVersion,
+                Env:           oauthEnv,
+                AppVersion:    upstream.IdeVersion,
+                AppType:       oauthAppType,
+                CodeChallenge: codeChallenge,
+                HideSaasLogin: oauthHideSaasLogin,
         })
 
-        // Start a goroutine to accept the OAuth callback.
+        // Step 6: Persist login state (state = login_trace_id).
+        state := loginTraceID
+        loginStates.Store(state, &loginCtx{
+                listener:      ln,
+                state:         state,
+                cbURL:         cbURL,
+                expires:       time.Now().Add(loginTTL),
+                loginTraceID:  loginTraceID,
+                codeVerifier:  codeVerifier,
+                codeChallenge: codeChallenge,
+                deviceID:      deviceID,
+                machineID:     machineID,
+        })
+
+        // Step 7: Start callback server goroutine.
         go acceptCallback(state)
 
         return okEnvelope(pluginapi.AuthLoginStartResponse{
                 Provider:  providerName,
-                URL:       env.Result.LoginURL,
+                URL:       verificationURI,
                 State:     state,
                 ExpiresAt: time.Now().Add(loginTTL).UTC(),
-                Metadata:  map[string]any{"logo": pluginLogoURL, "callback_url": cbURL},
+                Metadata: map[string]any{
+                        "logo":           pluginLogoURL,
+                        "callback_url":   cbURL,
+                        "login_trace_id": loginTraceID,
+                },
         })
 }
 
@@ -533,14 +588,31 @@ type loginCtx struct {
         cbURL    string
         expires  time.Time
 
+        // Set at handleStartLogin (PKCE + device fingerprint).
+        loginTraceID  string
+        codeVerifier  string
+        codeChallenge string
+        deviceID      string
+        machineID     string
+
         // Filled by acceptCallback when the user completes login.
-        authCode    string
-        codeVerifier string
-        userJWT     string
-        err         error
-        done        chan struct{}
+        authCode     string
+        refreshToken string
+        loginHost    string // for ExchangeToken (from callback or fallback)
+        err          error
+        done         chan struct{}
 }
 
+// acceptCallback accepts the OAuth callback GET /authorize?... and parses
+// parameters. Mirrors cockpit-tools trae_oauth.rs:1170-1196 callback handling.
+//
+// Parameter precedence (per cockpit-tools):
+//   - error / error_code / err / errorCode → callback error
+//   - isRedirect=false → callback error
+//   - refreshToken / refresh_token / RefreshToken / refresh-token → use directly
+//   - authCode / auth_code / AuthCode / authorization_code / code → ExchangeToken (auth code)
+//   - authCodeInfo / auth_code_info / AuthCodeInfo → extract auth code from JSON
+//   - loginHost / login_host / LoginHost / host / consoleHost → for ExchangeToken
 func acceptCallback(state string) {
         v, ok := loginStates.Load(state)
         if !ok {
@@ -559,29 +631,113 @@ func acceptCallback(state string) {
         }
         defer conn.Close()
         _ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-        buf := make([]byte, 8192)
+        buf := make([]byte, 16384)
         n, _ := conn.Read(buf)
         req := string(buf[:n])
-        // Parse "GET /authorize?... HTTP/1.1"
-        idx := strings.Index(req, " ")
-        if idx < 0 {
-                lc.err = fmt.Errorf("callback: malformed request")
+        // Parse the first HTTP request line: "GET /authorize?... HTTP/1.1"
+        firstLine := req
+        if nl := strings.Index(req, "\r\n"); nl >= 0 {
+                firstLine = req[:nl]
+        }
+        sp := strings.Index(firstLine, " ")
+        if sp < 0 {
+                lc.err = fmt.Errorf("callback: malformed request line")
+                writeCallbackHTML(conn, "Login failed", "malformed request")
                 return
         }
-        path := req[:idx]
-        if q := strings.Index(path, "?"); q >= 0 {
-                query := path[q+1:]
-                vals, _ := url.ParseQuery(query)
-                lc.authCode = vals.Get("authCode")
-                lc.codeVerifier = vals.Get("codeVerifier")
-                lc.userJWT = vals.Get("userJwt")
+        rest := firstLine[sp+1:]
+        // Trim trailing HTTP version (e.g. " HTTP/1.1").
+        if sp2 := strings.LastIndex(rest, " "); sp2 >= 0 {
+                rest = rest[:sp2]
         }
-        // Respond with a success page so the browser shows something useful.
-        body := "<html><body><h2>Login successful</h2><p>You can close this window now.</p></body></html>"
-        fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+        vals := url.Values{}
+        if q := strings.Index(rest, "?"); q >= 0 {
+                vals, _ = url.ParseQuery(rest[q+1:])
+        }
+
+        // Error path.
+        for _, k := range []string{"error", "error_code", "err", "errorCode"} {
+                if ev := vals.Get(k); ev != "" {
+                        lc.err = fmt.Errorf("oauth callback error: %s=%s", k, ev)
+                        writeCallbackHTML(conn, "Login failed", lc.err.Error())
+                        return
+                }
+        }
+        if ir := vals.Get("isRedirect"); ir == "false" {
+                lc.err = fmt.Errorf("oauth callback: isRedirect=false")
+                writeCallbackHTML(conn, "Login failed", "isRedirect=false")
+                return
+        }
+
+        // loginHost (used for ExchangeToken; falls back to oauthDefaultHost).
+        for _, k := range []string{"loginHost", "login_host", "LoginHost", "host", "consoleHost"} {
+                if v := vals.Get(k); v != "" {
+                        lc.loginHost = v
+                        break
+                }
+        }
+
+        // Refresh token (use directly — skip ExchangeToken auth-code path).
+        for _, k := range []string{"refreshToken", "refresh_token", "RefreshToken", "refresh-token"} {
+                if v := vals.Get(k); v != "" {
+                        lc.refreshToken = v
+                        break
+                }
+        }
+
+        // Auth code (multiple names; first non-empty wins).
+        for _, k := range []string{"authCode", "auth_code", "AuthCode", "authorization_code", "code"} {
+                if v := vals.Get(k); v != "" {
+                        lc.authCode = v
+                        break
+                }
+        }
+
+        // authCodeInfo — extract auth code from JSON payload.
+        if lc.authCode == "" {
+                for _, k := range []string{"authCodeInfo", "auth_code_info", "AuthCodeInfo"} {
+                        if v := vals.Get(k); v != "" {
+                                if ac := extractAuthCodeFromAuthCodeInfo(v); ac != "" {
+                                        lc.authCode = ac
+                                        break
+                                }
+                        }
+                }
+        }
+
+        // Final sanity check + browser response.
+        switch {
+        case lc.err != nil:
+                writeCallbackHTML(conn, "Login failed", lc.err.Error())
+        case lc.refreshToken != "" || lc.authCode != "":
+                writeCallbackHTML(conn, "Login successful", "You can close this window now.")
+        default:
+                lc.err = fmt.Errorf("oauth callback: no authCode/refreshToken in callback params")
+                writeCallbackHTML(conn, "Login failed", "no auth code received")
+        }
+}
+
+// writeCallbackHTML responds to the browser with a simple HTML page.
+func writeCallbackHTML(w io.Writer, title, msg string) {
+        body := fmt.Sprintf("<html><body><h2>%s</h2><p>%s</p></body></html>", title, msg)
+        fmt.Fprintf(w, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
                 len(body), body)
 }
 
+// handlePollLogin polls the callback server for completion, then exchanges
+// the auth code (or refresh token) for tokens via ExchangeToken.
+//
+// Flow:
+//  1. Look up loginCtx by state.
+//  2. If still pending (lc.done not closed), return AuthLoginStatusPending.
+//  3. If callback returned an error, return AuthLoginStatusError.
+//  4. If callback returned refreshToken: call ExchangeToken (refresh variant)
+//     via upstreamClient.RefreshToken to obtain access token.
+//  5. If callback returned authCode: call ExchangeToken with auth-code body
+//     ({ClientID, AuthCode, CodeVerifier, DeviceInfo, IDEVersion}).
+//  6. Parse token response (access/refresh/expires).
+//  7. Call GetUserInfo for UID/nickname/enterpriseID.
+//  8. Build storage JSON and return AuthLoginStatusSuccess.
 func handlePollLogin(request []byte) ([]byte, error) {
         var req pluginapi.AuthLoginPollRequest
         if err := json.Unmarshal(request, &req); err != nil {
@@ -613,85 +769,116 @@ func handlePollLogin(request []byte) ([]byte, error) {
                 })
         }
 
+        // fail is a helper that cleans up the login state and returns an error envelope.
+        fail := func(msg string) ([]byte, error) {
+                loginStates.Delete(state)
+                lc.listener.Close()
+                raw, _ := okEnvelope(pluginapi.AuthLoginPollResponse{
+                        Status:  pluginapi.AuthLoginStatusError,
+                        Message: msg,
+                })
+                return raw, nil
+        }
+
         if lc.err != nil {
-                loginStates.Delete(state)
-                lc.listener.Close()
-                return okEnvelope(pluginapi.AuthLoginPollResponse{
-                        Status:  pluginapi.AuthLoginStatusError,
-                        Message: lc.err.Error(),
-                })
-        }
-        if lc.authCode == "" {
-                // User completed login but no authCode came back (e.g., denied).
-                loginStates.Delete(state)
-                lc.listener.Close()
-                return okEnvelope(pluginapi.AuthLoginPollResponse{
-                        Status:  pluginapi.AuthLoginStatusError,
-                        Message: "login completed but no authCode received — please retry",
-                })
+                return fail(lc.err.Error())
         }
 
-        // Exchange authCode for tokens via ExchangeToken.
-        tokenBody := map[string]any{
-                "ClientID":     upstream.ClientID,
-                "AuthCode":     lc.authCode,
-                "CodeVerifier": lc.codeVerifier,
-                "ClientSecret": "-",
-                "UserID":       "",
-                "DeviceInfo":   map[string]any{"DeviceId": newDeviceID(), "MachineId": newMachineID()},
-                "IDEVersion":   upstream.IdeVersion,
-        }
-        tokenBytes, _ := json.Marshal(tokenBody)
-        tokenReq, _ := http.NewRequest(http.MethodPost,
-                upstream.OAuthHost+"/trae/api/v3/oauth/ExchangeToken",
-                bytes.NewReader(tokenBytes))
-        upstream.OAuthHeaders(tokenReq)
-        tokenResp, err := http.DefaultClient.Do(tokenReq)
-        if err != nil {
-                loginStates.Delete(state)
-                lc.listener.Close()
-                return okEnvelope(pluginapi.AuthLoginPollResponse{
-                        Status:  pluginapi.AuthLoginStatusError,
-                        Message: fmt.Sprintf("ExchangeToken failed: %v", err),
-                })
-        }
-        defer tokenResp.Body.Close()
-        tokenRaw, _ := io.ReadAll(io.LimitReader(tokenResp.Body, 1<<20))
-        if tokenResp.StatusCode >= 400 {
-                loginStates.Delete(state)
-                lc.listener.Close()
-                return okEnvelope(pluginapi.AuthLoginPollResponse{
-                        Status:  pluginapi.AuthLoginStatusError,
-                        Message: fmt.Sprintf("ExchangeToken upstream %d: %s", tokenResp.StatusCode, truncate(string(tokenRaw), 200)),
-                })
-        }
-        var tokenEnv struct {
-                Result struct {
-                        Token                string `json:"Token"`
-                        TokenExpireAt        int64  `json:"TokenExpireAt"`
-                        TokenExpireDuration  int64  `json:"TokenExpireDuration"`
-                        RefreshToken         string `json:"RefreshToken"`
-                        RefreshExpireAt      int64  `json:"RefreshExpireAt"`
-                } `json:"Result"`
-        }
-        if err := json.Unmarshal(tokenRaw, &tokenEnv); err != nil {
-                loginStates.Delete(state)
-                lc.listener.Close()
-                return okEnvelope(pluginapi.AuthLoginPollResponse{
-                        Status:  pluginapi.AuthLoginStatusError,
-                        Message: fmt.Sprintf("parse ExchangeToken: %v", err),
-                })
+        var (
+                accessToken  string
+                refreshToken string
+                expiresAt    int64
+        )
+
+        switch {
+        case lc.refreshToken != "":
+                // Refresh-token path: use the callback's refresh token to obtain an
+                // access token via the refresh ExchangeToken flow (refreshLocked).
+                // Equivalent to "直接用 + skip auth-code ExchangeToken".
+                a := &auth.Auth{
+                        RefreshToken: lc.refreshToken,
+                        ApiHost:       oauthDefaultHost,
+                        Domain:        "trae.cn",
+                        MachineID:     lc.machineID,
+                        DeviceID:      lc.deviceID,
+                }
+                if err := upstreamClient.RefreshToken(a); err != nil {
+                        // Fallback: treat the callback's refreshToken as access token directly.
+                        log.Printf("ExchangeToken(refresh) failed: %v — using refreshToken as accessToken", err)
+                        accessToken = lc.refreshToken
+                        refreshToken = lc.refreshToken
+                } else {
+                        accessToken = a.AccessToken
+                        refreshToken = a.RefreshToken
+                        expiresAt = a.ExpiresAt
+                }
+
+        case lc.authCode != "":
+                // Auth-code path: call ExchangeToken with AuthCode body.
+                host := lc.loginHost
+                if host == "" {
+                        host = oauthDefaultHost
+                }
+                // Ensure host has scheme; loginHost may be a bare domain (e.g. "www.trae.cn").
+                if !strings.HasPrefix(host, "http://") && !strings.HasPrefix(host, "https://") {
+                        host = "https://" + host
+                }
+                di := buildOfficialDeviceInfo(
+                        lc.deviceID, lc.machineID, oauthPlatformCode, oauthDeviceName,
+                        oauthDeviceBrand, upstream.IdeVersion, oauthDeviceType, oauthOSVersion,
+                )
+                body := map[string]any{
+                        "ClientID":     upstream.ClientID,
+                        "AuthCode":     lc.authCode,
+                        "CodeVerifier": lc.codeVerifier,
+                        "DeviceInfo":   di,
+                        "IDEVersion":   upstream.IdeVersion,
+                }
+                bodyBytes, _ := json.Marshal(body)
+                tokenReq, err := http.NewRequest(http.MethodPost,
+                        host+"/trae/api/v3/oauth/ExchangeToken", bytes.NewReader(bodyBytes))
+                if err != nil {
+                        return fail(fmt.Sprintf("ExchangeToken request: %v", err))
+                }
+                tokenReq.Header.Set("Content-Type", "application/json")
+                tokenReq.Header.Set("Accept", "application/json")
+                tokenReq.Header.Set("User-Agent", "Trae/"+oauthPluginVersion+" antigravity-cockpit-tools")
+                tokenReq.Header.Set("x-cloudide-token", "")
+
+                tokenResp, err := http.DefaultClient.Do(tokenReq)
+                if err != nil {
+                        return fail(fmt.Sprintf("ExchangeToken failed: %v", err))
+                }
+                defer tokenResp.Body.Close()
+                tokenRaw, _ := io.ReadAll(io.LimitReader(tokenResp.Body, 1<<20))
+                if tokenResp.StatusCode >= 400 {
+                        return fail(fmt.Sprintf("ExchangeToken upstream %d: %s",
+                                tokenResp.StatusCode, truncate(string(tokenRaw), 200)))
+                }
+                // Parse token response (multiple field names supported per cockpit-tools).
+                accessToken, refreshToken, expiresAt = parseExchangeTokenResponse(tokenRaw)
+                if accessToken == "" && refreshToken == "" {
+                        return fail(fmt.Sprintf("ExchangeToken: no token in response (body=%s)",
+                                truncate(string(tokenRaw), 200)))
+                }
+                if accessToken == "" {
+                        // Some responses only return a refresh token; use it as access token too.
+                        accessToken = refreshToken
+                }
+
+        default:
+                return fail("login completed but no authCode/refreshToken received — please retry")
         }
 
-        // Build a partial Auth and call GetUserInfo to get UID.
+        // Build partial Auth and call GetUserInfo for UID.
         a := &auth.Auth{
-                AccessToken:  tokenEnv.Result.Token,
-                RefreshToken: tokenEnv.Result.RefreshToken,
-                ExpiresAt:    normalizeExpiresAt(tokenEnv.Result.TokenExpireAt),
-                ApiHost:      upstream.OAuthHost,
+                AccessToken:  accessToken,
+                RefreshToken: refreshToken,
+                ExpiresAt:    expiresAt,
+                ApiHost:      oauthDefaultHost,
                 Domain:       "trae.cn",
-                MachineID:    newMachineID(),
-                DeviceID:     newDeviceID(),
+                MachineID:    lc.machineID,
+                DeviceID:     lc.deviceID,
         }
         uid, nickname, entID, err := upstreamClient.GetUserInfo(a)
         if err != nil {
@@ -701,7 +888,7 @@ func handlePollLogin(request []byte) ([]byte, error) {
         a.Nickname = nickname
         a.EnterpriseID = entID
 
-        // Persist the auth file.
+        // Persist the auth file (nested form: {auth:{...}, account:{...}}).
         storageJSON, _ := json.MarshalIndent(map[string]any{
                 "auth": map[string]any{
                         "accessToken":  a.AccessToken,
@@ -727,17 +914,264 @@ func handlePollLogin(request []byte) ([]byte, error) {
         lc.listener.Close()
 
         return okEnvelope(pluginapi.AuthLoginPollResponse{
-                Status: pluginapi.AuthLoginStatusSuccess,
+                Status:  pluginapi.AuthLoginStatusSuccess,
                 Message: fmt.Sprintf("login complete (uid=%s)", a.UID),
                 Auth: pluginapi.AuthData{
                         Provider:    providerName,
                         ID:          a.UID,
                         FileName:    fmt.Sprintf("%s-%s.json", providerName, a.UID),
-                        Label:       nonEmpty(a.Nickname, "Trae SOLO CN "+a.UID),
+                        Label:       nonEmpty(a.Nickname, "Trae CN "+a.UID),
                         StorageJSON: storageJSON,
                         Metadata:    map[string]any{"type": providerName, "uid": a.UID, "nickname": a.Nickname},
                 },
         })
+}
+
+// -----------------------------------------------------------------------------
+// OAuth helpers (cockpit-tools aligned)
+// -----------------------------------------------------------------------------
+
+// verificationURIParams carries the parameters for buildVerificationURI.
+type verificationURIParams struct {
+        AuthFrom      string // "solo" or "trae"
+        PluginVersion string // e.g. "1.0.0"
+        ClientID      string // SOLO: en1oxy7wnw8j9n; non-SOLO: ono9krqynydwx5
+        LoginTraceID  string
+        CallbackURL   string // auth_callback_url (NOT URL-encoded per cockpit-tools)
+        MachineID     string
+        DeviceID      string
+        DeviceBrand   string // e.g. "83DG"
+        DeviceType    string // e.g. "windows"
+        OSVersion     string // e.g. "Windows 11 Pro"
+        Env           string // e.g. "prod"
+        AppVersion    string // e.g. "0.1.43" (= upstream.IdeVersion)
+        AppType       string // e.g. "trae"
+        CodeChallenge string // PKCE challenge (base64url no-pad)
+        HideSaasLogin bool   // SOLO only; non-SOLO omits this param
+}
+
+// buildVerificationURI builds the user-facing OAuth login URL.
+// Mirrors cockpit-tools build_verification_uri (trae_oauth.rs:1851-1945).
+// Layout: {loginHost}/authorization?{query}
+// Query parameter order is significant (cockpit-tools uses Vec<(K,V)> preserved order).
+func buildVerificationURI(loginHost string, p verificationURIParams) string {
+        type kv struct {
+                k, v   string
+                encode bool
+        }
+        params := []kv{
+                {"login_version", "1", false},
+                {"auth_from", p.AuthFrom, false},
+                {"login_channel", "native_ide", false},
+                {"plugin_version", p.PluginVersion, true},
+                {"auth_type", "local", false},
+                {"client_id", p.ClientID, false},
+                {"redirect", "0", false},
+                {"login_trace_id", p.LoginTraceID, true},
+                {"auth_callback_url", p.CallbackURL, false}, // NOT encoded per cockpit-tools
+                {"machine_id", p.MachineID, true},
+                {"device_id", p.DeviceID, true},
+                {"x_device_id", p.DeviceID, true},
+                {"x_machine_id", p.MachineID, true},
+                {"x_device_brand", p.DeviceBrand, true},
+                {"x_device_type", p.DeviceType, true},
+                {"x_os_version", p.OSVersion, true},
+                {"x_env", p.Env, true},
+                {"x_app_version", p.AppVersion, true},
+                {"x_app_type", p.AppType, true},
+                {"code_challenge", p.CodeChallenge, true},
+                {"code_challenge_method", "S256", false},
+        }
+        if p.HideSaasLogin {
+                params = append(params, kv{"hide_saas_login", "true", false})
+        }
+        parts := make([]string, 0, len(params))
+        for _, e := range params {
+                v := e.v
+                if e.encode {
+                        v = urlEncode(v)
+                }
+                parts = append(parts, e.k+"="+v)
+        }
+        return strings.TrimRight(loginHost, "/") + "/authorization?" + strings.Join(parts, "&")
+}
+
+// deviceInfo is the DeviceInfo struct sent in the ExchangeToken request body.
+// Mirrors cockpit-tools build_official_device_info (trae_oauth.rs:2087-2118).
+type deviceInfo struct {
+        DeviceID        string `json:"DeviceID"`
+        MachineID       string `json:"MachineID"`
+        PlatformCode    string `json:"PlatformCode"`    // SOLO_PC | IDE_PC
+        DeviceType      string `json:"DeviceType"`      // "PC"
+        DeviceName      string `json:"DeviceName"`
+        DeviceModel     string `json:"DeviceModel"`     // = DeviceBrand
+        ClientVersion   string `json:"ClientVersion"`  // = AppVersion
+        DevicePublicKey string `json:"DevicePublicKey"` // empty for now (no device key pair)
+        DeviceBrand     string `json:"DeviceBrand"`
+        DeviceCPU       string `json:"DeviceCPU"`
+        OSInfo          string `json:"OSInfo"` // = DeviceType (e.g. "windows")
+        OSVersion       string `json:"OSVersion"`
+}
+
+// buildOfficialDeviceInfo builds the DeviceInfo for ExchangeToken.
+// Note: DevicePublicKey is sent as empty string for now (matches traework2api's
+// behavior — no device key pair). If upstream starts rejecting, generate an
+// ECDSA P-256 key pair and send the PEM-encoded public key here.
+func buildOfficialDeviceInfo(deviceID, machineID, platformCode, deviceName, deviceBrand, appVersion, deviceType, osVersion string) deviceInfo {
+        return deviceInfo{
+                DeviceID:        deviceID,
+                MachineID:       machineID,
+                PlatformCode:    platformCode,
+                DeviceType:      "PC",
+                DeviceName:      deviceName,
+                DeviceModel:     deviceBrand,
+                ClientVersion:   appVersion,
+                DevicePublicKey: "",
+                DeviceBrand:     deviceBrand,
+                DeviceCPU:       "",
+                OSInfo:          deviceType,
+                OSVersion:       osVersion,
+        }
+}
+
+// extractLoginHost mirrors cockpit-tools extract_login_guidance_host:
+// checks multiple JSON paths (Result.LoginHost / Result.loginHost / Result.LoginURL /
+// result.* / data.Result.* / data.* / top-level) and returns the first non-empty value.
+func extractLoginHost(raw []byte) string {
+        var top map[string]any
+        if err := json.Unmarshal(raw, &top); err != nil {
+                return ""
+        }
+        candidates := []string{"LoginHost", "loginHost", "LoginURL", "loginUrl", "login_url"}
+
+        // Top-level.
+        for _, k := range candidates {
+                if s := jsonString(top[k]); s != "" {
+                        return s
+                }
+        }
+
+        // Result.* / result.*
+        for _, rk := range []string{"Result", "result"} {
+                if sub, ok := top[rk].(map[string]any); ok {
+                        for _, k := range candidates {
+                                if s := jsonString(sub[k]); s != "" {
+                                        return s
+                                }
+                        }
+                }
+        }
+
+        // data.* and data.Result.* / data.result.*
+        if data, ok := top["data"].(map[string]any); ok {
+                for _, k := range candidates {
+                        if s := jsonString(data[k]); s != "" {
+                                return s
+                        }
+                }
+                for _, rk := range []string{"Result", "result"} {
+                        if sub, ok := data[rk].(map[string]any); ok {
+                                for _, k := range candidates {
+                                        if s := jsonString(sub[k]); s != "" {
+                                                return s
+                                        }
+                                }
+                        }
+                }
+        }
+        return ""
+}
+
+// jsonString returns v as a string if it is a JSON string; empty otherwise.
+func jsonString(v any) string {
+        if s, ok := v.(string); ok {
+                return s
+        }
+        return ""
+}
+
+// extractAuthCodeFromAuthCodeInfo mirrors cockpit-tools extract_auth_code_from_auth_code_info.
+// The input may be JSON-encoded or URL-encoded JSON. Checks multiple keys:
+// authCode / auth_code / AuthCode / authorization_code / code.
+func extractAuthCodeFromAuthCodeInfo(raw string) string {
+        candidates := []string{"authCode", "auth_code", "AuthCode", "authorization_code", "code"}
+        parse := func(s string) map[string]any {
+                var m map[string]any
+                if json.Unmarshal([]byte(s), &m) == nil {
+                        return m
+                }
+                return nil
+        }
+        m := parse(raw)
+        if m == nil {
+                if decoded, err := url.QueryUnescape(raw); err == nil {
+                        m = parse(decoded)
+                }
+        }
+        if m == nil {
+                return ""
+        }
+        for _, k := range candidates {
+                if s := jsonString(m[k]); s != "" {
+                        return s
+                }
+        }
+        return ""
+}
+
+// parseExchangeTokenResponse extracts access/refresh tokens + expiresAt from an
+// ExchangeToken response. Mirrors cockpit-tools apply_exchange_token_response
+// which checks Result.{AccessToken,accessToken,Token,token} and
+// Result.{RefreshToken,refreshToken} (multiple field names supported).
+func parseExchangeTokenResponse(raw []byte) (accessToken, refreshToken string, expiresAt int64) {
+        var env struct {
+                Result map[string]any `json:"Result"`
+        }
+        if err := json.Unmarshal(raw, &env); err != nil || env.Result == nil {
+                return "", "", 0
+        }
+        r := env.Result
+        // Access token candidates (in priority order).
+        for _, k := range []string{"AccessToken", "accessToken", "Token", "token"} {
+                if s := jsonString(r[k]); s != "" {
+                        accessToken = s
+                        break
+                }
+        }
+        // Refresh token candidates.
+        for _, k := range []string{"RefreshToken", "refreshToken"} {
+                if s := jsonString(r[k]); s != "" {
+                        refreshToken = s
+                        break
+                }
+        }
+        // ExpiresAt: prefer TokenExpireAt (millis → seconds); fall back to duration.
+        if n, ok := toInt64(r["TokenExpireAt"]); ok && n > 0 {
+                expiresAt = normalizeExpiresAt(n)
+        }
+        if expiresAt == 0 {
+                if n, ok := toInt64(r["TokenExpireDuration"]); ok && n > 0 {
+                        expiresAt = time.Now().Add(time.Duration(n) * time.Second).Unix()
+                }
+        }
+        return accessToken, refreshToken, expiresAt
+}
+
+// toInt64 converts a JSON number (typically float64 from encoding/json) to int64.
+func toInt64(v any) (int64, bool) {
+        switch n := v.(type) {
+        case float64:
+                return int64(n), true
+        case int64:
+                return n, true
+        case int:
+                return int64(n), true
+        case json.Number:
+                if i, err := n.Int64(); err == nil {
+                        return i, true
+                }
+        }
+        return 0, false
 }
 
 func handleRefreshAuth(request []byte) ([]byte, error) {

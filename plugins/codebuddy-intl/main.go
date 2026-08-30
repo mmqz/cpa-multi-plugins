@@ -75,7 +75,7 @@ import (
 const (
         providerName  = "codebuddy-intl"
         authFileName  = "codebuddy-intl.json"
-        pluginLogoURL = "https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/CodeBuddy.png"
+        pluginLogoURL = ""
         // CN chat/auth gateway (iss = codebuddy.cn realm).
         upstreamBaseCN = "https://copilot.tencent.com"
         // Global chat/auth gateway (iss = workbuddy.ai realm). APISIX on
