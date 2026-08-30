@@ -105,4 +105,4 @@ MIT — 详见 [LICENSE](LICENSE)
 
 ## Status
 
-✅ **8/8 plugins built (5 functional, 3 skeleton)** — 正在开发中，参见 [Issues](../../issues) 跟踪进度。
+✅ **8/8 plugins fully functional** — 正在开发中，参见 [Issues](../../issues) 跟踪进度。
