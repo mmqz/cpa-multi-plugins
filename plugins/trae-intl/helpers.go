@@ -42,3 +42,28 @@ func generatePKCEPair() (codeVerifier, codeChallenge string) {
         codeChallenge = base64.RawURLEncoding.EncodeToString(sum[:])
         return codeVerifier, codeChallenge
 }
+
+// newLoginTraceID generates a UUID v4 for OAuth login trace ID.
+func newLoginTraceID() string {
+	var b [16]byte
+	rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10xx
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// newDeviceID generates a random 16-byte hex device ID.
+func newDeviceID() string {
+	return randomHex(16)
+}
+
+// newMachineID generates a random 16-byte hex machine ID.
+func newMachineID() string {
+	return randomHex(16)
+}
+
+func randomHex(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}

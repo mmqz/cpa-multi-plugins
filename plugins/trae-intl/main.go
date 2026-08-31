@@ -90,6 +90,20 @@ const (
         pluginLogoURL = ""
 
         loginTTL = 5 * time.Minute
+
+        // OAuth constants (Intl uses api.marscode.com, not api.trae.cn)
+        oauthLoginGuidanceURL = "https://api.marscode.com/cloudide/api/v3/trae/GetLoginGuidance"
+        oauthDefaultHost      = "https://api.marscode.com"
+        oauthAuthFrom         = "trae" // Intl non-SOLO uses "trae"
+        oauthPluginVersion    = "1.0.0"
+        oauthDeviceBrand      = "83DG"
+        oauthDeviceType       = "windows"
+        oauthOSVersion        = "Windows 11 Pro"
+        oauthEnv              = "prod"
+        oauthAppVersion       = "3.5.66"
+        oauthAppType          = "trae"
+        oauthPlatformCode     = "IDE_PC"
+        oauthDeviceName       = "DESKTOP-CPAINTL"
 )
 
 var version = "0.1.0"
@@ -488,171 +502,94 @@ func handleParseAuth(request []byte) ([]byte, error) {
 }
 
 func handleStartLogin(_ []byte) ([]byte, error) {
-        // Generate PKCE pair (code_verifier + code_challenge S256).
-        codeVerifier, codeChallenge := generatePKCEPair()
+	// Step 1: PKCE + login_trace_id.
+	loginTraceID := newLoginTraceID()
+	codeVerifier, codeChallenge := generatePKCEPair()
 
-        ln, err := net.Listen("tcp", "127.0.0.1:0")
-        if err != nil {
-                return nil, fmt.Errorf("allocate callback port: %w", err)
-        }
-        port := ln.Addr().(*net.TCPAddr).Port
-        guidanceURL := upstreamClient.OAuthHost + "/cloudide/api/v3/trae/GetLoginGuidance"
-        cbURL := fmt.Sprintf("http://127.0.0.1:%d/authorize", port)
-        body := map[string]any{
-                "ClientID":      upstreamClient.ClientID,
-                "RedirectUri":   cbURL,
-                "DeviceInfo":    map[string]any{"DeviceId": randomHex(16), "MachineId": randomHex(16)},
-                "IDEVersion":    "3.5.66",
-                "CodeChallenge": codeChallenge,
-                "CodeVerifier":  codeVerifier,
-        }
-        bodyBytes, _ := json.Marshal(body)
-        req, err := http.NewRequest(http.MethodPost, guidanceURL, bytes.NewReader(bodyBytes))
-        if err != nil {
-                ln.Close()
-                return nil, err
-        }
-        req.Header.Set("Content-Type", "application/json")
-        req.Header.Set("User-Agent", "Trae/3.5.66")
-        resp, err := http.DefaultClient.Do(req)
-        if err != nil {
-                ln.Close()
-                return nil, fmt.Errorf("GetLoginGuidance failed: %w", err)
-        }
-        defer resp.Body.Close()
-        raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-        if resp.StatusCode >= 400 {
-                ln.Close()
-                return nil, fmt.Errorf("GetLoginGuidance upstream %d: %s", resp.StatusCode, truncate(string(raw), 200))
-        }
-        var env struct {
-                Result struct {
-                        LoginURL string `json:"LoginUrl"`
-                        State    string `json:"State"`
-                } `json:"Result"`
-        }
-        if err := json.Unmarshal(raw, &env); err != nil {
-                ln.Close()
-                return nil, fmt.Errorf("parse GetLoginGuidance: %w", err)
-        }
-        if env.Result.LoginURL == "" || env.Result.State == "" {
-                ln.Close()
-                return nil, fmt.Errorf("GetLoginGuidance: missing LoginURL or State")
-        }
-        // Append PKCE challenge to the verification URL's query string so the
-        // upstream OAuth server can validate the verifier on token exchange.
-        loginURL := appendPKCEParams(env.Result.LoginURL, codeChallenge)
-        state := env.Result.State
-        loginStates.Store(state, &loginCtx{
-                listener:      ln,
-                state:         state,
-                cbURL:         cbURL,
-                expires:       time.Now().Add(loginTTL),
-                codeVerifier:  codeVerifier,
-                codeChallenge: codeChallenge,
-        })
-        go acceptCallback(state)
-        return okEnvelope(pluginapi.AuthLoginStartResponse{
-                Provider:  providerName,
-                URL:       loginURL,
-                State:     state,
-                ExpiresAt: time.Now().Add(loginTTL).UTC(),
-                Metadata:  map[string]any{"logo": pluginLogoURL, "callback_url": cbURL},
-        })
-}
+	// Step 2: Allocate local callback port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, fmt.Errorf("allocate callback port: %w", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	cbURL := fmt.Sprintf("http://127.0.0.1:%d/authorize", port)
 
-// appendPKCEParams appends code_challenge + code_challenge_method=S256 to the
-// query string of the given login URL. It parses the URL, adds the params to
-// the existing query (preserving all other params), and re-encodes. If the URL
-// cannot be parsed, it appends the params naively as a fallback.
-func appendPKCEParams(loginURL, codeChallenge string) string {
-        if codeChallenge == "" {
-                return loginURL
-        }
-        if u, err := url.Parse(loginURL); err == nil {
-                q := u.Query()
-                q.Set("code_challenge", codeChallenge)
-                q.Set("code_challenge_method", "S256")
-                u.RawQuery = q.Encode()
-                return u.String()
-        }
-        // Fallback: naive append.
-        sep := "&"
-        if !strings.Contains(loginURL, "?") {
-                sep = "?"
-        }
-        return loginURL + sep + "code_challenge=" + urlEncode(codeChallenge) + "&code_challenge_method=S256"
-}
+	// Step 3: POST GetLoginGuidance (Intl uses api.marscode.com).
+	guidanceBody, _ := json.Marshal(map[string]any{
+		"loginTraceID":   loginTraceID,
+		"login_trace_id": loginTraceID,
+	})
+	req, err := http.NewRequest(http.MethodPost, oauthLoginGuidanceURL, bytes.NewReader(guidanceBody))
+	if err != nil {
+		ln.Close()
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Trae/"+oauthPluginVersion+" antigravity-cockpit-tools")
 
-type loginCtx struct {
-        listener      net.Listener
-        state         string
-        cbURL         string
-        expires       time.Time
-        authCode      string
-        codeVerifier  string
-        codeChallenge string
-        // Filled by acceptCallback when the user completes login.
-        refreshToken string
-        loginHost    string // for ExchangeToken (from callback or fallback)
-        err          error
-        done         chan struct{}
-}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("GetLoginGuidance failed: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		ln.Close()
+		return nil, fmt.Errorf("GetLoginGuidance upstream %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
 
-func acceptCallback(state string) {
-        v, ok := loginStates.Load(state)
-        if !ok {
-                return
-        }
-        lc := v.(*loginCtx)
-        lc.done = make(chan struct{})
-        defer close(lc.done)
-        ln := lc.listener
-        _ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(loginTTL))
-        conn, err := ln.Accept()
-        if err != nil {
-                // Accept failed (deadline exceeded or listener closed). Close the listener
-                // so it doesn't leak — janitor will also clean up the loginStates entry.
-                lc.err = fmt.Errorf("callback accept: %w", err)
-                lc.listener.Close()
-                return
-        }
-        defer conn.Close()
-        _ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-        buf := make([]byte, 16384)
-        n, _ := conn.Read(buf)
-        req := string(buf[:n])
-        // Parse the first HTTP request line: "GET /authorize?... HTTP/1.1".
-        // The first space-separated token is the HTTP method (GET); the path
-        // with query string is the second token. Trailing HTTP version (e.g.
-        // " HTTP/1.1") is trimmed via LastIndex(" ").
-        firstLine := req
-        if nl := strings.Index(req, "\r\n"); nl >= 0 {
-                firstLine = req[:nl]
-        }
-        sp := strings.Index(firstLine, " ")
-        if sp < 0 {
-                lc.err = fmt.Errorf("callback: malformed request line")
-                body := "<html><body><h2>Login failed</h2><p>malformed request</p></body></html>"
-                fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
-                        len(body), body)
-                return
-        }
-        rest := firstLine[sp+1:]
-        // Trim trailing HTTP version (e.g. " HTTP/1.1").
-        if sp2 := strings.LastIndex(rest, " "); sp2 >= 0 {
-                rest = rest[:sp2]
-        }
-        if q := strings.Index(rest, "?"); q >= 0 {
-                vals, _ := url.ParseQuery(rest[q+1:])
-                lc.authCode = vals.Get("authCode")
-                lc.codeVerifier = vals.Get("codeVerifier")
-                lc.refreshToken = vals.Get("refreshToken")
-                lc.loginHost = vals.Get("loginHost")
-        }
-        body := "<html><body><h2>Login successful</h2><p>You can close this window now.</p></body></html>"
-        fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
-                len(body), body)
+	// Step 4: Parse LoginHost.
+	loginHost := extractLoginHost(raw)
+	if loginHost == "" {
+		ln.Close()
+		return nil, fmt.Errorf("GetLoginGuidance: missing LoginHost (body=%s)", truncate(string(raw), 200))
+	}
+
+	// Step 5: Build verification URI with PKCE.
+	deviceID := newDeviceID()
+	machineID := newMachineID()
+	verificationURI := buildVerificationURI(loginHost, verificationURIParams{
+		AuthFrom:      oauthAuthFrom,
+		PluginVersion: oauthPluginVersion,
+		ClientID:      upstreamClient.ClientID,
+		LoginTraceID:  loginTraceID,
+		CallbackURL:   cbURL,
+		MachineID:     machineID,
+		DeviceID:      deviceID,
+		DeviceBrand:   oauthDeviceBrand,
+		DeviceType:    oauthDeviceType,
+		OSVersion:     oauthOSVersion,
+		Env:           oauthEnv,
+		AppVersion:    oauthAppVersion,
+		AppType:       oauthAppType,
+		CodeChallenge: codeChallenge,
+		HideSaasLogin: false, // Intl non-SOLO does not hide SaaS login
+	})
+
+	// Step 6: Store login state.
+	loginStates.Store(loginTraceID, &loginCtx{
+		listener:     ln,
+		state:        loginTraceID,
+		cbURL:        cbURL,
+		expires:      time.Now().Add(loginTTL),
+		loginTraceID: loginTraceID,
+		codeVerifier: codeVerifier,
+		codeChallenge: codeChallenge,
+		deviceID:     deviceID,
+		machineID:    machineID,
+	})
+
+	go acceptCallback(loginTraceID)
+
+	return okEnvelope(pluginapi.AuthLoginStartResponse{
+		Provider:  providerName,
+		URL:       verificationURI,
+		State:     loginTraceID,
+		ExpiresAt: time.Now().Add(loginTTL).UTC(),
+		Metadata:  map[string]any{"logo": pluginLogoURL, "callback_url": cbURL},
+	})
 }
 
 func handlePollLogin(request []byte) ([]byte, error) {
@@ -989,8 +926,177 @@ func normalizeExpiresAt(v int64) int64 {
         return v
 }
 
-func randomHex(n int) string {
-        b := make([]byte, n)
-        _, _ = readRand(b)
-        return hexEncode(b)
+
+// extractLoginHost extracts LoginHost from GetLoginGuidance response.
+func extractLoginHost(raw []byte) string {
+	var probe struct {
+		Result struct {
+			LoginHost string `json:"LoginHost"`
+			LoginURL  string `json:"LoginURL"`
+		} `json:"Result"`
+		Result2 struct {
+			LoginHost string `json:"loginHost"`
+			LoginURL  string `json:"loginUrl"`
+		} `json:"result"`
+		Data struct {
+			Result struct {
+				LoginHost string `json:"LoginHost"`
+			} `json:"Result"`
+		} `json:"data"`
+		LoginHost string `json:"LoginHost"`
+		LoginURL  string `json:"loginUrl"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return ""
+	}
+	if probe.Result.LoginHost != "" {
+		return probe.Result.LoginHost
+	}
+	if probe.Result2.LoginHost != "" {
+		return probe.Result2.LoginHost
+	}
+	if probe.Result.LoginURL != "" {
+		return probe.Result.LoginURL
+	}
+	if probe.Result2.LoginURL != "" {
+		return probe.Result2.LoginURL
+	}
+	if probe.Data.Result.LoginHost != "" {
+		return probe.Data.Result.LoginHost
+	}
+	if probe.LoginHost != "" {
+		return probe.LoginHost
+	}
+	return probe.LoginURL
+}
+
+// verificationURIParams holds parameters for building the OAuth verification URL.
+type verificationURIParams struct {
+	AuthFrom       string
+	PluginVersion  string
+	ClientID       string
+	LoginTraceID   string
+	CallbackURL    string
+	MachineID      string
+	DeviceID       string
+	DeviceBrand    string
+	DeviceType     string
+	OSVersion      string
+	Env            string
+	AppVersion     string
+	AppType        string
+	CodeChallenge  string
+	HideSaasLogin  bool
+}
+
+// buildVerificationURI constructs the browser-facing OAuth URL.
+func buildVerificationURI(loginHost string, p verificationURIParams) string {
+	if !strings.HasPrefix(loginHost, "http") {
+		loginHost = "https://" + loginHost
+	}
+	u, err := url.Parse(loginHost)
+	if err != nil {
+		return loginHost
+	}
+	u.Path = "/authorization"
+	q := u.Query()
+	q.Set("login_version", "1")
+	q.Set("auth_from", p.AuthFrom)
+	q.Set("login_channel", "native_ide")
+	q.Set("plugin_version", p.PluginVersion)
+	q.Set("auth_type", "local")
+	q.Set("client_id", p.ClientID)
+	q.Set("redirect", "0")
+	q.Set("login_trace_id", p.LoginTraceID)
+	q.Set("auth_callback_url", p.CallbackURL)
+	q.Set("machine_id", p.MachineID)
+	q.Set("device_id", p.DeviceID)
+	q.Set("x_device_id", p.DeviceID)
+	q.Set("x_machine_id", p.MachineID)
+	q.Set("x_device_brand", p.DeviceBrand)
+	q.Set("x_device_type", p.DeviceType)
+	q.Set("x_os_version", p.OSVersion)
+	q.Set("x_env", p.Env)
+	q.Set("x_app_version", p.AppVersion)
+	q.Set("x_app_type", p.AppType)
+	q.Set("code_challenge", p.CodeChallenge)
+	q.Set("code_challenge_method", "S256")
+	if p.HideSaasLogin {
+		q.Set("hide_saas_login", "true")
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// writeCallbackHTML writes a success/failure HTML page to the HTTP response.
+func writeCallbackHTML(conn net.Conn, title, msg string) {
+	body := fmt.Sprintf("<html><body><h2>%s</h2><p>%s</p></body></html>", title, msg)
+	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		len(body), body)
+}
+
+// loginCtx holds the local callback listener for one in-flight OAuth flow.
+type loginCtx struct {
+	listener     net.Listener
+	state        string
+	cbURL        string
+	expires      time.Time
+	loginTraceID string
+	codeVerifier string
+	codeChallenge string
+	deviceID     string
+	machineID    string
+	loginHost    string
+	authCode     string
+	err          error
+	done         chan struct{}
+}
+
+// acceptCallback accepts the OAuth callback from the browser.
+func acceptCallback(state string) {
+	v, ok := loginStates.Load(state)
+	if !ok {
+		return
+	}
+	lc := v.(*loginCtx)
+	lc.done = make(chan struct{})
+	defer close(lc.done)
+
+	ln := lc.listener
+	_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(loginTTL))
+	conn, err := ln.Accept()
+	if err != nil {
+		lc.err = fmt.Errorf("callback accept: %w", err)
+		lc.listener.Close()
+		return
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	buf := make([]byte, 16384)
+	n, _ := conn.Read(buf)
+	req := string(buf[:n])
+	// Parse "GET /authorize?... HTTP/1.1"
+	firstLine := req
+	if nl := strings.Index(req, "\r\n"); nl >= 0 {
+		firstLine = req[:nl]
+	}
+	sp := strings.Index(firstLine, " ")
+	if sp < 0 {
+		lc.err = fmt.Errorf("callback: malformed request line")
+		writeCallbackHTML(conn, "Login failed", "malformed request")
+		return
+	}
+	rest := firstLine[sp+1:]
+	if sp2 := strings.LastIndex(rest, " "); sp2 >= 0 {
+		rest = rest[:sp2]
+	}
+	vals := url.Values{}
+	if q := strings.Index(rest, "?"); q >= 0 {
+		vals, _ = url.ParseQuery(rest[q+1:])
+	}
+	lc.authCode = vals.Get("authCode")
+	lc.loginHost = vals.Get("loginHost")
+	body := "<html><body><h2>Login successful</h2><p>You can close this window now.</p></body></html>"
+	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		len(body), body)
 }
