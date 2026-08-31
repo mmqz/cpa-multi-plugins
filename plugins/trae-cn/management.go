@@ -1,13 +1,13 @@
-// management.go implements the Trae CN (Trae Code CN) management API and web
-// panel: the account dashboard (uid, nickname, credits, plan, check-in status),
+// management.go implements the Trae SOLO CN management API and web panel:
+// the account dashboard (uid, nickname, credits, plan, check-in status),
 // manual check-in (single or all accounts), credit query, token refresh,
 // and the account-pool status (cooling / disabled state).
 //
 // Routes are exposed under two prefixes:
-//   - /v0/management/plugins/trae-cn/*  — JSON endpoints (CPA-management-
+//   - /v0/management/plugins/trae-solo-cn/*  — JSON endpoints (CPA-management-
 //     authenticated by host middleware; plugin-layer auth only kicks in when
 //     management_key is configured).
-//   - /v0/resource/plugins/trae-cn/*    — unauthenticated browser UI
+//   - /v0/resource/plugins/trae-solo-cn/*    — unauthenticated browser UI
 //     (panel.html) and menu entries surfaced in the CPA management UI.
 //
 // The contract follows workbuddy/management.go: handleManagement returns an
@@ -78,21 +78,21 @@ func setManagementBasePath(p string) {
 }
 
 // managementRegistration describes the routes + resources this plugin serves.
-// Paths are registered relative to /plugins/trae-cn — the host prepends
+// Paths are registered relative to /plugins/trae-solo-cn — the host prepends
 // either /v0/management or /v0/resource/plugins/<provider> based on which list
 // they appear in (Routes vs Resources).
 func managementRegistration() managementRegistrationResponse {
         base := "/plugins/" + providerName
         return managementRegistrationResponse{
                 Routes: []managementRoute{
-                        {Method: http.MethodGet, Path: base + "/accounts", Description: "List Trae CN accounts with credits, plan, and check-in status."},
+                        {Method: http.MethodGet, Path: base + "/accounts", Description: "List Trae SOLO CN accounts with credits, plan, and check-in status."},
                         {Method: http.MethodPost, Path: base + "/checkin", Description: "Manually check in one account (auth_index) or all accounts."},
                         {Method: http.MethodGet, Path: base + "/credits", Description: "Get real-time credits for one (auth_index query) or all accounts."},
                         {Method: http.MethodPost, Path: base + "/refresh", Description: "Force refresh access tokens + credits for all accounts."},
                         {Method: http.MethodGet, Path: base + "/status", Description: "Account-pool state: cooling / disabled reasons per account."},
                 },
                 Resources: []resourceRoute{
-                        {Path: "/panel", Menu: "Trae CN", Description: "Trae Code CN dashboard: credits, check-in, accounts."},
+                        {Path: "/panel", Menu: "Trae SOLO CN", Description: "Trae Work CN dashboard: credits, check-in, accounts."},
                 },
         }
 }
@@ -205,7 +205,7 @@ type traeCheckin struct {
         Enable    bool  `json:"enable"`
 }
 
-// buildDashboard aggregates every Trae CN credential from the host auth
+// buildDashboard aggregates every Trae SOLO CN credential from the host auth
 // store, plus a snapshot of credits / checkin status from the account cache
 // (or live upstream if the cache is stale).
 func buildDashboard() map[string]any {
@@ -287,7 +287,7 @@ type rpcHostAuthGetResponse struct {
         JSON      json.RawMessage `json:"json"`
 }
 
-// hostAuthList returns all Trae CN credentials known to the host. We
+// hostAuthList returns all Trae SOLO CN credentials known to the host. We
 // filter by filename prefix because some legacy auth files don't carry a
 // "type"/"provider" field (pre-config-convention files).
 func hostAuthList() ([]pluginapi.HostAuthFileEntry, error) {
@@ -358,7 +358,7 @@ func hostAuthGet(authIndex string) (*storedAuth, error) {
 }
 
 // hostAuthAsUpstream converts the host-stored nested shape into the upstream
-// *auth.Auth the trae-cn upstream client expects.
+// *auth.Auth the trae-solo-cn upstream client expects.
 func hostAuthAsUpstream(sa *storedAuth) *auth.Auth {
         return &auth.Auth{
                 AccessToken:  sa.Auth.AccessToken,
@@ -451,11 +451,18 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 // or all accounts. Updates the cache so the next /accounts reflects the new
 // numbers.
 func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
-        var body struct {
-                AuthIndex string `json:"auth_index"`
+        // Read auth_index from query string (?auth_index=xxx) first, then body JSON.
+        // panel.html uses GET /credits?auth_index=xxx, so req.Query is the primary source.
+        authIndex := ""
+        if req.Query != nil {
+                authIndex = strings.TrimSpace(req.Query.Get("auth_index"))
         }
-        if len(req.Body) > 0 {
+        if authIndex == "" && len(req.Body) > 0 {
+                var body struct {
+                        AuthIndex string `json:"auth_index"`
+                }
                 _ = json.Unmarshal(req.Body, &body)
+                authIndex = body.AuthIndex
         }
         results := []map[string]any{}
 
@@ -464,7 +471,7 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
                 return map[string]any{"error": err.Error()}
         }
         for _, f := range files {
-                if body.AuthIndex != "" && f.AuthIndex != body.AuthIndex {
+                if authIndex != "" && f.AuthIndex != authIndex {
                         continue
                 }
                 entry := map[string]any{"auth_index": f.AuthIndex, "uid": "", "nickname": ""}

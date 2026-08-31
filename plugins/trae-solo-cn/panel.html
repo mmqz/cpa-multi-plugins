@@ -420,7 +420,15 @@ async function api(path, opts={}){
     throw new Error(body.trim()||"禁止访问 (403)");
   }
   authFailCount=0;
-  return r.json();
+  const text=await r.text();
+  if(!text){
+    throw new Error(`空响应 (${r.status}) — 路由可能未注册或上游返回空`);
+  }
+  try{
+    return JSON.parse(text);
+  }catch(e){
+    throw new Error(`JSON 解析失败 (${r.status}): ${text.slice(0,100)}`);
+  }
 }
 async function loadPoolStatus(){
   // Fetch /status to merge cooling/disabled badges into cards.

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Trae CN 面板</title>
+<title>Trae SOLO CN 面板</title>
 <style>
 /* Theme tokens aligned with CPA management panel (key-policy / themes.scss):
    default :root = light (paper); data-theme=white | dark; embedded iframe syncs parent.
@@ -142,10 +142,10 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
 </head>
 <body>
 <div class="wrap">
-  <h1 id="title">Trae CN 账号面板</h1>
-  <div class="sub">积分余额 · 每日签到（09:00）· Token 刷新（03:00）· 多账号轮询（积分降序 + 4 档冷却）</div>
+  <h1 id="title">Trae SOLO CN 账号面板</h1>
+  <div class="sub">积分余额 · 每日签到（09:00）· Token 刷新（03:00）· 多账号轮询（积分降序 + 4 档冷却）· llm_utils_chat + solo_work_lite</div>
   <div id="authBox" class="card" style="display:none;margin-bottom:16px">
-    <div style="margin-bottom:8px;color:var(--mut)">Trae CN 插件本身不强制 management key；当 CPA 主面板要求鉴权时，从嵌入环境自动获取。若自动获取失败，可在此手动粘贴 management key（仅存 sessionStorage）。</div>
+    <div style="margin-bottom:8px;color:var(--mut)">Trae SOLO CN 插件本身不强制 management key；当 CPA 主面板要求鉴权时，从嵌入环境自动获取。若自动获取失败，可在此手动粘贴 management key（仅存 sessionStorage）。</div>
     <div style="display:flex;gap:8px">
       <input id="keyInput" type="password" placeholder="management key（可选）" class="field-input">
       <button onclick="saveKey()">连接</button>
@@ -169,7 +169,7 @@ const providerName = (function(){
   // /plugins/<provider>/panel              →  parts[1]
   if(parts.length>=4 && parts[0]==="v0" && parts[1]==="resource" && parts[2]==="plugins") return parts[3];
   if(parts.length>=2 && parts[0]==="plugins") return parts[1];
-  return "trae-cn";
+  return "trae-solo-cn";
 })();
 const API = "/v0/management/plugins/" + providerName;
 document.getElementById("title").textContent =
@@ -420,7 +420,15 @@ async function api(path, opts={}){
     throw new Error(body.trim()||"禁止访问 (403)");
   }
   authFailCount=0;
-  return r.json();
+  const text=await r.text();
+  if(!text){
+    throw new Error(`空响应 (${r.status}) — 路由可能未注册或上游返回空`);
+  }
+  try{
+    return JSON.parse(text);
+  }catch(e){
+    throw new Error(`JSON 解析失败 (${r.status}): ${text.slice(0,100)}`);
+  }
 }
 async function loadPoolStatus(){
   // Fetch /status to merge cooling/disabled badges into cards.

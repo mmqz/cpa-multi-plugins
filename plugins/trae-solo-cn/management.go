@@ -451,11 +451,18 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 // or all accounts. Updates the cache so the next /accounts reflects the new
 // numbers.
 func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
-        var body struct {
-                AuthIndex string `json:"auth_index"`
+        // Read auth_index from query string (?auth_index=xxx) first, then body JSON.
+        // panel.html uses GET /credits?auth_index=xxx, so req.Query is the primary source.
+        authIndex := ""
+        if req.Query != nil {
+                authIndex = strings.TrimSpace(req.Query.Get("auth_index"))
         }
-        if len(req.Body) > 0 {
+        if authIndex == "" && len(req.Body) > 0 {
+                var body struct {
+                        AuthIndex string `json:"auth_index"`
+                }
                 _ = json.Unmarshal(req.Body, &body)
+                authIndex = body.AuthIndex
         }
         results := []map[string]any{}
 
@@ -464,7 +471,7 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
                 return map[string]any{"error": err.Error()}
         }
         for _, f := range files {
-                if body.AuthIndex != "" && f.AuthIndex != body.AuthIndex {
+                if authIndex != "" && f.AuthIndex != authIndex {
                         continue
                 }
                 entry := map[string]any{"auth_index": f.AuthIndex, "uid": "", "nickname": ""}
