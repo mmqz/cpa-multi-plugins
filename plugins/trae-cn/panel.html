@@ -3,71 +3,622 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Trae CN Dashboard</title>
+<title>Trae CN 面板</title>
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0d1117;color:#c9d1d9;padding:20px}
-h1{font-size:24px;margin-bottom:16px;color:#58a6ff}
-.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:12px}
-.card h2{font-size:16px;margin-bottom:8px;color:#f0f6fc}
-.info{font-size:14px;line-height:1.6;color:#8b949e}
-.info code{background:#21262d;padding:2px 6px;border-radius:4px;color:#f0883e}
-.btn{display:inline-block;padding:6px 16px;background:#238636;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:14px;margin-right:8px}
-.btn:hover{background:#2ea043}
-.btn:disabled{background:#21262d;color:#8b949e;cursor:not-allowed}
-.status{font-size:12px;padding:2px 8px;border-radius:12px;display:inline-block}
-.status.ok{background:#1a7f37;color:#fff}
-.status.warn{background:#9e6a03;color:#fff}
-.status.err{background:#cf222e;color:#fff}
+/* Theme tokens aligned with CPA management panel (key-policy / themes.scss):
+   default :root = light (paper); data-theme=white | dark; embedded iframe syncs parent.
+   Mirrors workbuddy/panel.html so the trae panels share the same look-and-feel. */
+:root{
+  --bg:#faf9f5;--card:#ffffff;--border:#e3e1db;--fg:#2d2a26;--mut:#6d6760;
+  --acc:#4c8dff;--on-acc:#ffffff;--ok:#10b981;--warn:#e0aa14;--err:#c65746;
+  --surface:#f0eee8;--surface-muted:#e9e6df;--btn-sec:#eef1f6;--btn-sec-hover:#e4e8ef;
+  --input-bg:#ffffff;--code-bg:#f3f4f6;--code-fg:#374151;--placeholder:rgba(109,103,96,.55);
+  --ok-soft:rgba(16,185,129,.10);--ok-border:rgba(16,185,129,.30);
+  --warn-soft:rgba(224,170,20,.12);--warn-border:rgba(224,170,20,.32);
+  --err-soft:rgba(198,87,70,.10);--err-border:rgba(198,87,70,.30);
+  --mut-soft:rgba(109,103,96,.12);--mut-border:rgba(109,103,96,.28);
+  --scrim:rgba(45,42,38,.35);--toast-shadow:0 10px 28px rgba(0,0,0,.12),0 0 0 1px rgba(0,0,0,.04);
+  --acc-ring:rgba(76,141,255,.18);--radius-md:12px;--radius-lg:16px;
+  color-scheme:light
+}
+:root[data-theme="white"]{
+  --bg:#f5f5f5;--card:#ffffff;--border:#e6e6e6;--fg:#1f1f1f;--mut:#707070;
+  --surface:#fafafa;--surface-muted:#efefef;--btn-sec:#f0f0f0;--btn-sec-hover:#e8e8e8;
+  --input-bg:#ffffff;--code-bg:#f3f4f6;--code-fg:#374151;--placeholder:rgba(112,112,112,.55);
+  --scrim:rgba(0,0,0,.32);--toast-shadow:0 10px 28px rgba(0,0,0,.10),0 0 0 1px rgba(0,0,0,.04);
+  color-scheme:light
+}
+:root[data-theme="dark"]{
+  --bg:#1e1d1b;--card:#26241f;--border:#3a3833;--fg:#ede9e3;--mut:#9a948c;
+  --acc:#4c8dff;--on-acc:#ffffff;--ok:#34d399;--warn:#f0c050;--err:#e07a6a;
+  --surface:#2f2d28;--surface-muted:#35332e;--btn-sec:#35332e;--btn-sec-hover:#3f3c36;
+  --input-bg:#1e1d1b;--code-bg:#35332e;--code-fg:#d6d1c9;--placeholder:rgba(154,148,140,.55);
+  --ok-soft:rgba(52,211,153,.12);--ok-border:rgba(52,211,153,.38);
+  --warn-soft:rgba(240,192,80,.14);--warn-border:rgba(240,192,80,.38);
+  --err-soft:rgba(224,122,106,.12);--err-border:rgba(224,122,106,.38);
+  --mut-soft:rgba(154,148,140,.16);--mut-border:rgba(154,148,140,.32);
+  --scrim:rgba(0,0,0,.55);--toast-shadow:0 10px 28px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.03);
+  --acc-ring:rgba(76,141,255,.28);
+  color-scheme:dark
+}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:24px 16px}
+h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);font-size:13px;margin-bottom:20px}
+.bar{display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+button{background:var(--acc);color:var(--on-acc);border:0;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:13px}
+button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background:var(--btn-sec-hover)}button:disabled{opacity:.5;cursor:default}
+.toggle{display:flex;gap:8px;align-items:center;color:var(--mut);font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+.card,.summary{background:var(--card);border:1px solid var(--border);border-radius:12px}
+.card{padding:16px}
+.card h2{font-size:15px;margin:0 0 2px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.uid{color:var(--mut);font-size:11px;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:12px}
+.badge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:99px;background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok-border)}
+.badge.exhausted{background:var(--err-soft);color:var(--err);border:1px solid var(--err-border)}
+.badge.pro{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn-border)}
+.badge.cooling{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn-border)}
+.badge.disabled{background:var(--mut-soft);color:var(--mut);border:1px solid var(--mut-border)}
+.badge.checked{background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok-border)}
+.summary{padding:16px;margin-bottom:14px}
+.summary-hd{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.summary-title{font-weight:700;font-size:14px}
+.summary-meta{color:var(--mut);font-size:12px}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:10px}
+.summary-item{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px}
+.summary-item .k{color:var(--mut);font-size:11px;margin-bottom:4px}
+.summary-item .v{font-size:18px;font-weight:700}
+.summary-item .v.ok{color:var(--ok)}
+.summary-item .v.warn{color:var(--warn)}
+.summary-item .v.err{color:var(--err)}
+.row{display:flex;justify-content:space-between;padding:5px 0;border-top:1px dashed var(--border)}
+.row:first-of-type{border-top:0}.k{color:var(--mut)}.v{font-weight:600}
+.v.ok{color:var(--ok)}.v.warn{color:var(--warn)}.v.err{color:var(--err)}
+.pb{margin-top:10px}
+.pb-label{display:flex;justify-content:space-between;font-size:12px;color:var(--mut);margin-bottom:6px}
+.pb-track{height:8px;background:var(--surface-muted);border-radius:99px;overflow:hidden}
+.pb-bar{height:100%;background:var(--ok);border-radius:99px;transition:width .6s ease}
+.pb-meta{font-size:11px;color:var(--mut);margin-top:6px}
+.actions{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap}
+.field-input{flex:1;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--fg)}
+.toasts{position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:10px;z-index:9999;max-width:360px}
+.toast{background:var(--card);border:1px solid var(--border);border-left:4px solid var(--acc);border-radius:var(--radius-md);padding:14px 18px;font-size:13px;box-shadow:var(--toast-shadow);transform:translateX(120%);opacity:0;transition:transform .3s cubic-bezier(.2,.9,.3,1.1),opacity .25s;cursor:pointer;word-break:break-all}
+.toast.show{transform:translateX(0);opacity:1}
+.toast.ok{border-left-color:var(--ok);background:var(--ok-soft)}
+.toast.warn{border-left-color:var(--warn);background:var(--warn-soft)}
+.toast.err{border-left-color:var(--err);background:var(--err-soft)}
+button.done{background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok-border);cursor:default;opacity:1}
+button.done:disabled{opacity:1}
+.toast .t{font-weight:600;margin-bottom:3px}
+.toast .d{color:var(--mut);font-size:12px;line-height:1.45}
+.spin{display:inline-block;width:12px;height:12px;border:2px solid var(--on-acc);border-top-color:transparent;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px;margin-right:6px}
+@keyframes sp{to{transform:rotate(360deg)}}
+button .spin{border-color:var(--on-acc);border-top-color:transparent}
+.loading{color:var(--mut);text-align:center;padding:40px}
 </style>
+<script>
+/* Early theme sync (before body paint): mirror CPA parent data-theme when
+   embedded; standalone falls back to prefers-color-scheme. Same semantics as
+   workbuddy/panel.html / cpa-plugin-key-policy themeSync. */
+(function(){
+  var ATTR="data-theme";
+  function embedded(){try{return window.self!==window.top}catch(e){return false}}
+  function apply(t){
+    var el=document.documentElement;
+    if(t==="white"||t==="dark")el.setAttribute(ATTR,t);
+    else el.removeAttribute(ATTR);
+  }
+  function parentTheme(){
+    if(!embedded())return null;
+    try{
+      var raw=window.parent.document.documentElement.getAttribute(ATTR);
+      if(raw==="white"||raw==="dark")return raw;
+      return "light";
+    }catch(e){return null}
+  }
+  function systemTheme(){
+    try{return window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"}catch(e){return "light"}
+  }
+  function sync(){apply(parentTheme()||systemTheme())}
+  sync();
+  window.__traeThemeSync=function(){
+    sync();
+    if(!embedded()){
+      try{
+        var mq=window.matchMedia("(prefers-color-scheme: dark)");
+        var on=function(){sync()};
+        if(mq.addEventListener)mq.addEventListener("change",on);
+        else if(mq.addListener)mq.addListener(on);
+      }catch(e){}
+      return;
+    }
+    try{
+      var parentEl=window.parent.document.documentElement;
+      new MutationObserver(sync).observe(parentEl,{attributes:true,attributeFilter:[ATTR]});
+      window.addEventListener("storage",function(e){if(e.key==="cli-proxy-theme")sync()});
+    }catch(e){}
+  };
+})();
+</script>
 </head>
 <body>
-<h1 id="title">Trae CN</h1>
-<div class="card">
-<h2>插件信息</h2>
-<div class="info">
-<p>Provider: <code id="provider">-</code></p>
-<p>版本: <code id="version">-</code></p>
-<p>协议: <code id="proto">llm_utils_chat + inline_chat</code></p>
-<p>签到: <span class="status ok">已启用 (09:00)</span></p>
-<p>Token 刷新: <span class="status ok">已启用 (03:00)</span></p>
+<div class="wrap">
+  <h1 id="title">Trae CN 账号面板</h1>
+  <div class="sub">积分余额 · 每日签到（09:00）· Token 刷新（03:00）· 多账号轮询（积分降序 + 4 档冷却）</div>
+  <div id="authBox" class="card" style="display:none;margin-bottom:16px">
+    <div style="margin-bottom:8px;color:var(--mut)">Trae CN 插件本身不强制 management key；当 CPA 主面板要求鉴权时，从嵌入环境自动获取。若自动获取失败，可在此手动粘贴 management key（仅存 sessionStorage）。</div>
+    <div style="display:flex;gap:8px">
+      <input id="keyInput" type="password" placeholder="management key（可选）" class="field-input">
+      <button onclick="saveKey()">连接</button>
+    </div>
+  </div>
+  <div class="bar">
+    <button id="refreshBtn" onclick="load(true,this)">刷新数据</button>
+    <button class="sec" onclick="checkinAll(this)">全部签到</button>
+    <span class="toggle" id="svtime"></span>
+  </div>
+  <div class="summary card" id="summaryBox" style="display:none"></div>
+  <div id="grid" class="grid"><div class="loading">加载中…</div></div>
 </div>
-</div>
-<div class="card">
-<h2>使用说明</h2>
-<div class="info">
-<p>1. 在 CPA Management 面板点击「登录」按钮触发 OAuth</p>
-<p>2. 浏览器会打开 Trae CN 登录页面</p>
-<p>3. 登录完成后回调本地端口，自动获取 token</p>
-<p>4. Token 自动刷新（24h skew + 每天 03:00 全量）</p>
-<p>5. 每天 09:00 自动签到领取积分</p>
-<p>6. 多账号轮询（积分降序挑选 + 4 档 cooldown）</p>
-</div>
-</div>
-<div class="card">
-<h2>API 端点</h2>
-<div class="info">
-<p>Chat: <code>POST /v1/chat/completions</code></p>
-<p>Models: <code>GET /v1/models</code></p>
-<p>管理 API: <code>/v0/management/plugins/trae-cn/*</code></p>
-</div>
-</div>
-<div class="card">
-<h2>已知限制</h2>
-<div class="info">
-<p>• DevicePublicKey 为空字符串（简化实现，未生成 ECDSA P-256 key pair）</p>
-<p>• 如 Trae 后端要求 device key proof，可能需要升级</p>
-<p>• 9074 限流会自动跳过本轮，下一轮重试</p>
-</div>
-</div>
+<div class="toasts" id="toasts"></div>
 <script>
-const PROVIDER = window.location.pathname.split('/')[4] || 'trae-cn';
-document.getElementById('provider').textContent = PROVIDER;
-document.getElementById('version').textContent = 'v0.2.1';
-if (PROVIDER === 'trae-solo-cn') {
-  document.getElementById('title').textContent = 'Trae Work CN / SOLO CN';
-  document.getElementById('proto').textContent = 'llm_utils_chat + solo_work_lite';
+/* providerName: derived from URL (/v0/resource/plugins/<provider>/panel) so the
+   same compiled panel.html works for trae-cn and trae-solo-cn. */
+const providerName = (function(){
+  const parts = window.location.pathname.split('/').filter(Boolean);
+  // /v0/resource/plugins/<provider>/panel  →  parts[3]
+  // /plugins/<provider>/panel              →  parts[1]
+  if(parts.length>=4 && parts[0]==="v0" && parts[1]==="resource" && parts[2]==="plugins") return parts[3];
+  if(parts.length>=2 && parts[0]==="plugins") return parts[1];
+  return "trae-cn";
+})();
+const API = "/v0/management/plugins/" + providerName;
+document.getElementById("title").textContent =
+  providerName==="trae-solo-cn" ? "Trae SOLO CN 账号面板" :
+  providerName==="trae-cn"      ? "Trae CN 账号面板"     :
+  (providerName + " 账号面板");
+
+/* ---------- management key acquisition (3 fallbacks, zero config) ----------
+   1) CPA main panel localStorage "cli-proxy-auth" (XOR+base64, same-origin
+      iframe embed) — same approach as cpa-plugin-key-policy / workbuddy.
+   2) ?key= URL param (cleaned from history after read, kept in sessionStorage).
+   3) Manual input (sessionStorage only, never persisted).
+   NOTE: trae-* plugins do not enforce a plugin-layer key (no checkManagementAuth),
+   so the panel attempts every call with whatever key it has — the host CPA
+   middleware is the actual guard. On 401 we surface the manual input box. */
+const ENC_PREFIX = "enc::v1::";
+const SECRET_SALT = "cli-proxy-api-webui::secure-storage";
+const PANEL_STORE = "cli-proxy-auth";
+const SS_KEY = providerName + "-mgmt-key";
+
+function _enc(t){return new TextEncoder().encode(t)}
+function _dec(b){return new TextDecoder().decode(b)}
+function _keyBytes(){try{return _enc(SECRET_SALT+"|"+window.location.host+"|"+navigator.userAgent)}catch(e){return _enc(SECRET_SALT)}}
+function _xor(d,k){const r=new Uint8Array(d.length);for(let i=0;i<d.length;i++)r[i]=d[i]^k[i%k.length];return r}
+function _b64e(b){let s="";for(let i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);return btoa(s)}
+function _b64d(s){const bin=atob(s);const b=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)b[i]=bin.charCodeAt(i);return b}
+function deobfuscate(p){if(!p||!p.startsWith(ENC_PREFIX))return p;try{return _dec(_xor(_b64d(p.slice(ENC_PREFIX.length)),_keyBytes()))}catch(e){return p}}
+function isEmbedded(){try{return window.self!==window.top}catch(e){return false}}
+
+function readPanelKey(){
+  if(!isEmbedded())return null;
+  let raw;try{raw=localStorage.getItem(PANEL_STORE)}catch(e){return null}
+  if(!raw)return null;
+  try{
+    const parsed=JSON.parse(deobfuscate(raw));
+    const st=(parsed&&parsed.state)||parsed||{};
+    return typeof st.managementKey==="string"&&st.managementKey?st.managementKey:null;
+  }catch(e){return null}
 }
+function readUrlKey(){
+  const m=new URLSearchParams(window.location.search).get("key");
+  if(m){history.replaceState(null,"",window.location.pathname)}
+  return m;
+}
+function getKey(){
+  return sessionStorage.getItem(SS_KEY)||readPanelKey()||readUrlKey();
+}
+function saveKey(){
+  const v=document.getElementById("keyInput").value.trim();
+  if(!v)return;
+  sessionStorage.setItem(SS_KEY,v);
+  document.getElementById("authBox").style.display="none";
+  load(false);
+}
+function showAuth(){document.getElementById("authBox").style.display="block";const i=document.getElementById("keyInput");i&&i.focus()}
+function authHeaders(k){return k?{"Authorization":"Bearer "+k}:{}}
+/* --------------------------------------------------------------------------- */
+
+function toast(title, kind="ok", detail=""){
+  const box=document.getElementById("toasts");
+  const el=document.createElement("div");
+  el.className="toast "+kind;
+  el.innerHTML='<div class="t"></div>'+(detail?'<div class="d"></div>':'');
+  el.querySelector(".t").textContent=title;
+  if(detail)el.querySelector(".d").textContent=detail;
+  box.appendChild(el);
+  requestAnimationFrame(()=>requestAnimationFrame(()=>el.classList.add("show")));
+  const kill=()=>{el.classList.remove("show");setTimeout(()=>el.remove(),300)};
+  el.onclick=kill;
+  setTimeout(kill, kind==="err"?6000:4000);
+  while(box.children.length>5)box.firstChild.remove();
+}
+function busy(btn, on){
+  if(!btn)return;
+  if(on){btn.dataset.orig=btn.innerHTML;btn.disabled=true;btn.innerHTML='<span class="spin"></span>处理中…'}
+  else{btn.disabled=false;if(btn.dataset.orig)btn.innerHTML=btn.dataset.orig}
+}
+function markCheckinDone(btn){
+  if(!btn)return;
+  btn.disabled=true;
+  btn.className="done";
+  btn.innerHTML="已签到";
+  btn.dataset.orig="已签到";
+}
+function esc(s){return (s==null?"":String(s)).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function escAttr(s){return esc(s)}
+
+/* Plan-name → reference quota (rough, for progress-bar visualization only).
+   The actual remaining number is always shown next to the bar. */
+const PLAN_REF = {
+  cnexpress:20000, ultra:10000, "pro+":5000, pro:2000, lite:500, free:200, trial:2000
+};
+function progressHTML(cr){
+  // trae credits object: { total_remain, plan, fetched_at } — no used/size.
+  // We render "remaining" (not "consumed") since upstream only exposes remain.
+  if(!cr || (cr.total_remain==null && !cr.plan)){
+    return '<div class="pb"><div class="pb-label"><span>剩余积分</span><span class="spin"></span>加载中…</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
+  }
+  const remain=Number(cr.total_remain)||0;
+  const plan=String(cr.plan||"").toLowerCase();
+  const ref=PLAN_REF[plan]||1000;
+  const pct=Math.max(0,Math.min(100,Math.round(remain/ref*100)));
+  let color='var(--ok)'; if(pct<30)color='var(--warn)'; if(pct<10||remain===0)color='var(--err)';
+  const when=cr.fetched_at?` · 快照 ${esc(String(cr.fetched_at).replace('T',' ').replace('Z',' UTC'))}`:'';
+  return `<div class="pb"><div class="pb-label"><span>剩余 ${remain}</span><span>${pct}%</span></div><div class="pb-track"><div class="pb-bar" style="width:${pct}%;background:${color}"></div></div><div class="pb-meta">剩余 ${remain} 积分 · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
+}
+
+let lastAccounts=[];
+let poolByUID={}; // uid → pool.Status (cooling/disabled)
+let authFailCount=0;
+let authFailUntil=0;
+
+function bindCardActions(root){
+  (root||document).querySelectorAll("[data-action]").forEach(btn=>{
+    if(btn._bound) return;
+    btn._bound=true;
+    btn.addEventListener("click", ev=>{
+      const act=ev.currentTarget.dataset.action;
+      const idx=ev.currentTarget.dataset.authIndex;
+      if(act==="checkin") checkin(idx, ev.currentTarget);
+      else if(act==="refresh") refreshCredits(idx, ev.currentTarget);
+    });
+  });
+}
+function planBadgeClass(plan){
+  const p=String(plan||"").toLowerCase();
+  if(p==="cnexpress"||p==="ultra"||p==="pro+") return "badge pro";
+  if(p==="pro") return "badge";
+  return "badge disabled";
+}
+function card(a){
+  const ci=a.checkin||{};
+  const cr=a.credits;
+  const pool=poolByUID[a.uid]||{};
+  const checkedIn=!!ci.checked_in;
+  const exhausted=!!cr && Number(cr.total_remain)===0;
+  const cooling=!!pool.cooling;
+  const disabled=!!a.disabled||!!pool.disabled;
+  const plan=a.credits&&a.credits.plan?a.credits.plan:(a.plan||"unknown");
+  const badges=
+    (disabled?`<span class="badge disabled">已禁用</span>`:"")+
+    (cooling?`<span class="badge cooling" title="${escAttr(pool.reason||"")} ${pool.until?("· until "+esc(String(pool.until).replace('T',' ').replace('Z',' UTC'))):""}">冷却中</span>`:"")+
+    (exhausted?`<span class="badge exhausted">耗尽</span>`:"")+
+    (checkedIn?`<span class="badge checked">今日已签</span>`:"")+
+    `<span class="${planBadgeClass(plan)}">${esc(plan||"-")}</span>`;
+  const btnClass=checkedIn?"done":"sec";
+  const btnText=checkedIn?"已签到":"签到";
+  const btnDisabled=checkedIn?" disabled=\"disabled\"":"";
+  const actionHTML=`<button class="${btnClass}" data-action="checkin" data-auth-index="${escAttr(a.auth_index)}"${btnDisabled}>${btnText}</button>`;
+  const refreshBtn=`<button class="sec" data-action="refresh" data-auth-index="${escAttr(a.auth_index)}" title="查询实时积分">刷新积分</button>`;
+  return `<div class="card" data-uid="${escAttr(a.uid)}" data-auth="${escAttr(a.auth_index)}">
+  <h2>${esc(a.nickname||a.label||a.name)} <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${badges}</span></h2>
+  <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
+  ${progressHTML(cr)}
+  ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
+  ${pool.reason&&!cooling?`<div class="row"><span class="k">池状态</span><span class="v warn">${esc(pool.reason)}</span></div>`:""}
+  <div class="actions">${refreshBtn}${actionHTML}</div>
+  </div>`;
+}
+function lazyLoadCredits(accounts){
+  // For cards whose credits are missing/stale, fetch /credits per-account.
+  // trae /credits does a live upstream call (slow) — parallel is OK for small pools.
+  const need=accounts.filter(a=>!a.credits && !a.error && !a.disabled);
+  if(!need.length) return;
+  need.forEach(a=>{
+    const idx=a.auth_index;
+    api(`/credits?auth_index=${encodeURIComponent(idx)}`)
+      .then(d=>{
+        const res=(d.results||[])[0]||{};
+        if(d.error){ a.error=d.error; }
+        if(res.error){ a.error=res.error; }
+        if(res.total_remain!=null || res.plan){
+          a.credits=Object.assign({}, a.credits||{}, {
+            total_remain: res.total_remain!=null?res.total_remain:(a.credits?a.credits.total_remain:0),
+            plan: res.plan||(a.credits?a.credits.plan:""),
+            fetched_at: new Date().toISOString()
+          });
+        }
+        updateOneCard(a);
+      })
+      .catch(()=>{
+        // Retry once after 2s.
+        setTimeout(()=>{
+          api(`/credits?auth_index=${encodeURIComponent(idx)}`)
+            .then(d=>{
+              const res=(d.results||[])[0]||{};
+              if(d.error||res.error){ a.error=d.error||res.error; updateOneCard(a); return; }
+              if(res.total_remain!=null || res.plan){
+                a.credits=Object.assign({}, a.credits||{}, {
+                  total_remain: res.total_remain!=null?res.total_remain:0,
+                  plan: res.plan||"",
+                  fetched_at: new Date().toISOString()
+                });
+              }
+              updateOneCard(a);
+            })
+            .catch(()=>{ a.error="积分查询失败"; updateOneCard(a); });
+        },2000);
+      });
+  });
+}
+function updateOneCard(a){
+  const el=document.querySelector(`#grid .card[data-auth="${CSS.escape(a.auth_index)}"]`);
+  if(!el) return;
+  const tmp=document.createElement('div');
+  tmp.innerHTML=card(a);
+  if(tmp.firstChild){
+    const newCard=tmp.firstChild;
+    el.replaceWith(newCard);
+    bindCardActions(newCard);
+  }
+  renderSummary(lastAccounts);
+}
+async function api(path, opts={}){
+  // Unlike workbuddy, trae-* has no plugin-layer key check, so we do NOT
+  // throw "需要管理密钥" when no key is available — we just attempt the call.
+  // The CPA host middleware is the actual guard; on 401 we surface the key box.
+  if(Date.now()<authFailUntil){
+    throw new Error("认证多次失败，请稍后重试（防 IP 封禁）");
+  }
+  const k=getKey();
+  const r=await fetch(API+path,{...opts,credentials:'omit',headers:{...(opts.headers||{}),...authHeaders(k)}});
+  if(r.status===401){
+    authFailCount++;
+    showAuth();
+    if(authFailCount>=3){
+      authFailUntil=Date.now()+60000;
+      authFailCount=0;
+      throw new Error("认证多次失败，请检查管理密钥后 60s 再试");
+    }
+    throw new Error("management key 无效或缺失");
+  }
+  if(r.status===403){
+    authFailCount++;
+    let body="";try{body=await r.text()}catch(_){}
+    if(/IP banned|too many failed/i.test(body)){
+      let waitMs=60000;
+      const m=body.match(/(\d+)\s*m(?:in(?:ute)?s?)?\s*(\d+)\s*s/i)||body.match(/(\d+)\s*m/i);
+      if(m){
+        const mins=parseInt(m[1],10)||0;
+        const secs=m[2]?parseInt(m[2],10):0;
+        waitMs=Math.min(Math.max((mins*60+secs)*1000,30000),30*60*1000);
+      }
+      authFailUntil=Date.now()+waitMs;
+      throw new Error(body.trim()||"IP 被封禁，请稍后再试");
+    }
+    if(authFailCount>=3){authFailUntil=Date.now()+60000;authFailCount=0;}
+    throw new Error(body.trim()||"禁止访问 (403)");
+  }
+  authFailCount=0;
+  return r.json();
+}
+async function loadPoolStatus(){
+  // Fetch /status to merge cooling/disabled badges into cards.
+  try{
+    const d=await api("/status");
+    poolByUID={};
+    (d.accounts||[]).forEach(s=>{ if(s.uid) poolByUID[s.uid]=s; });
+  }catch(_){ /* status is best-effort */ }
+}
+async function load(force, btn){
+  const g=document.getElementById("grid");
+  if(force){
+    if(!btn) btn=document.getElementById("refreshBtn");
+    busy(btn, true);
+  }
+  try{
+    // force: call /refresh (forces token+credit refresh server-side, returns the
+    //        refreshed dashboard). non-force: call /accounts (cache snapshot).
+    //        Both /accounts and /refresh return {accounts, provider, server_time}.
+    const d = force
+      ? await api("/refresh", {method:"POST"})
+      : await api("/accounts");
+    document.getElementById("svtime").textContent="服务器时间 "+(d.server_time||"");
+    if(d.error){
+      g.innerHTML='<div class="loading">'+esc(d.error)+"</div>";
+      if(force) toast("刷新失败", "err", d.error);
+      return;
+    }
+    const accounts=d.accounts||[];
+    lastAccounts=accounts;
+    // Merge pool status (cooling/disabled) — best effort.
+    await loadPoolStatus();
+    if(!accounts.length){
+      g.innerHTML='<div class="loading">暂无 '+esc(providerName)+' 账号</div>';
+      renderSummary([]);
+      if(force) toast("数据已刷新", "warn", "暂无账号");
+      return;
+    }
+    g.innerHTML=accounts.map(card).join("");
+    bindCardActions(g);
+    renderSummary(accounts);
+    lazyLoadCredits(accounts);
+    if(force){
+      const errN=accounts.filter(a=>a.error).length;
+      let extra=accounts.length+" 个账号";
+      if(errN) extra+=" · "+errN+" 个有错误";
+      if(errN) toast("数据已刷新", "warn", extra);
+      else toast("数据已刷新", "ok", extra);
+    }
+  }catch(e){
+    if(force) toast("刷新失败", "err", e.message||String(e));
+    if(!force || !g.querySelector(".card")){
+      g.innerHTML='<div class="loading">'+esc(e.message||String(e))+"</div>";
+    }
+  }finally{
+    if(force) busy(btn, false);
+  }
+}
+function creditOf(a){
+  const cr=a&&a.credits;
+  if(!cr) return {remain:0, known:false};
+  const remain=Number(cr.total_remain)||0;
+  const known=cr.total_remain!=null || !!cr.plan;
+  return {remain, known};
+}
+function renderSummary(accounts){
+  const box=document.getElementById("summaryBox");
+  if(!box) return;
+  const all=accounts||[];
+  if(!all.length){ box.style.display="none"; box.innerHTML=""; return; }
+  let remain=0, knownN=0, disabledN=0, exhaustedN=0, coolingN=0, checkedN=0;
+  all.forEach(a=>{
+    const c=creditOf(a);
+    if(c.known){ remain+=c.remain; knownN++; }
+    const pool=poolByUID[a.uid]||{};
+    if(a.disabled||pool.disabled) disabledN++;
+    if(c.known&&c.remain===0) exhaustedN++;
+    if(pool.cooling) coolingN++;
+    if(a.checkin&&a.checkin.checked_in) checkedN++;
+  });
+  box.style.display="block";
+  box.innerHTML=`
+    <div class="summary-hd">
+      <div class="summary-title">账号汇总 · ${esc(providerName)}</div>
+      <div class="summary-meta">${all.length} 个账号 · 有积分 ${knownN} · 已签到 ${checkedN} · 冷却 ${coolingN} · 禁用 ${disabledN} · 耗尽 ${exhaustedN}</div>
+    </div>
+    <div class="summary-grid">
+      <div class="summary-item"><div class="k">总剩余积分</div><div class="v ok">${remain}</div></div>
+      <div class="summary-item"><div class="k">账号数</div><div class="v">${all.length}</div></div>
+      <div class="summary-item"><div class="k">今日已签</div><div class="v ok">${checkedN}</div></div>
+      <div class="summary-item"><div class="k">冷却中</div><div class="v ${coolingN?"warn":""}">${coolingN}</div></div>
+      <div class="summary-item"><div class="k">禁用</div><div class="v ${disabledN?"err":""}">${disabledN}</div></div>
+      <div class="summary-item"><div class="k">耗尽</div><div class="v ${exhaustedN?"err":""}">${exhaustedN}</div></div>
+    </div>
+  `;
+}
+function checkinResultToast(res){
+  const name=res.nickname||res.uid||res.auth_index||"账号";
+  if(res.error){toast(name+"：签到失败","err",res.error);return}
+  if(res.already_checked_in){
+    toast(name+"：今日已签到","ok",res.claim_message||"");return;
+  }
+  if(res.claim_code!=null||res.claim_message){
+    toast(name+"：签到成功","ok",res.claim_message||("+"+(res.credits!=null?res.credits:"?")+" 积分"));return;
+  }
+  toast(name+"：签到完成","ok",res.claim_message||"");
+}
+function isCheckinDoneResult(res){
+  if(!res||res.error) return false;
+  if(res.already_checked_in) return true;
+  if(res.claim_code!=null||res.claim_message) return true;
+  return false;
+}
+async function checkin(idx, btn){
+  busy(btn,true);
+  try{
+    const d=await api("/checkin",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth_index:idx})});
+    const res=(d.results||[])[0]||{};
+    checkinResultToast(res);
+    if(isCheckinDoneResult(res)){
+      markCheckinDone(btn);
+      const a=(lastAccounts||[]).find(x=>x.auth_index===idx);
+      if(a){
+        a.checkin=Object.assign({}, a.checkin||{}, {checked_in:true, credits:res.credits!=null?res.credits:(a.checkin?a.checkin.credits:0)});
+      }
+    }else{
+      busy(btn,false);
+    }
+    await load(false);
+  }catch(e){
+    toast("签到请求失败","err",e.message);
+    busy(btn,false);
+  }
+}
+async function checkinAll(btn){
+  busy(btn,true);
+  try{
+    const d=await api("/checkin",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    const rs=d.results||[];
+    const ok=rs.filter(x=>!x.error && (x.already_checked_in || x.claim_code!=null || x.claim_message)).length;
+    const already=rs.filter(x=>x.already_checked_in).length;
+    const fail=rs.filter(x=>x.error).length;
+    if(d.error){toast("批量签到失败","err",d.error)}
+    else if(fail){
+      const errDetail=rs.filter(x=>x.error).map(x=>(x.nickname||x.uid||x.auth_index||"")+": "+x.error).join("；");
+      toast("批量签到："+ok+" 成功 / "+fail+" 失败"+(already?" / "+already+" 已签":""),"err",errDetail);
+    }else if(ok){
+      toast("批量签到："+ok+" 成功"+(already?" / "+already+" 今日已签":""),"ok");
+    }else if(!rs.length){
+      toast("没有需要签到的账号","warn");
+    }else{
+      toast("批量签到完成","ok");
+    }
+    if(ok||already){
+      document.querySelectorAll("#grid .card").forEach(c=>{
+        const b=c.querySelector("button[data-action='checkin']");
+        if(b && /签到|处理中/.test(b.textContent||"")) markCheckinDone(b);
+      });
+    }
+    await load(false);
+  }catch(e){toast("批量签到失败","err",e.message)}
+  busy(btn,false);
+}
+async function refreshCredits(idx, btn){
+  busy(btn,true);
+  try{
+    const d=await api(`/credits?auth_index=${encodeURIComponent(idx)}`);
+    const res=(d.results||[])[0]||{};
+    if(d.error||res.error){
+      toast("刷新失败","err",d.error||res.error||"未知错误");
+      busy(btn,false);
+      return;
+    }
+    const a=(lastAccounts||[]).find(x=>x.auth_index===idx);
+    if(a){
+      a.credits=Object.assign({}, a.credits||{}, {
+        total_remain: res.total_remain!=null?res.total_remain:(a.credits?a.credits.total_remain:0),
+        plan: res.plan||(a.credits?a.credits.plan:""),
+        fetched_at: new Date().toISOString()
+      });
+      if(res.error) a.error=res.error; else a.error="";
+      updateOneCard(a);
+    }
+    const remain=res.total_remain!=null?res.total_remain:"?";
+    const who=res.nickname||res.uid||idx;
+    toast("积分已刷新","ok",who+" · 剩余 "+remain);
+  }catch(e){
+    toast("刷新失败","err",e.message||String(e));
+  }finally{
+    busy(btn,false);
+  }
+}
+document.getElementById("keyInput").addEventListener("keydown",e=>{if(e.key==="Enter")saveKey()});
+/* Start theme sync watcher (parent MutationObserver + standalone prefers-color-scheme listener). */
+if(window.__traeThemeSync)window.__traeThemeSync();
+/* trae plugins don't require a key on the plugin side; attempt the initial
+   load directly. If the CPA host middleware returns 401, the auth box surfaces. */
+load(false);
 </script>
 </body>
 </html>
