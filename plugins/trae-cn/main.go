@@ -1,4 +1,4 @@
-// Package main implements the trae-cn CLIProxyAPI dynamic plugin.
+// Package main implements the trae-solo-cn CLIProxyAPI dynamic plugin.
 //
 // trae-solo-cn wraps TRAE Work CN / SOLO CN (trae-api-cn.mchost.guru +
 // api.trae.cn) as a cliproxy provider: Trae OAuth (GetLoginGuidance +
@@ -1359,26 +1359,30 @@ func handleExecStream(request []byte) ([]byte, error) {
         }
         defer rc.Close()
 
-        // Aggregate SOLO SSE → OpenAI completion, then emit it as a single chunk.
-        // This is simpler and more robust than translating SSE in real-time (which
-        // would require a fake http.ResponseWriter). The host receives one chunk
-        // and forwards it to the client; if the client requested stream=true, the
-        // host will stream the bytes through.
-        completion, err := upstream.Aggregate(rc)
-        if err != nil {
-                if se, ok := err.(*upstream.SOLOStreamError); ok {
-                        applyCooldown(a.UID, se.Kind())
+        // Real-time SSE conversion: SOLO SSE → OpenAI SSE chunks via channel.
+        // Each chunk is a complete "data: {...}\n\n" frame, forwarded to CPA as-is.
+        model := ""
+        if len(req.Payload) > 0 {
+                var peek struct {
+                        Model string `json:"model"`
                 }
-                return nil, fmt.Errorf("aggregate: %w", err)
+                _ = json.Unmarshal(req.Payload, &peek)
+                model = peek.Model
+        }
+        ch := convertSOLOStreamToOpenAI(rc, model, func(se *upstream.SOLOStreamError) {
+                applyCooldown(a.UID, se.Kind())
+        })
+
+        // Collect chunks into a slice for the response (CPA expects []ExecutorStreamChunk).
+        var chunks []pluginapi.ExecutorStreamChunk
+        for chunk := range ch {
+                chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: chunk})
         }
         accountPool.NoteSuccess(a.UID)
-        out, _ := json.Marshal(completion)
-        ch := make(chan pluginapi.ExecutorStreamChunk, 1)
-        ch <- pluginapi.ExecutorStreamChunk{Payload: out}
-        close(ch)
+
         return okEnvelope(pluginapi.ExecutorStreamResponse{
-                Headers: http.Header{"Content-Type": []string{"application/json"}},
-                Chunks:  ch,
+                Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
+                Chunks:  toChunkChannel(chunks),
         })
 }
 
