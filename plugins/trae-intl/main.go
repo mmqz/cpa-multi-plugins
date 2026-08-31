@@ -782,6 +782,14 @@ func handleExecExecute(request []byte) ([]byte, error) {
         if err != nil {
                 return nil, fmt.Errorf("execute: parse auth: %w", err)
         }
+        // Refresh token if needed (within 24h of expiry).
+        refreshed, err := upstreamClient.RefreshTokenIfNeeded(a, 24*time.Hour)
+        if err != nil {
+                return nil, fmt.Errorf("execute: refresh: %w", err)
+        }
+        if refreshed {
+                persistRefreshedAuth(req, a)
+        }
         // Parse OpenAI messages from payload.
         var openaiReq struct {
                 Model    string           `json:"model"`
@@ -808,6 +816,14 @@ func handleExecStream(request []byte) ([]byte, error) {
         a, err := parseStoredAuth(req.StorageJSON)
         if err != nil {
                 return nil, fmt.Errorf("stream: parse auth: %w", err)
+        }
+        // Refresh token if needed (within 24h of expiry).
+        refreshed, err := upstreamClient.RefreshTokenIfNeeded(a, 24*time.Hour)
+        if err != nil {
+                return nil, fmt.Errorf("stream: refresh: %w", err)
+        }
+        if refreshed {
+                persistRefreshedAuth(req, a)
         }
         var openaiReq struct {
                 Model    string           `json:"model"`

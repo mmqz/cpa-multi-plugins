@@ -1249,7 +1249,10 @@ func handleExecExecute(request []byte) ([]byte, error) {
         if err != nil {
                 return nil, fmt.Errorf("execute: refresh: %w", err)
         }
-        _ = refreshed // host re-persists on next refresh RPC
+        if refreshed {
+                // Persist the new token back to host auth store so it survives CPA restart.
+                persistRefreshedAuth(req, a)
+        }
 
         // Call ChatStream (always stream upstream; aggregate for non-stream).
         rc, status, body, err := upstreamClient.ChatStream(a, req.Payload)
@@ -1289,7 +1292,9 @@ func handleExecStream(request []byte) ([]byte, error) {
         if err != nil {
                 return nil, fmt.Errorf("stream: refresh: %w", err)
         }
-        _ = refreshed
+        if refreshed {
+                persistRefreshedAuth(req, a)
+        }
 
         rc, status, body, err := upstreamClient.ChatStream(a, req.Payload)
         if err != nil {

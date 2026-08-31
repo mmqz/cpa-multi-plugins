@@ -21,6 +21,7 @@ import (
         _ "embed"
         "encoding/json"
         "fmt"
+        "log"
         "net/http"
         "strings"
         "sync"
@@ -90,6 +91,7 @@ func managementRegistration() managementRegistrationResponse {
                         {Method: http.MethodGet, Path: base + "/credits", Description: "Get real-time credits for one (auth_index query) or all accounts."},
                         {Method: http.MethodPost, Path: base + "/refresh", Description: "Force refresh access tokens + credits for all accounts."},
                         {Method: http.MethodGet, Path: base + "/status", Description: "Account-pool state: cooling / disabled reasons per account."},
+                        {Method: http.MethodPost, Path: base + "/import", Description: "Import Trae credential JSON (nested or flat) into host auth store."},
                 },
                 Resources: []resourceRoute{
                         {Path: "/panel", Menu: "Trae SOLO CN", Description: "Trae Work CN dashboard: credits, check-in, accounts."},
@@ -135,6 +137,8 @@ func handleManagement(raw []byte) ([]byte, error) {
                 return okEnvelope(mgmtJSONResponse(http.StatusOK, handleRefresh()))
         case req.Method == http.MethodGet && path == base+"/status":
                 return okEnvelope(mgmtJSONResponse(http.StatusOK, buildPoolStatus()))
+        case req.Method == http.MethodPost && path == base+"/import":
+                return okEnvelope(mgmtJSONResponse(http.StatusOK, handleImportAuth(req)))
         }
         return okEnvelope(mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": "not found: " + path}))
 }
@@ -551,5 +555,104 @@ func handleRefresh() map[string]any {
                 "provider":    providerName,
                 "results":     results,
                 "server_time": time.Now().Format("2006-01-02 15:04:05"),
+        }
+}
+
+// hostAuthSave persists credential JSON via host.auth.save RPC.
+// Used by executor to write back refreshed tokens so they survive CPA restart.
+func hostAuthSave(name string, raw []byte) error {
+        saveBody, _ := json.Marshal(map[string]any{
+                "name": name,
+                "json": raw,
+        })
+        rawResp, err := hostCall(pluginabi.MethodHostAuthSave, saveBody)
+        if err != nil {
+                return fmt.Errorf("host.auth.save RPC: %w", err)
+        }
+        var env envelope
+        if err := json.Unmarshal(rawResp, &env); err != nil || !env.OK {
+                return fmt.Errorf("host.auth.save: bad envelope")
+        }
+        return nil
+}
+
+// persistRefreshedAuth writes updated token fields back to host auth store
+// after a successful RefreshTokenIfNeeded in the executor path.
+func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *auth.Auth) {
+        // Derive file name from auth ID or StorageJSON.
+        fileName := req.AuthID
+        if fileName == "" {
+                fileName = fmt.Sprintf("%s-%s.json", providerName, a.UID)
+        }
+        storageJSON, _ := json.MarshalIndent(map[string]any{
+                "auth": map[string]any{
+                        "accessToken":  a.AccessToken,
+                        "refreshToken": a.RefreshToken,
+                        "expiresAt":    a.ExpiresAt,
+                        "domain":       a.Domain,
+                        "apiHost":      a.APIHost,
+                        "machineId":    a.MachineID,
+                        "deviceId":     a.DeviceID,
+                },
+                "account": map[string]any{
+                        "uid":          a.UID,
+                        "enterpriseId": a.EnterpriseID,
+                        "nickname":     a.Nickname,
+                },
+        }, "", "  ")
+        if err := hostAuthSave(fileName, storageJSON); err != nil {
+                log.Printf("persist refreshed auth %s: %v", a.UID, err)
+        }
+}
+
+// handleImportAuth imports a Trae credential JSON (nested or flat) into the
+// host auth store. Body: {"json": <raw json>} or {"raw": "<json string>"}.
+// This lets users paste a token from another tool (e.g. traework2api login.sh)
+// without going through the browser OAuth flow.
+func handleImportAuth(req pluginapi.ManagementRequest) map[string]any {
+        var body struct {
+                JSON json.RawMessage `json:"json"`
+                Raw  string          `json:"raw"`
+        }
+        _ = json.Unmarshal(req.Body, &body)
+        raw := []byte(strings.TrimSpace(body.Raw))
+        if len(body.JSON) > 0 {
+                raw = body.JSON
+        }
+        if len(raw) == 0 {
+                return map[string]any{"success": false, "error": "missing json/raw credential payload"}
+        }
+        a, err := auth.Parse(raw)
+        if err != nil {
+                return map[string]any{"success": false, "error": err.Error()}
+        }
+        // Build nested storage JSON for host.auth.save.
+        storageJSON, _ := json.MarshalIndent(map[string]any{
+                "auth": map[string]any{
+                        "accessToken":  a.AccessToken,
+                        "refreshToken": a.RefreshToken,
+                        "expiresAt":    a.ExpiresAt,
+                        "domain":       a.Domain,
+                        "apiHost":      a.APIHost,
+                        "machineId":    a.MachineID,
+                        "deviceId":     a.DeviceID,
+                },
+                "account": map[string]any{
+                        "uid":          a.UID,
+                        "enterpriseId": a.EnterpriseID,
+                        "nickname":     a.Nickname,
+                },
+        }, "", "  ")
+        fileName := fmt.Sprintf("%s-%s.json", providerName, a.UID)
+        if err := hostAuthSave(fileName, storageJSON); err != nil {
+                return map[string]any{"success": false, "error": err.Error()}
+        }
+        // Register in pool.
+        accountPool.Add(a)
+        return map[string]any{
+                "success":  true,
+                "name":     fileName,
+                "uid":      a.UID,
+                "nickname": a.Nickname,
         }
 }

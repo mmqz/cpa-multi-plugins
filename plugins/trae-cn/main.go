@@ -103,7 +103,7 @@ const (
         // Account cache TTL for credits/checkin status.
         accountCacheTTL = 5 * time.Minute
 
-        // ---- cockpit-tools aligned OAuth constants (Trae Code CN platform) ----
+        // ---- cockpit-tools aligned OAuth constants (SOLO CN platform) ----
         // GetLoginGuidance URL — first entry of TRAE_CN_LOGIN_GUIDANCE_URLS.
         oauthLoginGuidanceURL = "https://api.trae.cn/cloudide/api/v3/trae/GetLoginGuidance"
         // ExchangeToken base URL — /trae/api/v3/oauth/ExchangeToken (NOT /cloudide/api/v3/trae/).
@@ -111,14 +111,14 @@ const (
         // Fallback ExchangeToken host if callback does not return loginHost.
         oauthDefaultHost = "https://api.trae.cn"
 
-        // Platform-specific flags (non-SOLO Trae Code CN).
-        oauthAuthFrom       = "trae"    // non-SOLO uses "trae"; SOLO uses "solo".
-        oauthPlatformCode   = "IDE_PC"  // non-SOLO uses IDE_PC; SOLO uses SOLO_PC.
-        oauthHideSaasLogin  = false     // non-SOLO omits this param; SOLO sets true.
+        // Platform-specific flags (SOLO vs non-SOLO).
+        oauthAuthFrom       = "solo"   // SOLO uses "solo"; non-SOLO uses "trae".
+        oauthPlatformCode   = "SOLO_PC" // SOLO uses SOLO_PC; non-SOLO uses IDE_PC.
+        oauthHideSaasLogin  = true     // SOLO only; non-SOLO omits this param.
 
         // Default device fingerprint values (mirrors cockpit-tools defaults).
         oauthPluginVersion = "1.0.0"
-        oauthDeviceName    = "DESKTOP-CPACN"
+        oauthDeviceName    = "DESKTOP-CPASOLO"
         oauthDeviceType    = "windows"
         oauthDeviceBrand   = "83DG"
         oauthOSVersion     = "Windows 11 Pro"
@@ -936,7 +936,7 @@ func handlePollLogin(request []byte) ([]byte, error) {
                         Provider:    providerName,
                         ID:          a.UID,
                         FileName:    fmt.Sprintf("%s-%s.json", providerName, a.UID),
-                        Label:       nonEmpty(a.Nickname, "Trae CN "+a.UID),
+                        Label:       nonEmpty(a.Nickname, "Trae SOLO CN "+a.UID),
                         StorageJSON: storageJSON,
                         Metadata:    map[string]any{"type": providerName, "uid": a.UID, "nickname": a.Nickname},
                 },
@@ -1249,7 +1249,10 @@ func handleExecExecute(request []byte) ([]byte, error) {
         if err != nil {
                 return nil, fmt.Errorf("execute: refresh: %w", err)
         }
-        _ = refreshed // host re-persists on next refresh RPC
+        if refreshed {
+                // Persist the new token back to host auth store so it survives CPA restart.
+                persistRefreshedAuth(req, a)
+        }
 
         // Call ChatStream (always stream upstream; aggregate for non-stream).
         rc, status, body, err := upstreamClient.ChatStream(a, req.Payload)
@@ -1289,7 +1292,9 @@ func handleExecStream(request []byte) ([]byte, error) {
         if err != nil {
                 return nil, fmt.Errorf("stream: refresh: %w", err)
         }
-        _ = refreshed
+        if refreshed {
+                persistRefreshedAuth(req, a)
+        }
 
         rc, status, body, err := upstreamClient.ChatStream(a, req.Payload)
         if err != nil {

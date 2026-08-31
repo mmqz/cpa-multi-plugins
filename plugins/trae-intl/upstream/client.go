@@ -674,3 +674,23 @@ func getFloat(m map[string]any, key string) float64 {
 	}
 	return 0
 }
+
+// NeedsRefresh reports whether the token will expire within `within` duration.
+func (a *Auth) NeedsRefresh(within time.Duration) bool {
+	if a.ExpiresAt <= 0 {
+		return true
+	}
+	return time.Now().Add(within).Unix() >= a.ExpiresAt
+}
+
+// RefreshTokenIfNeeded refreshes the token only if it will expire within `within`.
+// Returns true if a refresh actually happened.
+func (c *Client) RefreshTokenIfNeeded(a *Auth, within time.Duration) (bool, error) {
+	if !a.NeedsRefresh(within) {
+		return false, nil
+	}
+	if err := c.RefreshToken(a); err != nil {
+		return false, err
+	}
+	return true, nil
+}
