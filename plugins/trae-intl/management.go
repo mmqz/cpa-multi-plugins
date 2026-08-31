@@ -356,47 +356,48 @@ func hostAuthGet(authIndex string) (*storedAuth, error) {
 
 // hostAuthSave persists credential JSON via host.auth.save RPC.
 func hostAuthSave(name string, raw []byte) error {
-	saveReq := pluginapi.HostAuthSaveRequest{
-		"name": name,
-		"json": raw,
-	})
-	rawResp, err := hostCall(pluginabi.MethodHostAuthSave, saveBody)
-	if err != nil {
-		return fmt.Errorf("host.auth.save RPC: %w", err)
-	}
-	var env envelope
-	if err := json.Unmarshal(rawResp, &env); err != nil || !env.OK {
-		return fmt.Errorf("host.auth.save: bad envelope")
-	}
-	return nil
+        saveReq := pluginapi.HostAuthSaveRequest{
+                Name: name,
+                JSON: raw,
+        }
+        saveBody, _ := json.Marshal(saveReq)
+        rawResp, err := hostCall(pluginabi.MethodHostAuthSave, saveBody)
+        if err != nil {
+                return fmt.Errorf("host.auth.save RPC: %w", err)
+        }
+        var env envelope
+        if err := json.Unmarshal(rawResp, &env); err != nil || !env.OK {
+                return fmt.Errorf("host.auth.save: bad envelope")
+        }
+        return nil
 }
 
 // persistRefreshedAuth writes updated token fields back to host auth store.
 func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *upstream.Auth) {
-	fileName := req.AuthID
-	if fileName == "" {
-		fileName = fmt.Sprintf("%s-%s.json", providerName, a.UID)
-	}
-	storageJSON, _ := json.MarshalIndent(map[string]any{
-		"auth": map[string]any{
-			"accessToken":  a.AccessToken,
-			"refreshToken": a.RefreshToken,
-			"expiresAt":    a.ExpiresAt,
-			"domain":       a.Domain,
-			"apiHost":      a.APIHost,
-			"region":       a.Region,
-			"scope":        a.Scope,
-			"tenant":       a.Tenant,
-			"appLanguage":  a.AppLanguage,
-			"appVersion":   a.AppVersion,
-		},
-		"account": map[string]any{
-			"uid":          a.UID,
-			"enterpriseId": a.EnterpriseID,
-			"nickname":     a.Nickname,
-		},
-	}, "", "  ")
-	if err := hostAuthSave(fileName, storageJSON); err != nil {
-		log.Printf("persist refreshed auth %s: %v", a.UID, err)
-	}
+        fileName := req.AuthID
+        if fileName == "" {
+                fileName = fmt.Sprintf("%s-%s.json", providerName, a.UID)
+        }
+        storageJSON, _ := json.MarshalIndent(map[string]any{
+                "auth": map[string]any{
+                        "accessToken":  a.AccessToken,
+                        "refreshToken": a.RefreshToken,
+                        "expiresAt":    a.ExpiresAt,
+                        "domain":       a.Domain,
+                        "apiHost":      a.APIHost,
+                        "region":       a.Region,
+                        "scope":        a.Scope,
+                        "tenant":       a.Tenant,
+                        "appLanguage":  a.AppLanguage,
+                        "appVersion":   a.AppVersion,
+                },
+                "account": map[string]any{
+                        "uid":          a.UID,
+                        "enterpriseId": a.EnterpriseID,
+                        "nickname":     a.Nickname,
+                },
+        }, "", "  ")
+        if err := hostAuthSave(fileName, storageJSON); err != nil {
+                log.Printf("persist refreshed auth %s: %v", a.UID, err)
+        }
 }
