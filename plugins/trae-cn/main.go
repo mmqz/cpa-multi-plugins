@@ -112,9 +112,9 @@ const (
         oauthDefaultHost = "https://api.trae.cn"
 
         // Platform-specific flags (SOLO vs non-SOLO).
-        oauthAuthFrom       = "solo"   // SOLO uses "solo"; non-SOLO uses "trae".
-        oauthPlatformCode   = "SOLO_PC" // SOLO uses SOLO_PC; non-SOLO uses IDE_PC.
-        oauthHideSaasLogin  = true     // SOLO only; non-SOLO omits this param.
+        oauthAuthFrom       = "trae"    // non-SOLO uses "trae"
+        oauthPlatformCode   = "IDE_PC"  // non-SOLO uses IDE_PC
+        oauthHideSaasLogin  = false     // non-SOLO omits this param
 
         // Default device fingerprint values (mirrors cockpit-tools defaults).
         oauthPluginVersion = "1.0.0"

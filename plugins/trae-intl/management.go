@@ -90,6 +90,7 @@ func managementRegistration() managementRegistrationResponse {
                 Routes: []managementRoute{
                         {Method: http.MethodGet, Path: base + "/accounts", Description: "List Trae Intl accounts with uid, nickname, and token expiry."},
                         {Method: http.MethodGet, Path: base + "/status", Description: "Trae Intl plugin status (no pool — reflects host auth store count + upstream reachability)."},
+                        {Method: http.MethodPost, Path: base + "/import", Description: "Import Trae Intl credential JSON into host auth store."},
                 },
                 Resources: []resourceRoute{
                         {Path: "/panel", Menu: "Trae Intl", Description: "Trae Intl dashboard: accounts."},
@@ -121,6 +122,8 @@ func handleManagement(raw []byte) ([]byte, error) {
                 return okEnvelope(mgmtJSONResponse(http.StatusOK, buildDashboard()))
         case req.Method == http.MethodGet && path == base+"/status":
                 return okEnvelope(mgmtJSONResponse(http.StatusOK, buildStatus()))
+        case req.Method == http.MethodPost && path == base+"/import":
+                return okEnvelope(mgmtJSONResponse(http.StatusOK, handleImportAuth(req)))
         }
         return okEnvelope(mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": "not found: " + path}))
 }
@@ -399,5 +402,57 @@ func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *upstream.Auth) {
         }, "", "  ")
         if err := hostAuthSave(fileName, storageJSON); err != nil {
                 log.Printf("persist refreshed auth %s: %v", a.UID, err)
+        }
+}
+
+// handleImportAuth imports a Trae Intl credential JSON into the host auth store.
+func handleImportAuth(req pluginapi.ManagementRequest) map[string]any {
+        var body struct {
+                JSON json.RawMessage `json:"json"`
+                Raw  string          `json:"raw"`
+        }
+        _ = json.Unmarshal(req.Body, &body)
+        raw := []byte(strings.TrimSpace(body.Raw))
+        if len(body.JSON) > 0 {
+                raw = body.JSON
+        }
+        if len(raw) == 0 {
+                return map[string]any{"success": false, "error": "missing json/raw credential payload"}
+        }
+        a, err := parseStoredAuth(raw)
+        if err != nil {
+                return map[string]any{"success": false, "error": err.Error()}
+        }
+        storageJSON, _ := json.MarshalIndent(map[string]any{
+                "type":     providerName,
+                "provider": providerName,
+                "auth": map[string]any{
+                        "accessToken":  a.AccessToken,
+                        "refreshToken": a.RefreshToken,
+                        "expiresAt":    a.ExpiresAt,
+                        "domain":       a.Domain,
+                        "apiHost":      a.APIHost,
+                        "region":       a.Region,
+                        "scope":        a.Scope,
+                        "tenant":       a.Tenant,
+                        "appLanguage":  a.AppLanguage,
+                        "appVersion":   a.AppVersion,
+                },
+                "account": map[string]any{
+                        "uid":          a.UID,
+                        "enterpriseId": a.EnterpriseID,
+                        "nickname":     a.Nickname,
+                },
+                "disabled": false,
+        }, "", "  ")
+        fileName := fmt.Sprintf("%s-%s.json", providerName, a.UID)
+        if err := hostAuthSave(fileName, storageJSON); err != nil {
+                return map[string]any{"success": false, "error": err.Error()}
+        }
+        return map[string]any{
+                "success":  true,
+                "name":     fileName,
+                "uid":      a.UID,
+                "nickname": a.Nickname,
         }
 }
