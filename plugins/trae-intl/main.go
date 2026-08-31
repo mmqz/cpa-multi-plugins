@@ -65,210 +65,209 @@ static void free_host_buffer(void* ptr, size_t len) {
 import "C"
 
 import (
-        "bytes"
-        "context"
-        "encoding/json"
-        "fmt"
-        "io"
-        "log"
-        "net"
-        "net/http"
-        "net/url"
-        "strings"
-        "sync"
-        "time"
-        "unsafe"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+	"unsafe"
 
-        "github.com/mmqz/cpa-multi-plugins/plugins/trae-intl/upstream"
-        "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-        "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/mmqz/cpa-multi-plugins/plugins/trae-intl/upstream"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 const (
-        providerName  = "trae-intl"
-        authFileName  = "trae-intl.json"
-        pluginLogoURL = ""
+	providerName  = "trae-intl"
+	authFileName  = "trae-intl.json"
+	pluginLogoURL = ""
 
-        loginTTL = 5 * time.Minute
+	loginTTL = 5 * time.Minute
 
-        // OAuth constants (Intl uses api.marscode.com, not api.trae.cn)
-        oauthLoginGuidanceURL = "https://api.marscode.com/cloudide/api/v3/trae/GetLoginGuidance"
-        oauthDefaultHost      = "https://api.marscode.com"
-        oauthAuthFrom         = "trae" // Intl non-SOLO uses "trae"
-        oauthPluginVersion    = "1.0.0"
-        oauthDeviceBrand      = "83DG"
-        oauthDeviceType       = "windows"
-        oauthOSVersion        = "Windows 11 Pro"
-        oauthEnv              = "prod"
-        oauthAppVersion       = "3.5.66"
-        oauthAppType          = "trae"
-        oauthPlatformCode     = "IDE_PC"
-        oauthDeviceName       = "DESKTOP-CPAINTL"
+	// OAuth constants (Intl uses api.marscode.com, not api.trae.cn)
+	oauthLoginGuidanceURL = "https://api.marscode.com/cloudide/api/v3/trae/GetLoginGuidance"
+	oauthDefaultHost      = "https://api.marscode.com"
+	oauthAuthFrom         = "trae" // Intl non-SOLO uses "trae"
+	oauthPluginVersion    = "1.0.0"
+	oauthDeviceBrand      = "83DG"
+	oauthDeviceType       = "windows"
+	oauthOSVersion        = "Windows 11 Pro"
+	oauthEnv              = "prod"
+	oauthAppVersion       = "3.5.66"
+	oauthAppType          = "trae"
+	oauthPlatformCode     = "IDE_PC"
+	oauthDeviceName       = "DESKTOP-CPAINTL"
 )
 
 var version = "0.1.0"
 
 var (
-        hostAPI *C.cliproxy_host_api
+	hostAPI *C.cliproxy_host_api
 
-        loginStates sync.Map
+	loginStates sync.Map
 
-        upstreamClient *upstream.Client
+	upstreamClient *upstream.Client
 )
 
 func main() {}
 
 //export cliproxy_plugin_init
 func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
-        if plugin == nil {
-                return 1
-        }
-        hostAPI = host
-        C.store_host_api(host) // CRITICAL: store in C global for call_host_api wrapper
-        plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
-        plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
-        plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
-        plugin.shutdown = C.cliproxy_plugin_shutdown_fn(C.cliproxyPluginShutdown)
+	if plugin == nil {
+		return 1
+	}
+	hostAPI = host
+	C.store_host_api(host) // CRITICAL: store in C global for call_host_api wrapper
+	plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
+	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
+	plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
+	plugin.shutdown = C.cliproxy_plugin_shutdown_fn(C.cliproxyPluginShutdown)
 
-        upstreamClient = upstream.New()
+	upstreamClient = upstream.New()
 
-        // Janitor: sweep abandoned login states every minute to prevent listener leaks.
-        go func() {
-                ticker := time.NewTicker(time.Minute)
-                defer ticker.Stop()
-                for range ticker.C {
-                        now := time.Now()
-                        loginStates.Range(func(key, value any) bool {
-                                if lc, ok := value.(*loginCtx); ok && now.After(lc.expires) {
-                                        loginStates.Delete(key)
-                                        if lc.listener != nil {
-                                                lc.listener.Close()
-                                        }
-                                }
-                                return true
-                        })
-                }
-        }()
+	// Janitor: sweep abandoned login states every minute to prevent listener leaks.
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			now := time.Now()
+			loginStates.Range(func(key, value any) bool {
+				if lc, ok := value.(*loginCtx); ok && now.After(lc.expires) {
+					loginStates.Delete(key)
+					if lc.listener != nil {
+						lc.listener.Close()
+					}
+				}
+				return true
+			})
+		}
+	}()
 
-        return 0
+	return 0
 }
 
 //export cliproxyPluginCall
 func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) C.int {
-        if response != nil {
-                response.ptr = nil
-                response.len = 0
-        }
-        if method == nil {
-                writeResponse(response, errorEnvelope("invalid_method", "method is required"))
-                return 1
-        }
-        var requestBytes []byte
-        if request != nil && requestLen > 0 {
-                requestBytes = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
-        }
-        raw, errHandle := handleMethod(C.GoString(method), requestBytes)
-        if errHandle != nil {
-                writeResponse(response, errorEnvelope("plugin_error", errHandle.Error()))
-                return 1
-        }
-        writeResponse(response, raw)
-        return 0
+	if response != nil {
+		response.ptr = nil
+		response.len = 0
+	}
+	if method == nil {
+		writeResponse(response, errorEnvelope("invalid_method", "method is required"))
+		return 1
+	}
+	var requestBytes []byte
+	if request != nil && requestLen > 0 {
+		requestBytes = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
+	}
+	raw, errHandle := handleMethod(C.GoString(method), requestBytes)
+	if errHandle != nil {
+		writeResponse(response, errorEnvelope("plugin_error", errHandle.Error()))
+		return 1
+	}
+	writeResponse(response, raw)
+	return 0
 }
 
 //export cliproxyPluginFree
 func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
-        if ptr != nil {
-                C.free(ptr)
-        }
+	if ptr != nil {
+		C.free(ptr)
+	}
 }
 
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {}
 
 func hostCall(method string, request []byte) ([]byte, error) {
-        if hostAPI == nil || hostAPI.call == nil {
-                return nil, fmt.Errorf("host API unavailable")
-        }
-        cMethod := C.CString(method)
-        defer C.free(unsafe.Pointer(cMethod))
-        var cReq unsafe.Pointer
-        var reqLen C.size_t
-        if len(request) > 0 {
-                cReq = C.CBytes(request)
-                defer C.free(cReq)
-                reqLen = C.size_t(len(request))
-        }
-        var resp C.cliproxy_buffer
-        rc := C.call_host_api(cMethod, (*C.uint8_t)(cReq), reqLen, &resp)
-        var out []byte
-        if resp.ptr != nil && resp.len > 0 {
-                out = C.GoBytes(resp.ptr, C.int(resp.len))
-        }
-        if resp.ptr != nil && hostAPI.free_buffer != nil {
-                C.free_host_buffer(resp.ptr, resp.len)
-        }
-        if rc != 0 {
-                return out, fmt.Errorf("host call %s returned %d", method, int(rc))
-        }
-        return out, nil
+	if hostAPI == nil || hostAPI.call == nil {
+		return nil, fmt.Errorf("host API unavailable")
+	}
+	cMethod := C.CString(method)
+	defer C.free(unsafe.Pointer(cMethod))
+	var cReq unsafe.Pointer
+	var reqLen C.size_t
+	if len(request) > 0 {
+		cReq = C.CBytes(request)
+		defer C.free(cReq)
+		reqLen = C.size_t(len(request))
+	}
+	var resp C.cliproxy_buffer
+	rc := C.call_host_api(cMethod, (*C.uint8_t)(cReq), reqLen, &resp)
+	var out []byte
+	if resp.ptr != nil && resp.len > 0 {
+		out = C.GoBytes(resp.ptr, C.int(resp.len))
+	}
+	if resp.ptr != nil && hostAPI.free_buffer != nil {
+		C.free_host_buffer(resp.ptr, resp.len)
+	}
+	if rc != 0 {
+		return out, fmt.Errorf("host call %s returned %d", method, int(rc))
+	}
+	return out, nil
 }
 
 func handleMethod(method string, request []byte) ([]byte, error) {
-        switch method {
-        case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
-                return okEnvelope(buildRegistration())
+	switch method {
+	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+		return okEnvelope(buildRegistration())
 
-        case pluginabi.MethodModelStatic:
-                return handleModelStatic(request)
+	case pluginabi.MethodModelStatic:
+		return handleModelStatic(request)
 
-        case pluginabi.MethodModelForAuth:
-                return handleModelForAuth(request)
+	case pluginabi.MethodModelForAuth:
+		return handleModelForAuth(request)
 
-        case pluginabi.MethodAuthIdentifier:
-                return okEnvelope(identifierResponse{Identifier: providerName})
+	case pluginabi.MethodAuthIdentifier:
+		return okEnvelope(identifierResponse{Identifier: providerName})
 
-        case pluginabi.MethodAuthParse:
-                return handleParseAuth(request)
+	case pluginabi.MethodAuthParse:
+		return handleParseAuth(request)
 
-        case pluginabi.MethodAuthLoginStart:
-                return handleStartLogin(request)
+	case pluginabi.MethodAuthLoginStart:
+		return handleStartLogin(request)
 
-        case pluginabi.MethodAuthLoginPoll:
-                return handlePollLogin(request)
+	case pluginabi.MethodAuthLoginPoll:
+		return handlePollLogin(request)
 
-        case pluginabi.MethodAuthRefresh:
-                return handleRefreshAuth(request)
+	case pluginabi.MethodAuthRefresh:
+		return handleRefreshAuth(request)
 
-        case pluginabi.MethodExecutorIdentifier:
-                return okEnvelope(identifierResponse{Identifier: providerName})
+	case pluginabi.MethodExecutorIdentifier:
+		return okEnvelope(identifierResponse{Identifier: providerName})
 
-        case pluginabi.MethodExecutorExecute:
-                return handleExecExecute(request)
+	case pluginabi.MethodExecutorExecute:
+		return handleExecExecute(request)
 
-        case pluginabi.MethodExecutorExecuteStream:
-                return handleExecStream(request)
+	case pluginabi.MethodExecutorExecuteStream:
+		return handleExecStream(request)
 
-        case pluginabi.MethodExecutorCountTokens:
-                return okEnvelope(pluginapi.ExecutorResponse{Payload: []byte(`{"input_tokens":0}`)})
+	case pluginabi.MethodExecutorCountTokens:
+		return okEnvelope(pluginapi.ExecutorResponse{Payload: []byte(`{"input_tokens":0}`)})
 
-        case pluginabi.MethodManagementRegister:
-                // Cache host-injected BasePath so handleManagement doesn't hardcode
-                // /v0/management (tolerate future host path changes).
-                var regReq pluginapi.ManagementRegistrationRequest
-                if err := json.Unmarshal(request, &regReq); err == nil {
-                        if regReq.BasePath != "" {
-                                setManagementBasePath(regReq.BasePath)
-                        }
-                }
-                return okEnvelope(managementRegistration())
+	case pluginabi.MethodManagementRegister:
+		// Cache host-injected BasePath so handleManagement doesn't hardcode
+		// /v0/management (tolerate future host path changes).
+		var regReq pluginapi.ManagementRegistrationRequest
+		if err := json.Unmarshal(request, &regReq); err == nil {
+			if regReq.BasePath != "" {
+				setManagementBasePath(regReq.BasePath)
+			}
+		}
+		return okEnvelope(managementRegistration())
 
-        case pluginabi.MethodManagementHandle:
-                return handleManagement(request)
+	case pluginabi.MethodManagementHandle:
+		return handleManagement(request)
 
-        default:
-                return errorEnvelope("unknown_method", "unknown method: "+method), nil
-        }
+	default:
+		return errorEnvelope("unknown_method", "unknown method: "+method), nil
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -276,59 +275,59 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 // -----------------------------------------------------------------------------
 
 type envelope struct {
-        OK     bool            `json:"ok"`
-        Result json.RawMessage `json:"result,omitempty"`
-        Error  *envelopeError  `json:"error,omitempty"`
+	OK     bool            `json:"ok"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *envelopeError  `json:"error,omitempty"`
 }
 
 type envelopeError struct {
-        Code    string `json:"code"`
-        Message string `json:"message"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 type identifierResponse struct {
-        Identifier string `json:"identifier"`
+	Identifier string `json:"identifier"`
 }
 
 type registrationPayload struct {
-        SchemaVersion uint32                  `json:"schema_version"`
-        Metadata      pluginapi.Metadata      `json:"metadata"`
-        Capabilities  registrationCapability  `json:"capabilities"`
+	SchemaVersion uint32                 `json:"schema_version"`
+	Metadata      pluginapi.Metadata     `json:"metadata"`
+	Capabilities  registrationCapability `json:"capabilities"`
 }
 
 type registrationCapability struct {
-        ModelProvider         bool                         `json:"model_provider"`
-        AuthProvider          bool                         `json:"auth_provider"`
-        Executor              bool                         `json:"executor"`
-        ExecutorModelScope    pluginapi.ExecutorModelScope `json:"executor_model_scope"`
-        ExecutorInputFormats  []string                     `json:"executor_input_formats,omitempty"`
-        ExecutorOutputFormats []string                     `json:"executor_output_formats,omitempty"`
-        ManagementAPI         bool                         `json:"management_api"`
+	ModelProvider         bool                         `json:"model_provider"`
+	AuthProvider          bool                         `json:"auth_provider"`
+	Executor              bool                         `json:"executor"`
+	ExecutorModelScope    pluginapi.ExecutorModelScope `json:"executor_model_scope"`
+	ExecutorInputFormats  []string                     `json:"executor_input_formats,omitempty"`
+	ExecutorOutputFormats []string                     `json:"executor_output_formats,omitempty"`
+	ManagementAPI         bool                         `json:"management_api"`
 }
 
 func buildRegistration() registrationPayload {
-        return registrationPayload{
-                SchemaVersion: pluginabi.SchemaVersion,
-                Metadata: pluginapi.Metadata{
-                        Name:             providerName,
-                        Version:          version,
-                        Author:           "mmqz (based on OmniRoute trae.ts by diegosouzapw)",
-                        GitHubRepository: "https://github.com/mmqz/cpa-multi-plugins",
-                        Logo:             pluginLogoURL,
-                        ConfigFields: []pluginapi.ConfigField{
-                                {Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Use 'auto' for server-pick, 'work' for fast work mode, or specific model names (gpt-5.2, gemini-3.1-pro, kimi-k2.5, etc)."},
-                        },
-                },
-                Capabilities: registrationCapability{
-                        ModelProvider:         true,
-                        AuthProvider:          true,
-                        Executor:              true,
-                        ExecutorModelScope:    pluginapi.ExecutorModelScopeOAuth,
-                        ExecutorInputFormats:  []string{"chat-completions"},
-                        ExecutorOutputFormats: []string{"chat-completions"},
-                        ManagementAPI:         true,
-                },
-        }
+	return registrationPayload{
+		SchemaVersion: pluginabi.SchemaVersion,
+		Metadata: pluginapi.Metadata{
+			Name:             providerName,
+			Version:          version,
+			Author:           "mmqz (based on OmniRoute trae.ts by diegosouzapw)",
+			GitHubRepository: "https://github.com/mmqz/cpa-multi-plugins",
+			Logo:             pluginLogoURL,
+			ConfigFields: []pluginapi.ConfigField{
+				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Use 'auto' for server-pick, 'work' for fast work mode, or specific model names (gpt-5.2, gemini-3.1-pro, kimi-k2.5, etc)."},
+			},
+		},
+		Capabilities: registrationCapability{
+			ModelProvider:         true,
+			AuthProvider:          true,
+			Executor:              true,
+			ExecutorModelScope:    pluginapi.ExecutorModelScopeOAuth,
+			ExecutorInputFormats:  []string{"chat-completions"},
+			ExecutorOutputFormats: []string{"chat-completions"},
+			ManagementAPI:         true,
+		},
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -336,44 +335,44 @@ func buildRegistration() registrationPayload {
 // -----------------------------------------------------------------------------
 
 func handleModelStatic(_ []byte) ([]byte, error) {
-        return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: staticModels()})
+	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: staticModels()})
 }
 
 func handleModelForAuth(request []byte) ([]byte, error) {
-        var req struct {
-                Auth pluginapi.AuthData `json:"auth"`
-        }
-        if err := json.Unmarshal(request, &req); err != nil {
-                return nil, err
-        }
-        a, err := parseStoredAuth(req.Auth.StorageJSON)
-        if err != nil {
-                return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: staticModels()})
-        }
-        dynamic, err := upstreamClient.FetchModels(a)
-        if err != nil {
-                log.Printf("model.for_auth %s: %v — falling back to static", a.UID, err)
-                return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: staticModels()})
-        }
-        out := make([]pluginapi.ModelInfo, 0, len(dynamic))
-        for _, id := range dynamic {
-                out = append(out, pluginapi.ModelInfo{ID: id, Name: id, OwnedBy: providerName})
-        }
-        // Always include "auto" and "work" as virtual models.
-        out = append(out,
-                pluginapi.ModelInfo{ID: "auto", Name: "auto (server pick)"},
-                pluginapi.ModelInfo{ID: "work", Name: "work (fast mode)"},
-        )
-        return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: out})
+	var req struct {
+		Auth pluginapi.AuthData `json:"auth"`
+	}
+	if err := json.Unmarshal(request, &req); err != nil {
+		return nil, err
+	}
+	a, err := parseStoredAuth(req.Auth.StorageJSON)
+	if err != nil {
+		return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: staticModels()})
+	}
+	dynamic, err := upstreamClient.FetchModels(a)
+	if err != nil {
+		log.Printf("model.for_auth %s: %v — falling back to static", a.UID, err)
+		return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: staticModels()})
+	}
+	out := make([]pluginapi.ModelInfo, 0, len(dynamic))
+	for _, id := range dynamic {
+		out = append(out, pluginapi.ModelInfo{ID: id, Name: id, OwnedBy: providerName})
+	}
+	// Always include "auto" and "work" as virtual models.
+	out = append(out,
+		pluginapi.ModelInfo{ID: "auto", Name: "auto (server pick)"},
+		pluginapi.ModelInfo{ID: "work", Name: "work (fast mode)"},
+	)
+	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: out})
 }
 
 func staticModels() []pluginapi.ModelInfo {
-        known := []string{"auto", "work", "gpt-5.2", "gemini-3.1-pro", "kimi-k2.5", "claude-sonnet-4-5"}
-        out := make([]pluginapi.ModelInfo, 0, len(known))
-        for _, id := range known {
-                out = append(out, pluginapi.ModelInfo{ID: id, Name: id, OwnedBy: providerName})
-        }
-        return out
+	known := []string{"auto", "work", "gpt-5.2", "gemini-3.1-pro", "kimi-k2.5", "claude-sonnet-4-5"}
+	out := make([]pluginapi.ModelInfo, 0, len(known))
+	for _, id := range known {
+		out = append(out, pluginapi.ModelInfo{ID: id, Name: id, OwnedBy: providerName})
+	}
+	return out
 }
 
 // -----------------------------------------------------------------------------
@@ -381,124 +380,124 @@ func staticModels() []pluginapi.ModelInfo {
 // -----------------------------------------------------------------------------
 
 func parseStoredAuth(raw []byte) (*upstream.Auth, error) {
-        // Support both nested ({"auth":{...},"account":{...}}) and flat shapes.
-        var probe map[string]json.RawMessage
-        if err := json.Unmarshal(raw, &probe); err != nil {
-                return nil, fmt.Errorf("parse auth: %w", err)
-        }
-        var nested struct {
-                Auth struct {
-                        AccessToken  string `json:"accessToken"`
-                        RefreshToken string `json:"refreshToken"`
-                        ExpiresAt    int64  `json:"expiresAt"`
-                        Domain       string `json:"domain"`
-                        APIHost string `json:"apiHost"`
-                        WebID        string `json:"webId"`
-                        BizUserID    string `json:"bizUserId"`
-                        UserUniqueID string `json:"userUniqueId"`
-                        UserIdentity string `json:"userIdentity"`
-                        Scope        string `json:"scope"`
-                        Tenant       string `json:"tenant"`
-                        Region       string `json:"region"`
-                        AppLanguage  string `json:"appLanguage"`
-                        AppVersion   string `json:"appVersion"`
-                } `json:"auth"`
-                Account struct {
-                        UID          string `json:"uid"`
-                        EnterpriseID string `json:"enterpriseId"`
-                        Nickname     string `json:"nickname"`
-                } `json:"account"`
-        }
-        var flat struct {
-                AccessToken  string `json:"accessToken"`
-                RefreshToken string `json:"refreshToken"`
-                ExpiresAt    int64  `json:"expiresAt"`
-                Domain       string `json:"domain"`
-                APIHost string `json:"apiHost"`
-                UID          string `json:"uid"`
-                EnterpriseID string `json:"enterpriseId"`
-                Nickname     string `json:"nickname"`
-                WebID        string `json:"webId"`
-                BizUserID    string `json:"bizUserId"`
-                UserUniqueID string `json:"userUniqueId"`
-                UserIdentity string `json:"userIdentity"`
-                Scope        string `json:"scope"`
-                Tenant       string `json:"tenant"`
-                Region       string `json:"region"`
-                AppLanguage  string `json:"appLanguage"`
-                AppVersion   string `json:"appVersion"`
-        }
-        if _, ok := probe["auth"]; ok {
-                if err := json.Unmarshal(raw, &nested); err != nil {
-                        return nil, fmt.Errorf("parse nested auth: %w", err)
-                }
-                return &upstream.Auth{
-                        AccessToken:   nested.Auth.AccessToken,
-                        RefreshToken:  nested.Auth.RefreshToken,
-                        ExpiresAt:     nested.Auth.ExpiresAt,
-                        APIHost:       nested.Auth.APIHost,
-                        Domain:        nonEmpty(nested.Auth.Domain, "trae.ai"),
-                        UID:           nested.Account.UID,
-                        EnterpriseID:  nested.Account.EnterpriseID,
-                        Nickname:      nested.Account.Nickname,
-                        WebID:         nested.Auth.WebID,
-                        BizUserID:     nested.Auth.BizUserID,
-                        UserUniqueID:  nested.Auth.UserUniqueID,
-                        UserIdentity:  nested.Auth.UserIdentity,
-                        Scope:         nested.Auth.Scope,
-                        Tenant:        nested.Auth.Tenant,
-                        Region:        nested.Auth.Region,
-                        AppLanguage:   nested.Auth.AppLanguage,
-                        AppVersion:    nested.Auth.AppVersion,
-                }, nil
-        }
-        if err := json.Unmarshal(raw, &flat); err != nil {
-                return nil, fmt.Errorf("parse flat auth: %w", err)
-        }
-        return &upstream.Auth{
-                AccessToken:   flat.AccessToken,
-                RefreshToken:  flat.RefreshToken,
-                ExpiresAt:     flat.ExpiresAt,
-                APIHost:       flat.APIHost,
-                Domain:        nonEmpty(flat.Domain, "trae.ai"),
-                UID:           flat.UID,
-                EnterpriseID:  flat.EnterpriseID,
-                Nickname:      flat.Nickname,
-                WebID:         flat.WebID,
-                BizUserID:     flat.BizUserID,
-                UserUniqueID:  flat.UserUniqueID,
-                UserIdentity:  flat.UserIdentity,
-                Scope:         flat.Scope,
-                Tenant:        flat.Tenant,
-                Region:        flat.Region,
-                AppLanguage:   flat.AppLanguage,
-                AppVersion:    flat.AppVersion,
-        }, nil
+	// Support both nested ({"auth":{...},"account":{...}}) and flat shapes.
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, fmt.Errorf("parse auth: %w", err)
+	}
+	var nested struct {
+		Auth struct {
+			AccessToken  string `json:"accessToken"`
+			RefreshToken string `json:"refreshToken"`
+			ExpiresAt    int64  `json:"expiresAt"`
+			Domain       string `json:"domain"`
+			APIHost      string `json:"apiHost"`
+			WebID        string `json:"webId"`
+			BizUserID    string `json:"bizUserId"`
+			UserUniqueID string `json:"userUniqueId"`
+			UserIdentity string `json:"userIdentity"`
+			Scope        string `json:"scope"`
+			Tenant       string `json:"tenant"`
+			Region       string `json:"region"`
+			AppLanguage  string `json:"appLanguage"`
+			AppVersion   string `json:"appVersion"`
+		} `json:"auth"`
+		Account struct {
+			UID          string `json:"uid"`
+			EnterpriseID string `json:"enterpriseId"`
+			Nickname     string `json:"nickname"`
+		} `json:"account"`
+	}
+	var flat struct {
+		AccessToken  string `json:"accessToken"`
+		RefreshToken string `json:"refreshToken"`
+		ExpiresAt    int64  `json:"expiresAt"`
+		Domain       string `json:"domain"`
+		APIHost      string `json:"apiHost"`
+		UID          string `json:"uid"`
+		EnterpriseID string `json:"enterpriseId"`
+		Nickname     string `json:"nickname"`
+		WebID        string `json:"webId"`
+		BizUserID    string `json:"bizUserId"`
+		UserUniqueID string `json:"userUniqueId"`
+		UserIdentity string `json:"userIdentity"`
+		Scope        string `json:"scope"`
+		Tenant       string `json:"tenant"`
+		Region       string `json:"region"`
+		AppLanguage  string `json:"appLanguage"`
+		AppVersion   string `json:"appVersion"`
+	}
+	if _, ok := probe["auth"]; ok {
+		if err := json.Unmarshal(raw, &nested); err != nil {
+			return nil, fmt.Errorf("parse nested auth: %w", err)
+		}
+		return &upstream.Auth{
+			AccessToken:  nested.Auth.AccessToken,
+			RefreshToken: nested.Auth.RefreshToken,
+			ExpiresAt:    nested.Auth.ExpiresAt,
+			APIHost:      nested.Auth.APIHost,
+			Domain:       nonEmpty(nested.Auth.Domain, "trae.ai"),
+			UID:          nested.Account.UID,
+			EnterpriseID: nested.Account.EnterpriseID,
+			Nickname:     nested.Account.Nickname,
+			WebID:        nested.Auth.WebID,
+			BizUserID:    nested.Auth.BizUserID,
+			UserUniqueID: nested.Auth.UserUniqueID,
+			UserIdentity: nested.Auth.UserIdentity,
+			Scope:        nested.Auth.Scope,
+			Tenant:       nested.Auth.Tenant,
+			Region:       nested.Auth.Region,
+			AppLanguage:  nested.Auth.AppLanguage,
+			AppVersion:   nested.Auth.AppVersion,
+		}, nil
+	}
+	if err := json.Unmarshal(raw, &flat); err != nil {
+		return nil, fmt.Errorf("parse flat auth: %w", err)
+	}
+	return &upstream.Auth{
+		AccessToken:  flat.AccessToken,
+		RefreshToken: flat.RefreshToken,
+		ExpiresAt:    flat.ExpiresAt,
+		APIHost:      flat.APIHost,
+		Domain:       nonEmpty(flat.Domain, "trae.ai"),
+		UID:          flat.UID,
+		EnterpriseID: flat.EnterpriseID,
+		Nickname:     flat.Nickname,
+		WebID:        flat.WebID,
+		BizUserID:    flat.BizUserID,
+		UserUniqueID: flat.UserUniqueID,
+		UserIdentity: flat.UserIdentity,
+		Scope:        flat.Scope,
+		Tenant:       flat.Tenant,
+		Region:       flat.Region,
+		AppLanguage:  flat.AppLanguage,
+		AppVersion:   flat.AppVersion,
+	}, nil
 }
 
 func handleParseAuth(request []byte) ([]byte, error) {
-        var req struct {
-                StorageJSON json.RawMessage `json:"storage_json"`
-                FileName    string          `json:"file_name"`
-        }
-        if err := json.Unmarshal(request, &req); err != nil {
-                return nil, err
-        }
-        a, err := parseStoredAuth(req.StorageJSON)
-        if err != nil {
-                return errorEnvelope("parse_error", err.Error()), nil
-        }
-        return okEnvelope(pluginapi.AuthParseResponse{
-                Handled: true,
-                Auth: pluginapi.AuthData{
-                        Provider:    providerName,
-                        ID:          a.UID,
-                        FileName:    nonEmpty(req.FileName, authFileName),
-                        Label:       nonEmpty(a.Nickname, "Trae Intl "+a.UID),
-                        StorageJSON: req.StorageJSON,
-                        Metadata:    map[string]any{"type": providerName, "uid": a.UID},
-                },
-        })
+	var req struct {
+		StorageJSON json.RawMessage `json:"storage_json"`
+		FileName    string          `json:"file_name"`
+	}
+	if err := json.Unmarshal(request, &req); err != nil {
+		return nil, err
+	}
+	a, err := parseStoredAuth(req.StorageJSON)
+	if err != nil {
+		return errorEnvelope("parse_error", err.Error()), nil
+	}
+	return okEnvelope(pluginapi.AuthParseResponse{
+		Handled: true,
+		Auth: pluginapi.AuthData{
+			Provider:    providerName,
+			ID:          a.UID,
+			FileName:    nonEmpty(req.FileName, authFileName),
+			Label:       nonEmpty(a.Nickname, "Trae Intl "+a.UID),
+			StorageJSON: req.StorageJSON,
+			Metadata:    map[string]any{"type": providerName, "uid": a.UID},
+		},
+	})
 }
 
 func handleStartLogin(_ []byte) ([]byte, error) {
@@ -514,37 +513,14 @@ func handleStartLogin(_ []byte) ([]byte, error) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	cbURL := fmt.Sprintf("http://127.0.0.1:%d/authorize", port)
 
-	// Step 3: POST GetLoginGuidance (Intl uses api.marscode.com).
-	guidanceBody, _ := json.Marshal(map[string]any{
-		"loginTraceID":   loginTraceID,
-		"login_trace_id": loginTraceID,
-	})
-	req, err := http.NewRequest(http.MethodPost, oauthLoginGuidanceURL, bytes.NewReader(guidanceBody))
-	if err != nil {
-		ln.Close()
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Trae/"+oauthPluginVersion+" antigravity-cockpit-tools")
-
-	resp, err := http.DefaultClient.Do(req)
+	// Step 3: POST GetLoginGuidance with multi-endpoint fallback
+	// (cockpit-tools request_login_guidance). Intl tries api.marscode.com →
+	// api.trae.ai → www.trae.ai, so a single-host 404/outage no longer
+	// kills the login flow with "GetLoginGuidance upstream 404".
+	loginHost, err := requestLoginGuidance(false, loginTraceID)
 	if err != nil {
 		ln.Close()
 		return nil, fmt.Errorf("GetLoginGuidance failed: %w", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode >= 400 {
-		ln.Close()
-		return nil, fmt.Errorf("GetLoginGuidance upstream %d: %s", resp.StatusCode, truncate(string(raw), 200))
-	}
-
-	// Step 4: Parse LoginHost.
-	loginHost := extractLoginHost(raw)
-	if loginHost == "" {
-		ln.Close()
-		return nil, fmt.Errorf("GetLoginGuidance: missing LoginHost (body=%s)", truncate(string(raw), 200))
 	}
 
 	// Step 5: Build verification URI with PKCE.
@@ -570,15 +546,15 @@ func handleStartLogin(_ []byte) ([]byte, error) {
 
 	// Step 6: Store login state.
 	loginStates.Store(loginTraceID, &loginCtx{
-		listener:     ln,
-		state:        loginTraceID,
-		cbURL:        cbURL,
-		expires:      time.Now().Add(loginTTL),
-		loginTraceID: loginTraceID,
-		codeVerifier: codeVerifier,
+		listener:      ln,
+		state:         loginTraceID,
+		cbURL:         cbURL,
+		expires:       time.Now().Add(loginTTL),
+		loginTraceID:  loginTraceID,
+		codeVerifier:  codeVerifier,
 		codeChallenge: codeChallenge,
-		deviceID:     deviceID,
-		machineID:    machineID,
+		deviceID:      deviceID,
+		machineID:     machineID,
 	})
 
 	go acceptCallback(loginTraceID)
@@ -593,202 +569,199 @@ func handleStartLogin(_ []byte) ([]byte, error) {
 }
 
 func handlePollLogin(request []byte) ([]byte, error) {
-        var req pluginapi.AuthLoginPollRequest
-        if err := json.Unmarshal(request, &req); err != nil {
-                return nil, err
-        }
-        state := strings.TrimSpace(req.State)
-        if state == "" {
-                return nil, fmt.Errorf("poll: empty state")
-        }
-        v, ok := loginStates.Load(state)
-        if !ok {
-                return nil, fmt.Errorf("poll: unknown state — please restart login")
-        }
-        lc := v.(*loginCtx)
-        if time.Now().After(lc.expires) {
-                loginStates.Delete(state)
-                lc.listener.Close()
-                return nil, fmt.Errorf("poll: login expired (5 min timeout) — please re-initiate")
-        }
-        select {
-        case <-lc.done:
-        default:
-                return okEnvelope(pluginapi.AuthLoginPollResponse{
-                        Status:  pluginapi.AuthLoginStatusPending,
-                        Message: "waiting for browser login",
-                })
-        }
-        if lc.err != nil {
-                loginStates.Delete(state)
-                lc.listener.Close()
-                return okEnvelope(pluginapi.AuthLoginPollResponse{
-                        Status:  pluginapi.AuthLoginStatusError,
-                        Message: lc.err.Error(),
-                })
-        }
-        if lc.authCode == "" {
-                loginStates.Delete(state)
-                lc.listener.Close()
-                return okEnvelope(pluginapi.AuthLoginPollResponse{
-                        Status:  pluginapi.AuthLoginStatusError,
-                        Message: "login completed but no authCode received — please retry",
-                })
-        }
-        // Exchange authCode for tokens.
-        tokenBody := map[string]any{
-                "ClientID":     upstreamClient.ClientID,
-                "AuthCode":     lc.authCode,
-                "CodeVerifier": lc.codeVerifier,
-                "ClientSecret": "-",
-                "UserID":       "",
-                "DeviceInfo":   map[string]any{"DeviceId": randomHex(16), "MachineId": randomHex(16)},
-                "IDEVersion":   "3.5.66",
-        }
-        tokenBytes, _ := json.Marshal(tokenBody)
-        tokenReq, _ := http.NewRequest(http.MethodPost,
-                upstreamClient.OAuthHost+"/trae/api/v3/oauth/ExchangeToken",
-                bytes.NewReader(tokenBytes))
-        tokenReq.Header.Set("Content-Type", "application/json")
-        tokenReq.Header.Set("User-Agent", "Trae/3.5.66")
-        tokenResp, err := http.DefaultClient.Do(tokenReq)
-        if err != nil {
-                loginStates.Delete(state)
-                lc.listener.Close()
-                return okEnvelope(pluginapi.AuthLoginPollResponse{
-                        Status:  pluginapi.AuthLoginStatusError,
-                        Message: fmt.Sprintf("ExchangeToken failed: %v", err),
-                })
-        }
-        defer tokenResp.Body.Close()
-        tokenRaw, _ := io.ReadAll(io.LimitReader(tokenResp.Body, 1<<20))
-        if tokenResp.StatusCode >= 400 {
-                loginStates.Delete(state)
-                lc.listener.Close()
-                return okEnvelope(pluginapi.AuthLoginPollResponse{
-                        Status:  pluginapi.AuthLoginStatusError,
-                        Message: fmt.Sprintf("ExchangeToken upstream %d: %s", tokenResp.StatusCode, truncate(string(tokenRaw), 200)),
-                })
-        }
-        var tokenEnv struct {
-                Result struct {
-                        Token               string `json:"Token"`
-                        TokenExpireAt       int64  `json:"TokenExpireAt"`
-                        RefreshToken        string `json:"RefreshToken"`
-                        RefreshExpireAt     int64  `json:"RefreshExpireAt"`
-                } `json:"Result"`
-        }
-        if err := json.Unmarshal(tokenRaw, &tokenEnv); err != nil {
-                loginStates.Delete(state)
-                lc.listener.Close()
-                return okEnvelope(pluginapi.AuthLoginPollResponse{
-                        Status:  pluginapi.AuthLoginStatusError,
-                        Message: fmt.Sprintf("parse ExchangeToken: %v", err),
-                })
-        }
-        a := &upstream.Auth{
-                AccessToken:  tokenEnv.Result.Token,
-                RefreshToken: tokenEnv.Result.RefreshToken,
-                ExpiresAt:    normalizeExpiresAt(tokenEnv.Result.TokenExpireAt),
-                APIHost:      upstreamClient.OAuthHost,
-                Domain:       "trae.ai",
-                Region:       "US-East",
-                Scope:        "marscode-us",
-                Tenant:       "marscode",
-                UserIdentity: "Free",
-                AppLanguage:  "en",
-                AppVersion:   "1.0.0.1229",
-        }
-        uid, nickname, entID, err := upstreamClient.GetUserInfo(a)
-        if err != nil {
-                log.Printf("GetUserInfo failed: %v — proceeding with empty UID", err)
-        }
-        a.UID = uid
-        a.Nickname = nickname
-        a.EnterpriseID = entID
-        storageJSON, _ := json.MarshalIndent(map[string]any{
-                "type":     providerName,
-                "provider": providerName,
-                "auth": map[string]any{
-                        "accessToken":  a.AccessToken,
-                        "refreshToken": a.RefreshToken,
-                        "expiresAt":    a.ExpiresAt,
-                        "domain":       a.Domain,
-                        "apiHost":      a.APIHost,
-                        "region":       a.Region,
-                        "scope":        a.Scope,
-                        "tenant":       a.Tenant,
-                        "appLanguage":  a.AppLanguage,
-                        "appVersion":   a.AppVersion,
-                },
-                "account": map[string]any{
-                        "uid":          a.UID,
-                        "enterpriseId": a.EnterpriseID,
-                        "nickname":     a.Nickname,
-                },
-                "disabled": false,
-        }, "", "  ")
-        loginStates.Delete(state)
-        lc.listener.Close()
-        return okEnvelope(pluginapi.AuthLoginPollResponse{
-                Status:  pluginapi.AuthLoginStatusSuccess,
-                Message: fmt.Sprintf("login complete (uid=%s)", a.UID),
-                Auth: pluginapi.AuthData{
-                        Provider:    providerName,
-                        ID:          a.UID,
-                        FileName:    fmt.Sprintf("%s-%s.json", providerName, a.UID),
-                        Label:       nonEmpty(a.Nickname, "Trae Intl "+a.UID),
-                        StorageJSON: storageJSON,
-                        Metadata:    map[string]any{"type": providerName, "uid": a.UID, "nickname": a.Nickname},
-                },
-        })
+	var req pluginapi.AuthLoginPollRequest
+	if err := json.Unmarshal(request, &req); err != nil {
+		return nil, err
+	}
+	state := strings.TrimSpace(req.State)
+	if state == "" {
+		return nil, fmt.Errorf("poll: empty state")
+	}
+	v, ok := loginStates.Load(state)
+	if !ok {
+		return nil, fmt.Errorf("poll: unknown state — please restart login")
+	}
+	lc := v.(*loginCtx)
+	if time.Now().After(lc.expires) {
+		loginStates.Delete(state)
+		lc.listener.Close()
+		return nil, fmt.Errorf("poll: login expired (5 min timeout) — please re-initiate")
+	}
+	select {
+	case <-lc.done:
+	default:
+		return okEnvelope(pluginapi.AuthLoginPollResponse{
+			Status:  pluginapi.AuthLoginStatusPending,
+			Message: "waiting for browser login",
+		})
+	}
+	if lc.err != nil {
+		loginStates.Delete(state)
+		lc.listener.Close()
+		return okEnvelope(pluginapi.AuthLoginPollResponse{
+			Status:  pluginapi.AuthLoginStatusError,
+			Message: lc.err.Error(),
+		})
+	}
+	if lc.authCode == "" {
+		loginStates.Delete(state)
+		lc.listener.Close()
+		return okEnvelope(pluginapi.AuthLoginPollResponse{
+			Status:  pluginapi.AuthLoginStatusError,
+			Message: "login completed but no authCode received — please retry",
+		})
+	}
+	// Exchange authCode for tokens via multi-origin fallback
+	// (cockpit-tools candidate_account_api_origins): derive origins from
+	// the callback loginHost (www.→api. rewrite) and append the Intl
+	// account-API defaults. The full DeviceInfo mirrors cockpit-tools
+	// build_official_device_info and reuses the SAME machine/device ids
+	// embedded in the login URL (previously random hex ids were sent).
+	di := buildOfficialDeviceInfo(
+		lc.deviceID, lc.machineID, oauthPlatformCode, oauthDeviceName,
+		oauthDeviceBrand, oauthAppVersion, oauthDeviceType, oauthOSVersion,
+	)
+	tokenBody := map[string]any{
+		"ClientID":     upstreamClient.ClientID,
+		"AuthCode":     lc.authCode,
+		"CodeVerifier": lc.codeVerifier,
+		"DeviceInfo":   di,
+		"IDEVersion":   oauthAppVersion,
+	}
+	tokenBytes, _ := json.Marshal(tokenBody)
+	tokenRaw, exErr := exchangeTokenCandidates(
+		buildAPIURLs(lc.loginHost, "/trae/api/v3/oauth/ExchangeToken", false), tokenBytes)
+	if exErr != nil {
+		loginStates.Delete(state)
+		lc.listener.Close()
+		return okEnvelope(pluginapi.AuthLoginPollResponse{
+			Status:  pluginapi.AuthLoginStatusError,
+			Message: exErr.Error(),
+		})
+	}
+	var tokenEnv struct {
+		Result struct {
+			Token           string `json:"Token"`
+			AccessToken     string `json:"AccessToken"`
+			TokenExpireAt   int64  `json:"TokenExpireAt"`
+			RefreshToken    string `json:"RefreshToken"`
+			RefreshExpireAt int64  `json:"RefreshExpireAt"`
+		} `json:"Result"`
+	}
+	if err := json.Unmarshal(tokenRaw, &tokenEnv); err != nil {
+		loginStates.Delete(state)
+		lc.listener.Close()
+		return okEnvelope(pluginapi.AuthLoginPollResponse{
+			Status:  pluginapi.AuthLoginStatusError,
+			Message: fmt.Sprintf("parse ExchangeToken: %v", err),
+		})
+	}
+	if tokenEnv.Result.AccessToken != "" && tokenEnv.Result.Token == "" {
+		tokenEnv.Result.Token = tokenEnv.Result.AccessToken
+	}
+	a := &upstream.Auth{
+		AccessToken:  tokenEnv.Result.Token,
+		RefreshToken: tokenEnv.Result.RefreshToken,
+		ExpiresAt:    normalizeExpiresAt(tokenEnv.Result.TokenExpireAt),
+		APIHost:      upstreamClient.OAuthHost,
+		Domain:       "trae.ai",
+		Region:       "US-East",
+		Scope:        "marscode-us",
+		Tenant:       "marscode",
+		UserIdentity: "Free",
+		AppLanguage:  "en",
+		AppVersion:   "1.0.0.1229",
+	}
+	uid, nickname, entID, err := upstreamClient.GetUserInfo(a)
+	if err != nil {
+		log.Printf("GetUserInfo failed: %v — proceeding with empty UID", err)
+	}
+	a.UID = uid
+	a.Nickname = nickname
+	a.EnterpriseID = entID
+	storageJSON, _ := json.MarshalIndent(map[string]any{
+		"type":     providerName,
+		"provider": providerName,
+		"auth": map[string]any{
+			"accessToken":  a.AccessToken,
+			"refreshToken": a.RefreshToken,
+			"expiresAt":    a.ExpiresAt,
+			"domain":       a.Domain,
+			"apiHost":      a.APIHost,
+			"region":       a.Region,
+			"scope":        a.Scope,
+			"tenant":       a.Tenant,
+			"appLanguage":  a.AppLanguage,
+			"appVersion":   a.AppVersion,
+		},
+		"account": map[string]any{
+			"uid":          a.UID,
+			"enterpriseId": a.EnterpriseID,
+			"nickname":     a.Nickname,
+		},
+		"disabled": false,
+	}, "", "  ")
+	loginStates.Delete(state)
+	lc.listener.Close()
+	return okEnvelope(pluginapi.AuthLoginPollResponse{
+		Status:  pluginapi.AuthLoginStatusSuccess,
+		Message: fmt.Sprintf("login complete (uid=%s)", a.UID),
+		Auth: pluginapi.AuthData{
+			Provider:    providerName,
+			ID:          a.UID,
+			FileName:    fmt.Sprintf("%s-%s.json", providerName, a.UID),
+			Label:       nonEmpty(a.Nickname, "Trae Intl "+a.UID),
+			StorageJSON: storageJSON,
+			Metadata:    map[string]any{"type": providerName, "uid": a.UID, "nickname": a.Nickname},
+		},
+	})
 }
 
 func handleRefreshAuth(request []byte) ([]byte, error) {
-        var req pluginapi.AuthRefreshRequest
-        if err := json.Unmarshal(request, &req); err != nil {
-                return nil, err
-        }
-        a, err := parseStoredAuth(req.StorageJSON)
-        if err != nil {
-                return nil, fmt.Errorf("refresh: parse auth: %w", err)
-        }
-        if err := upstreamClient.RefreshToken(a); err != nil {
-                return nil, fmt.Errorf("refresh: ExchangeToken: %w", err)
-        }
-        storageJSON, _ := json.MarshalIndent(map[string]any{
-                "type":     providerName,
-                "provider": providerName,
-                "auth": map[string]any{
-                        "accessToken":  a.AccessToken,
-                        "refreshToken": a.RefreshToken,
-                        "expiresAt":    a.ExpiresAt,
-                        "domain":       a.Domain,
-                        "apiHost":      a.APIHost,
-                        "region":       a.Region,
-                        "scope":        a.Scope,
-                        "tenant":       a.Tenant,
-                        "appLanguage":  a.AppLanguage,
-                        "appVersion":   a.AppVersion,
-                },
-                "account": map[string]any{
-                        "uid":          a.UID,
-                        "enterpriseId": a.EnterpriseID,
-                        "nickname":     a.Nickname,
-                },
-                "disabled": false,
-        }, "", "  ")
-        return okEnvelope(pluginapi.AuthRefreshResponse{
-                Auth: pluginapi.AuthData{
-                        Provider:    providerName,
-                        ID:          a.UID,
-                        FileName:    fmt.Sprintf("%s-%s.json", providerName, a.UID),
-                        Label:       nonEmpty(a.Nickname, "Trae Intl "+a.UID),
-                        StorageJSON: storageJSON,
-                        Metadata:    map[string]any{"type": providerName, "uid": a.UID},
-                },
-                NextRefreshAfter: time.Now().Add(12 * time.Hour).UTC(),
-        })
+	var req pluginapi.AuthRefreshRequest
+	if err := json.Unmarshal(request, &req); err != nil {
+		return nil, err
+	}
+	a, err := parseStoredAuth(req.StorageJSON)
+	if err != nil {
+		return nil, fmt.Errorf("refresh: parse auth: %w", err)
+	}
+	if err := upstreamClient.RefreshToken(a); err != nil {
+		return nil, fmt.Errorf("refresh: ExchangeToken: %w", err)
+	}
+	storageJSON, _ := json.MarshalIndent(map[string]any{
+		"type":     providerName,
+		"provider": providerName,
+		"auth": map[string]any{
+			"accessToken":  a.AccessToken,
+			"refreshToken": a.RefreshToken,
+			"expiresAt":    a.ExpiresAt,
+			"domain":       a.Domain,
+			"apiHost":      a.APIHost,
+			"region":       a.Region,
+			"scope":        a.Scope,
+			"tenant":       a.Tenant,
+			"appLanguage":  a.AppLanguage,
+			"appVersion":   a.AppVersion,
+		},
+		"account": map[string]any{
+			"uid":          a.UID,
+			"enterpriseId": a.EnterpriseID,
+			"nickname":     a.Nickname,
+		},
+		"disabled": false,
+	}, "", "  ")
+	return okEnvelope(pluginapi.AuthRefreshResponse{
+		Auth: pluginapi.AuthData{
+			Provider:    providerName,
+			ID:          a.UID,
+			FileName:    fmt.Sprintf("%s-%s.json", providerName, a.UID),
+			Label:       nonEmpty(a.Nickname, "Trae Intl "+a.UID),
+			StorageJSON: storageJSON,
+			Metadata:    map[string]any{"type": providerName, "uid": a.UID},
+		},
+		NextRefreshAfter: time.Now().Add(12 * time.Hour).UTC(),
+	})
 }
 
 // -----------------------------------------------------------------------------
@@ -796,83 +769,83 @@ func handleRefreshAuth(request []byte) ([]byte, error) {
 // -----------------------------------------------------------------------------
 
 func handleExecExecute(request []byte) ([]byte, error) {
-        var req pluginapi.ExecutorRequest
-        if err := json.Unmarshal(request, &req); err != nil {
-                return nil, err
-        }
-        a, err := parseStoredAuth(req.StorageJSON)
-        if err != nil {
-                return nil, fmt.Errorf("execute: parse auth: %w", err)
-        }
-        // Refresh token if needed (within 24h of expiry).
-        refreshed, err := upstreamClient.RefreshTokenIfNeeded(a, 24*time.Hour)
-        if err != nil {
-                return nil, fmt.Errorf("execute: refresh: %w", err)
-        }
-        if refreshed {
-                persistRefreshedAuth(req, a)
-        }
-        // Parse OpenAI messages from payload.
-        var openaiReq struct {
-                Model    string           `json:"model"`
-                Messages []map[string]any `json:"messages"`
-        }
-        if err := json.Unmarshal(req.Payload, &openaiReq); err != nil {
-                return nil, fmt.Errorf("execute: parse payload: %w", err)
-        }
-        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-        defer cancel()
-        completion, err := upstreamClient.Execute(ctx, a, openaiReq.Model, openaiReq.Messages)
-        if err != nil {
-                return nil, fmt.Errorf("execute: %w", err)
-        }
-        out, _ := json.Marshal(completion)
-        return okEnvelope(pluginapi.ExecutorResponse{Payload: out})
+	var req pluginapi.ExecutorRequest
+	if err := json.Unmarshal(request, &req); err != nil {
+		return nil, err
+	}
+	a, err := parseStoredAuth(req.StorageJSON)
+	if err != nil {
+		return nil, fmt.Errorf("execute: parse auth: %w", err)
+	}
+	// Refresh token if needed (within 24h of expiry).
+	refreshed, err := upstreamClient.RefreshTokenIfNeeded(a, 24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("execute: refresh: %w", err)
+	}
+	if refreshed {
+		persistRefreshedAuth(req, a)
+	}
+	// Parse OpenAI messages from payload.
+	var openaiReq struct {
+		Model    string           `json:"model"`
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(req.Payload, &openaiReq); err != nil {
+		return nil, fmt.Errorf("execute: parse payload: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	completion, err := upstreamClient.Execute(ctx, a, openaiReq.Model, openaiReq.Messages)
+	if err != nil {
+		return nil, fmt.Errorf("execute: %w", err)
+	}
+	out, _ := json.Marshal(completion)
+	return okEnvelope(pluginapi.ExecutorResponse{Payload: out})
 }
 
 func handleExecStream(request []byte) ([]byte, error) {
-        var req pluginapi.ExecutorRequest
-        if err := json.Unmarshal(request, &req); err != nil {
-                return nil, err
-        }
-        a, err := parseStoredAuth(req.StorageJSON)
-        if err != nil {
-                return nil, fmt.Errorf("stream: parse auth: %w", err)
-        }
-        // Refresh token if needed (within 24h of expiry).
-        refreshed, err := upstreamClient.RefreshTokenIfNeeded(a, 24*time.Hour)
-        if err != nil {
-                return nil, fmt.Errorf("stream: refresh: %w", err)
-        }
-        if refreshed {
-                persistRefreshedAuth(req, a)
-        }
-        var openaiReq struct {
-                Model    string           `json:"model"`
-                Messages []map[string]any `json:"messages"`
-        }
-        if err := json.Unmarshal(req.Payload, &openaiReq); err != nil {
-                return nil, fmt.Errorf("stream: parse payload: %w", err)
-        }
-        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-        defer cancel()
-        reader, err := upstreamClient.ExecuteStream(ctx, a, openaiReq.Model, openaiReq.Messages)
-        if err != nil {
-                return nil, fmt.Errorf("stream: %w", err)
-        }
-        // Read all chunks and emit as a single ExecutorStreamChunk (simpler than
-        // real-time piping through the host's chunk channel).
-        raw, err := io.ReadAll(reader)
-        if err != nil {
-                return nil, fmt.Errorf("stream: read: %w", err)
-        }
-        ch := make(chan pluginapi.ExecutorStreamChunk, 1)
-        ch <- pluginapi.ExecutorStreamChunk{Payload: raw}
-        close(ch)
-        return okEnvelope(pluginapi.ExecutorStreamResponse{
-                Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
-                Chunks:  ch,
-        })
+	var req pluginapi.ExecutorRequest
+	if err := json.Unmarshal(request, &req); err != nil {
+		return nil, err
+	}
+	a, err := parseStoredAuth(req.StorageJSON)
+	if err != nil {
+		return nil, fmt.Errorf("stream: parse auth: %w", err)
+	}
+	// Refresh token if needed (within 24h of expiry).
+	refreshed, err := upstreamClient.RefreshTokenIfNeeded(a, 24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("stream: refresh: %w", err)
+	}
+	if refreshed {
+		persistRefreshedAuth(req, a)
+	}
+	var openaiReq struct {
+		Model    string           `json:"model"`
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(req.Payload, &openaiReq); err != nil {
+		return nil, fmt.Errorf("stream: parse payload: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	reader, err := upstreamClient.ExecuteStream(ctx, a, openaiReq.Model, openaiReq.Messages)
+	if err != nil {
+		return nil, fmt.Errorf("stream: %w", err)
+	}
+	// Read all chunks and emit as a single ExecutorStreamChunk (simpler than
+	// real-time piping through the host's chunk channel).
+	raw, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("stream: read: %w", err)
+	}
+	ch := make(chan pluginapi.ExecutorStreamChunk, 1)
+	ch <- pluginapi.ExecutorStreamChunk{Payload: raw}
+	close(ch)
+	return okEnvelope(pluginapi.ExecutorStreamResponse{
+		Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Chunks:  ch,
+	})
 }
 
 // -----------------------------------------------------------------------------
@@ -880,52 +853,51 @@ func handleExecStream(request []byte) ([]byte, error) {
 // -----------------------------------------------------------------------------
 
 func okEnvelope(result any) ([]byte, error) {
-        raw, err := json.Marshal(result)
-        if err != nil {
-                return nil, err
-        }
-        return json.Marshal(envelope{OK: true, Result: raw})
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(envelope{OK: true, Result: raw})
 }
 
 func errorEnvelope(code, message string) []byte {
-        raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
-        return raw
+	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
+	return raw
 }
 
 func writeResponse(response *C.cliproxy_buffer, raw []byte) {
-        if response == nil || len(raw) == 0 {
-                return
-        }
-        ptr := C.CBytes(raw)
-        if ptr == nil {
-                return
-        }
-        response.ptr = ptr
-        response.len = C.size_t(len(raw))
+	if response == nil || len(raw) == 0 {
+		return
+	}
+	ptr := C.CBytes(raw)
+	if ptr == nil {
+		return
+	}
+	response.ptr = ptr
+	response.len = C.size_t(len(raw))
 }
 
 func truncate(s string, n int) string {
-        s = strings.TrimSpace(s)
-        if len(s) > n {
-                return s[:n]
-        }
-        return s
+	s = strings.TrimSpace(s)
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
 
 func nonEmpty(s, fallback string) string {
-        if strings.TrimSpace(s) != "" {
-                return s
-        }
-        return fallback
+	if strings.TrimSpace(s) != "" {
+		return s
+	}
+	return fallback
 }
 
 func normalizeExpiresAt(v int64) int64 {
-        if v > 1e12 {
-                return v / 1000
-        }
-        return v
+	if v > 1e12 {
+		return v / 1000
+	}
+	return v
 }
-
 
 // extractLoginHost extracts LoginHost from GetLoginGuidance response.
 func extractLoginHost(raw []byte) string {
@@ -972,28 +944,29 @@ func extractLoginHost(raw []byte) string {
 
 // verificationURIParams holds parameters for building the OAuth verification URL.
 type verificationURIParams struct {
-	AuthFrom       string
-	PluginVersion  string
-	ClientID       string
-	LoginTraceID   string
-	CallbackURL    string
-	MachineID      string
-	DeviceID       string
-	DeviceBrand    string
-	DeviceType     string
-	OSVersion      string
-	Env            string
-	AppVersion     string
-	AppType        string
-	CodeChallenge  string
-	HideSaasLogin  bool
+	AuthFrom      string
+	PluginVersion string
+	ClientID      string
+	LoginTraceID  string
+	CallbackURL   string
+	MachineID     string
+	DeviceID      string
+	DeviceBrand   string
+	DeviceType    string
+	OSVersion     string
+	Env           string
+	AppVersion    string
+	AppType       string
+	CodeChallenge string
+	HideSaasLogin bool
 }
 
 // buildVerificationURI constructs the browser-facing OAuth URL.
 func buildVerificationURI(loginHost string, p verificationURIParams) string {
-	if !strings.HasPrefix(loginHost, "http") {
-		loginHost = "https://" + loginHost
-	}
+	// ensureHTTPSScheme mirrors cockpit-tools ensure_https_url: a scheme-less
+	// URL would be resolved as a RELATIVE path by the panel browser and hit
+	// the CPA server itself → "404 page not found".
+	loginHost = ensureHTTPSScheme(loginHost)
 	u, err := url.Parse(loginHost)
 	if err != nil {
 		return loginHost
@@ -1037,19 +1010,19 @@ func writeCallbackHTML(conn net.Conn, title, msg string) {
 
 // loginCtx holds the local callback listener for one in-flight OAuth flow.
 type loginCtx struct {
-	listener     net.Listener
-	state        string
-	cbURL        string
-	expires      time.Time
-	loginTraceID string
-	codeVerifier string
+	listener      net.Listener
+	state         string
+	cbURL         string
+	expires       time.Time
+	loginTraceID  string
+	codeVerifier  string
 	codeChallenge string
-	deviceID     string
-	machineID    string
-	loginHost    string
-	authCode     string
-	err          error
-	done         chan struct{}
+	deviceID      string
+	machineID     string
+	loginHost     string
+	authCode      string
+	err           error
+	done          chan struct{}
 }
 
 // acceptCallback accepts the OAuth callback from the browser.

@@ -53,31 +53,31 @@ const (
 type Auth struct {
 	AccessToken  string // Cloud-IDE-JWT
 	RefreshToken string
-	ExpiresAt    int64 // Unix seconds
-	APIHost string // OAuth host (api.marscode.com)
+	ExpiresAt    int64  // Unix seconds
+	APIHost      string // OAuth host (api.marscode.com)
 	Domain       string // "trae.ai"
 	UID          string
 	EnterpriseID string
 	Nickname     string
 
 	// Web SOLO remote-specific identity fields (from providerSpecificData).
-	WebID         string
-	BizUserID     string
-	UserUniqueID  string
-	UserIdentity  string // "Free" / "Pro" / etc.
-	Scope         string // "marscode-us" / "marscode"
-	Tenant        string // "marscode"
-	Region        string // "US-East"
-	AppLanguage   string // "en"
-	AppVersion    string // "1.0.0.1229"
+	WebID        string
+	BizUserID    string
+	UserUniqueID string
+	UserIdentity string // "Free" / "Pro" / etc.
+	Scope        string // "marscode-us" / "marscode"
+	Tenant       string // "marscode"
+	Region       string // "US-East"
+	AppLanguage  string // "en"
+	AppVersion   string // "1.0.0.1229"
 }
 
 // Client is the Trae Intl upstream client.
 type Client struct {
-	HTTP       *http.Client
-	BaseURL    string // https://core-normal.trae.ai/api/remote/v1
-	OAuthHost  string // https://api.marscode.com
-	ClientID   string // ono9krqynydwx5
+	HTTP      *http.Client
+	BaseURL   string // https://core-normal.trae.ai/api/remote/v1
+	OAuthHost string // https://api.marscode.com
+	ClientID  string // ono9krqynydwx5
 }
 
 // New creates a default client.
@@ -128,22 +128,22 @@ func resolveMode(model string) (mode, strategy, modelName string) {
 // commonParams builds the common_params JSON string for chat_sessions.
 func commonParams(a *Auth, mode string) string {
 	cp := map[string]any{
-		"language":         "en-us",
-		"app_language":     nonEmpty(a.AppLanguage, "en"),
-		"quality":          "stable",
-		"app_version":      nonEmpty(a.AppVersion, "1.0.0.1229"),
-		"web_id":           a.WebID,
-		"user_identity":    nonEmpty(a.UserIdentity, "Free"),
-		"is_freshman":      "0",
-		"biz_user_id":      a.BizUserID,
-		"user_unique_id":    a.UserUniqueID,
-		"scope":            nonEmpty(a.Scope, "marscode-us"),
-		"tenant":           nonEmpty(a.Tenant, "marscode"),
-		"region":           nonEmpty(a.Region, "US-East"),
-		"aiRegion":         nonEmpty(a.Region, "US-East"),
-		"is_privacy_mode":  0,
-		"privacy_mode":     "off",
-		"solo_chat_mode":   mode,
+		"language":        "en-us",
+		"app_language":    nonEmpty(a.AppLanguage, "en"),
+		"quality":         "stable",
+		"app_version":     nonEmpty(a.AppVersion, "1.0.0.1229"),
+		"web_id":          a.WebID,
+		"user_identity":   nonEmpty(a.UserIdentity, "Free"),
+		"is_freshman":     "0",
+		"biz_user_id":     a.BizUserID,
+		"user_unique_id":  a.UserUniqueID,
+		"scope":           nonEmpty(a.Scope, "marscode-us"),
+		"tenant":          nonEmpty(a.Tenant, "marscode"),
+		"region":          nonEmpty(a.Region, "US-East"),
+		"aiRegion":        nonEmpty(a.Region, "US-East"),
+		"is_privacy_mode": 0,
+		"privacy_mode":    "off",
+		"solo_chat_mode":  mode,
 	}
 	raw, _ := json.Marshal(cp)
 	return string(raw)
@@ -204,8 +204,8 @@ func (c *Client) CreateSession(a *Auth, model string, messages []map[string]any)
 	mode, strategy, modelName := resolveMode(model)
 	query := flattenQuery(messages)
 	body := map[string]any{
-		"mode":             mode,
-		"environment_id":   "default",
+		"mode":           mode,
+		"environment_id": "default",
 		"initial_message": map[string]any{
 			"chat_session_id":          "",
 			"content":                  []any{},
@@ -213,11 +213,11 @@ func (c *Client) CreateSession(a *Auth, model string, messages []map[string]any)
 			"model_name":               modelName,
 			"agent_type":               "solo_agent_remote",
 			"model_selection_strategy": strategy,
-			"common_params":             commonParams(a, mode),
+			"common_params":            commonParams(a, mode),
 		},
-		"env":                "remote",
+		"env":                 "remote",
 		"auto_create_project": false,
-		"origin":             "web",
+		"origin":              "web",
 	}
 	raw, _ := json.Marshal(body)
 	req, err := http.NewRequest(http.MethodPost, c.BaseURL+EpChatSessions, bytes.NewReader(raw))
@@ -307,12 +307,12 @@ func (c *Client) Execute(ctx context.Context, a *Auth, model string, messages []
 		return nil, err
 	}
 	var (
-		order        []string
-		thoughts     = map[string]string{}
-		sent         int
-		usage        map[string]any
-		errorEvent   map[string]any
-		fullContent  strings.Builder
+		order       []string
+		thoughts    = map[string]string{}
+		sent        int
+		usage       map[string]any
+		errorEvent  map[string]any
+		fullContent strings.Builder
 	)
 	renderNewText := func(data map[string]any) {
 		pid, _ := data["id"].(string)
@@ -516,14 +516,14 @@ func (c *Client) ExecuteStream(ctx context.Context, a *Auth, model string, messa
 }
 
 // RefreshToken refreshes the access token via ExchangeToken.
+// Multi-origin fallback (cockpit-tools build_api_urls): try the account
+// apiHost → OAuthHost → Intl alternates so a single-host outage/404 no
+// longer breaks token refresh.
 func (c *Client) RefreshToken(a *Auth) error {
 	if a.RefreshToken == "" {
 		return fmt.Errorf("no refreshToken")
 	}
-	host := a.APIHost
-	if host == "" {
-		host = c.OAuthHost
-	}
+	hosts := exchangeHosts(a.APIHost, c.OAuthHost)
 	body := map[string]any{
 		"ClientID":     c.ClientID,
 		"RefreshToken": a.RefreshToken,
@@ -531,33 +531,48 @@ func (c *Client) RefreshToken(a *Auth) error {
 		"UserID":       "",
 	}
 	raw, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPost, host+EpExchange, bytes.NewReader(raw))
-	if err != nil {
-		return err
+	var respBody []byte
+	var lastErr error
+	for _, host := range hosts {
+		req, err := http.NewRequest(http.MethodPost, host+EpExchange, bytes.NewReader(raw))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "Trae/3.5.66")
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		respBody, _ = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			lastErr = fmt.Errorf("refresh upstream %d: %s", resp.StatusCode, truncate(string(respBody), 200))
+			continue
+		}
+		lastErr = nil
+		break
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Trae/3.5.66")
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("refresh upstream %d: %s", resp.StatusCode, truncate(string(respBody), 200))
+	if lastErr != nil {
+		return lastErr
 	}
 	var env struct {
 		Result struct {
-			Token                string `json:"Token"`
-			TokenExpireAt        int64  `json:"TokenExpireAt"`
-			TokenExpireDuration  int64  `json:"TokenExpireDuration"`
-			RefreshToken         string `json:"RefreshToken"`
-			RefreshExpireAt      int64  `json:"RefreshExpireAt"`
+			Token               string `json:"Token"`
+			AccessToken         string `json:"AccessToken"`
+			TokenExpireAt       int64  `json:"TokenExpireAt"`
+			TokenExpireDuration int64  `json:"TokenExpireDuration"`
+			RefreshToken        string `json:"RefreshToken"`
+			RefreshExpireAt     int64  `json:"RefreshExpireAt"`
 		} `json:"Result"`
 	}
 	if err := json.Unmarshal(respBody, &env); err != nil {
 		return fmt.Errorf("refresh parse: %w", err)
+	}
+	if env.Result.Token == "" {
+		env.Result.Token = env.Result.AccessToken
 	}
 	if env.Result.Token == "" {
 		return fmt.Errorf("refresh_failed: no token in response")
@@ -573,29 +588,38 @@ func (c *Client) RefreshToken(a *Auth) error {
 }
 
 // GetUserInfo queries the account info (UID, nickname, enterpriseID).
+// Multi-origin fallback (cockpit-tools build_api_urls): account apiHost →
+// OAuthHost → Intl alternates.
 func (c *Client) GetUserInfo(a *Auth) (uid, nickname, enterpriseID string, err error) {
-	host := a.APIHost
-	if host == "" {
-		host = c.OAuthHost
-	}
 	body := map[string]any{"ReqSource": "IDE", "IDEVersion": "3.5.66"}
 	raw, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPost, host+EpUserInfo, bytes.NewReader(raw))
-	if err != nil {
-		return "", "", "", err
+	var respBody []byte
+	var lastErr error
+	for _, host := range exchangeHosts(a.APIHost, c.OAuthHost) {
+		req, rerr := http.NewRequest(http.MethodPost, host+EpUserInfo, bytes.NewReader(raw))
+		if rerr != nil {
+			return "", "", "", rerr
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "Trae/3.5.66")
+		req.Header.Set("X-Cloudide-Token", a.AccessToken)
+		resp, rerr := c.HTTP.Do(req)
+		if rerr != nil {
+			lastErr = rerr
+			continue
+		}
+		respBody, _ = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			lastErr = fmt.Errorf("userinfo upstream %d: %s", resp.StatusCode, truncate(string(respBody), 200))
+			continue
+		}
+		lastErr = nil
+		break
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Trae/3.5.66")
-	req.Header.Set("X-Cloudide-Token", a.AccessToken)
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return "", "", "", err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode >= 400 {
-		return "", "", "", fmt.Errorf("userinfo upstream %d: %s", resp.StatusCode, truncate(string(respBody), 200))
+	if lastErr != nil {
+		return "", "", "", lastErr
 	}
 	var env struct {
 		Result struct {
