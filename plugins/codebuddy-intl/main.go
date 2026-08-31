@@ -81,19 +81,19 @@ const (
         // Global chat/auth gateway (iss = workbuddy.ai realm). APISIX on
         // copilot.tencent.com rejects Global JWTs with 401; must use workbuddy.ai.
         upstreamBaseGlobal  = "https://www.codebuddy.ai"
-        clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
-        originReferer       = "https://www.codebuddy.cn"
+        clientUA            = "CLI/2.108.1 CodeBuddy/2.108.1"
+        originReferer       = "https://www.codebuddy.ai"
         originRefererGlobal = "https://www.codebuddy.ai"
 
         // CN endpoint aliases (login / chat / models). upstreamBaseCN is the only
         // CN base; Global has its own upstreamBaseGlobal. No "upstreamBase" legacy
         // alias — removed in v0.6.31 dead-code sweep.
-        endpointAuthState    = upstreamBaseCN + "/v2/plugin/auth/state?platform=ide"
-        endpointLoginAcct    = upstreamBaseCN + "/v2/plugin/login/account?state="
-        endpointAuthToken    = upstreamBaseCN + "/v2/plugin/auth/token?state="
-        endpointTokenRefresh = upstreamBaseCN + "/v2/plugin/auth/token/refresh"
-        endpointChat         = upstreamBaseCN + "/v2/chat/completions"
-        endpointModels       = upstreamBaseCN + "/console/enterprises/personal/models"
+        endpointAuthState    = upstreamBaseGlobal + "/v2/plugin/auth/state?platform=ide"
+        endpointLoginAcct    = upstreamBaseGlobal + "/v2/plugin/login/account?state="
+        endpointAuthToken    = upstreamBaseGlobal + "/v2/plugin/auth/token?state="
+        endpointTokenRefresh = upstreamBaseGlobal + "/v2/plugin/auth/token/refresh"
+        endpointChat         = upstreamBaseGlobal + "/v2/chat/completions"
+        endpointModels       = upstreamBaseGlobal + "/console/enterprises/personal/models"
 
         loginTTL = 5 * time.Minute
 )
@@ -494,10 +494,15 @@ func parseStored(raw []byte) (*storedAuth, error) {
 func commonHeaders(req *http.Request) {
         req.Header.Set("Content-Type", "application/json")
         req.Header.Set("Accept", "application/json, text/plain, */*")
-        req.Header.Set("X-Requested-With", "XMLHttpRequest")
+        // Intl does NOT send X-Requested-With (CN only)
         req.Header.Set("Origin", originReferer)
         req.Header.Set("Referer", originReferer+"/")
         req.Header.Set("User-Agent", clientUA)
+        // Intl IDE headers (different from CN's CodeBuddyIDE)
+        req.Header.Set("X-IDE-Type", "IDE")
+        req.Header.Set("X-IDE-Name", "CodeBuddy")
+        req.Header.Set("X-IDE-Version", "1.100.0")
+        req.Header.Set("X-Product-Version", "1.100.0")
 }
 
 // originRefererFor returns the Origin/Referer base URL appropriate for the
@@ -560,7 +565,7 @@ func backendHeaders(req *http.Request, sa *storedAuth) {
         } else {
                 req.Header.Set("X-No-Department-Info", "1")
         }
-        req.Header.Set("X-Product", "SaaS")
+        req.Header.Set("X-Product", "cloud")
         // Override Origin/Referer for Global accounts so the upstream doesn't
         // reject the request as cross-origin.
         origin := originRefererFor(sa)

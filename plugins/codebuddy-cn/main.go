@@ -498,6 +498,10 @@ func commonHeaders(req *http.Request) {
         req.Header.Set("Origin", originReferer)
         req.Header.Set("Referer", originReferer+"/")
         req.Header.Set("User-Agent", clientUA)
+        // CN IDE headers (different from Intl's IDE/CodeBuddy)
+        req.Header.Set("X-IDE-Type", "CodeBuddyIDE")
+        req.Header.Set("X-IDE-Name", "CodeBuddyIDE")
+        req.Header.Set("X-IDE-Version", "4.9.7")
 }
 
 // originRefererFor returns the Origin/Referer base URL appropriate for the
