@@ -356,7 +356,7 @@ func parseStoredAuth(raw []byte) (*upstream.Auth, error) {
                         RefreshToken string `json:"refreshToken"`
                         ExpiresAt    int64  `json:"expiresAt"`
                         Domain       string `json:"domain"`
-                        ApiHost      string `json:"apiHost"`
+                        APIHost string `json:"apiHost"`
                         WebID        string `json:"webId"`
                         BizUserID    string `json:"bizUserId"`
                         UserUniqueID string `json:"userUniqueId"`
@@ -378,7 +378,7 @@ func parseStoredAuth(raw []byte) (*upstream.Auth, error) {
                 RefreshToken string `json:"refreshToken"`
                 ExpiresAt    int64  `json:"expiresAt"`
                 Domain       string `json:"domain"`
-                ApiHost      string `json:"apiHost"`
+                APIHost string `json:"apiHost"`
                 UID          string `json:"uid"`
                 EnterpriseID string `json:"enterpriseId"`
                 Nickname     string `json:"nickname"`
@@ -400,7 +400,7 @@ func parseStoredAuth(raw []byte) (*upstream.Auth, error) {
                         AccessToken:   nested.Auth.AccessToken,
                         RefreshToken:  nested.Auth.RefreshToken,
                         ExpiresAt:     nested.Auth.ExpiresAt,
-                        ApiHost:       nested.Auth.ApiHost,
+                        APIHost:       nested.Auth.APIHost,
                         Domain:        nonEmpty(nested.Auth.Domain, "trae.ai"),
                         UID:           nested.Account.UID,
                         EnterpriseID:  nested.Account.EnterpriseID,
@@ -423,7 +423,7 @@ func parseStoredAuth(raw []byte) (*upstream.Auth, error) {
                 AccessToken:   flat.AccessToken,
                 RefreshToken:  flat.RefreshToken,
                 ExpiresAt:     flat.ExpiresAt,
-                ApiHost:       flat.ApiHost,
+                APIHost:       flat.APIHost,
                 Domain:        nonEmpty(flat.Domain, "trae.ai"),
                 UID:           flat.UID,
                 EnterpriseID:  flat.EnterpriseID,
@@ -674,7 +674,7 @@ func handlePollLogin(request []byte) ([]byte, error) {
                 AccessToken:  tokenEnv.Result.Token,
                 RefreshToken: tokenEnv.Result.RefreshToken,
                 ExpiresAt:    normalizeExpiresAt(tokenEnv.Result.TokenExpireAt),
-                ApiHost:      upstreamClient.OAuthHost,
+                APIHost:      upstreamClient.OAuthHost,
                 Domain:       "trae.ai",
                 Region:       "US-East",
                 Scope:        "marscode-us",
@@ -696,7 +696,7 @@ func handlePollLogin(request []byte) ([]byte, error) {
                         "refreshToken": a.RefreshToken,
                         "expiresAt":    a.ExpiresAt,
                         "domain":       a.Domain,
-                        "apiHost":      a.ApiHost,
+                        "apiHost":      a.APIHost,
                         "region":       a.Region,
                         "scope":        a.Scope,
                         "tenant":       a.Tenant,
@@ -743,7 +743,7 @@ func handleRefreshAuth(request []byte) ([]byte, error) {
                         "refreshToken": a.RefreshToken,
                         "expiresAt":    a.ExpiresAt,
                         "domain":       a.Domain,
-                        "apiHost":      a.ApiHost,
+                        "apiHost":      a.APIHost,
                         "region":       a.Region,
                         "scope":        a.Scope,
                         "tenant":       a.Tenant,

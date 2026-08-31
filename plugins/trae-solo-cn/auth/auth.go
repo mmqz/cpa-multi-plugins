@@ -18,7 +18,7 @@ import (
 // 写路径（upstream.RefreshToken）持写锁整段执行 ExchangeToken；
 // 读路径（NeedsRefresh/JWT/RefreshTokenValue）持读锁读取快照，
 // 杜绝与写并发时的数据竞争（-race 实测确认）。
-// 其余字段（Domain/ApiHost/MachineID/DeviceID/UID/...）加载后不变，直接读。
+// 其余字段（Domain/APIHost/MachineID/DeviceID/UID/...）加载后不变，直接读。
 type Auth struct {
 	mu sync.RWMutex
 
@@ -26,7 +26,7 @@ type Auth struct {
 	RefreshToken string // 每次 ExchangeToken 轮换
 	ExpiresAt    int64  // Unix 秒（accessToken 过期时刻）
 	Domain       string // "trae.cn"
-	ApiHost      string // "https://api.trae.com.cn"（ExchangeToken host）
+	APIHost string // "https://api.trae.com.cn"（ExchangeToken host）
 	MachineID    string // x-machine-id
 	DeviceID     string // x-device-id
 	UID          string
@@ -86,7 +86,7 @@ func parseNested(raw []byte) (*Auth, error) {
 			RefreshToken string `json:"refreshToken"`
 			ExpiresAt    int64  `json:"expiresAt"`
 			Domain       string `json:"domain"`
-			ApiHost      string `json:"apiHost"`
+			APIHost string `json:"apiHost"`
 			MachineID    string `json:"machineId"`
 			DeviceID     string `json:"deviceId"`
 		} `json:"auth"`
@@ -104,7 +104,7 @@ func parseNested(raw []byte) (*Auth, error) {
 		RefreshToken: n.Auth.RefreshToken,
 		ExpiresAt:    n.Auth.ExpiresAt,
 		Domain:       n.Auth.Domain,
-		ApiHost:      n.Auth.ApiHost,
+		APIHost:      n.Auth.APIHost,
 		MachineID:    n.Auth.MachineID,
 		DeviceID:     n.Auth.DeviceID,
 		UID:          n.Account.UID,
@@ -122,7 +122,7 @@ func parseFlat(raw []byte) (*Auth, error) {
 		RefreshToken string `json:"refreshToken"`
 		ExpiresAt    int64  `json:"expiresAt"`
 		Domain       string `json:"domain"`
-		ApiHost      string `json:"apiHost"`
+		APIHost string `json:"apiHost"`
 		MachineID    string `json:"machineId"`
 		DeviceID     string `json:"deviceId"`
 		UID          string `json:"uid"`
@@ -137,7 +137,7 @@ func parseFlat(raw []byte) (*Auth, error) {
 		RefreshToken: f.RefreshToken,
 		ExpiresAt:    f.ExpiresAt,
 		Domain:       f.Domain,
-		ApiHost:      f.ApiHost,
+		APIHost:      f.APIHost,
 		MachineID:    f.MachineID,
 		DeviceID:     f.DeviceID,
 		UID:          f.UID,
@@ -195,7 +195,7 @@ func (a *Auth) saveAtomicLocked() error {
 			"refreshToken": a.RefreshToken,
 			"expiresAt":    a.ExpiresAt,
 			"domain":       a.Domain,
-			"apiHost":      a.ApiHost,
+			"apiHost":      a.APIHost,
 			"machineId":    a.MachineID,
 			"deviceId":     a.DeviceID,
 		},

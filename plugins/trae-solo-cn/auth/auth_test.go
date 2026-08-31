@@ -29,7 +29,7 @@ func TestParseExistingFormat(t *testing.T) {
 	if a.AccessToken != "at-placeholder" || a.RefreshToken != "rt-placeholder" || a.ExpiresAt != 1786805537 {
 		t.Errorf("tokens: %+v", a)
 	}
-	if a.Domain != "trae.cn" || a.ApiHost != "https://api.trae.com.cn" {
+	if a.Domain != "trae.cn" || a.APIHost != "https://api.trae.com.cn" {
 		t.Errorf("hosts: %+v", a)
 	}
 	if len(a.MachineID) != 32 || len(a.DeviceID) != 32 {
@@ -59,7 +59,7 @@ func TestSaveAtomicRoundtripPreservesSOLOFields(t *testing.T) {
 	fp := filepath.Join(dir, "trae-u1.json")
 	a := &Auth{
 		AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1786805537,
-		Domain: "trae.cn", ApiHost: "https://api.trae.com.cn",
+		Domain: "trae.cn", APIHost: "https://api.trae.com.cn",
 		MachineID: "m123", DeviceID: "d456",
 		UID: "u1", EnterpriseID: "e1", Nickname: "n1", FilePath: fp,
 	}
@@ -83,7 +83,7 @@ func TestSaveAtomicRoundtripPreservesSOLOFields(t *testing.T) {
 	if b.AccessToken != "at" || b.UID != "u1" || b.EnterpriseID != "e1" {
 		t.Errorf("roundtrip: %+v", b)
 	}
-	if b.MachineID != "m123" || b.DeviceID != "d456" || b.ApiHost != "https://api.trae.com.cn" {
+	if b.MachineID != "m123" || b.DeviceID != "d456" || b.APIHost != "https://api.trae.com.cn" {
 		t.Errorf("SOLO fields lost: %+v", b)
 	}
 }

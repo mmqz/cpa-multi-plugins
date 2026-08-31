@@ -71,7 +71,7 @@ func TestRefreshTokenExchange(t *testing.T) {
 		}
 		return jsonResp(200, `{"Result":{"Token":"newat","RefreshToken":"newrt","TokenExpireAt":1786805537,"TokenExpireDuration":1209600}}`), nil
 	})
-	a := &auth.Auth{AccessToken: "at", RefreshToken: "oldrt", ExpiresAt: 1, ApiHost: "https://oauth.example"}
+	a := &auth.Auth{AccessToken: "at", RefreshToken: "oldrt", ExpiresAt: 1, APIHost: "https://oauth.example"}
 	if err := c.RefreshToken(a); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestRefreshTokenExchangeMilliseconds(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return jsonResp(200, `{"Result":{"Token":"newat","RefreshToken":"newrt","TokenExpireAt":1786847930141,"TokenExpireDuration":1209600}}`), nil
 	})
-	a := &auth.Auth{AccessToken: "at", RefreshToken: "oldrt", ExpiresAt: 1, ApiHost: "https://oauth.example"}
+	a := &auth.Auth{AccessToken: "at", RefreshToken: "oldrt", ExpiresAt: 1, APIHost: "https://oauth.example"}
 	if err := c.RefreshToken(a); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestRefreshTokenIfNeededSkipsFresh(t *testing.T) {
 		calls++
 		return jsonResp(200, `{"Result":{"Token":"newat","RefreshToken":"newrt","TokenExpireAt":1786847930141}}`), nil
 	})
-	a := &auth.Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999, ApiHost: "https://oauth.example"}
+	a := &auth.Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999, APIHost: "https://oauth.example"}
 	refreshed, err := c.RefreshTokenIfNeeded(a, 24*3600*1e9)
 	if err != nil {
 		t.Fatal(err)
@@ -126,7 +126,7 @@ func TestRefreshTokenIfNeededRefreshesExpired(t *testing.T) {
 		calls++
 		return jsonResp(200, `{"Result":{"Token":"newat","RefreshToken":"newrt","TokenExpireAt":1786847930141}}`), nil
 	})
-	a := &auth.Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1, ApiHost: "https://oauth.example"}
+	a := &auth.Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1, APIHost: "https://oauth.example"}
 	refreshed, err := c.RefreshTokenIfNeeded(a, 24*3600*1e9)
 	if err != nil {
 		t.Fatal(err)
@@ -139,13 +139,13 @@ func TestRefreshTokenIfNeededRefreshesExpired(t *testing.T) {
 	}
 }
 
-func TestRefreshTokenUsesAuthApiHost(t *testing.T) {
+func TestRefreshTokenUsesAuthAPIHost(t *testing.T) {
 	var gotHost string
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		gotHost = r.URL.Scheme + "://" + r.URL.Host
 		return jsonResp(200, `{"Result":{"Token":"newat"}}`), nil
 	})
-	a := &auth.Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1, ApiHost: "https://custom.example"}
+	a := &auth.Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1, APIHost: "https://custom.example"}
 	if err := c.RefreshToken(a); err != nil {
 		t.Fatal(err)
 	}

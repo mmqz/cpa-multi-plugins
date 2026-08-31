@@ -172,7 +172,7 @@ func (c *Client) refreshLocked(a *auth.Auth) error {
         if strings.TrimSpace(a.RefreshToken) == "" {
                 return fmt.Errorf("no refreshToken")
         }
-        host := a.ApiHost
+        host := a.APIHost
         if host == "" {
                 host = c.oauthBase()
         }
@@ -505,7 +505,7 @@ func IsRateLimit9074(code int32) bool {
 
 // GetUserInfo 查询账号信息（登录用）。
 func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, err error) {
-        host := a.ApiHost
+        host := a.APIHost
         if host == "" {
                 host = c.oauthBase()
         }

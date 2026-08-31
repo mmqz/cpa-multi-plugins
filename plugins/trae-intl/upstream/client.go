@@ -54,7 +54,7 @@ type Auth struct {
 	AccessToken  string // Cloud-IDE-JWT
 	RefreshToken string
 	ExpiresAt    int64 // Unix seconds
-	ApiHost      string // OAuth host (api.marscode.com)
+	APIHost string // OAuth host (api.marscode.com)
 	Domain       string // "trae.ai"
 	UID          string
 	EnterpriseID string
@@ -520,7 +520,7 @@ func (c *Client) RefreshToken(a *Auth) error {
 	if a.RefreshToken == "" {
 		return fmt.Errorf("no refreshToken")
 	}
-	host := a.ApiHost
+	host := a.APIHost
 	if host == "" {
 		host = c.OAuthHost
 	}
@@ -574,7 +574,7 @@ func (c *Client) RefreshToken(a *Auth) error {
 
 // GetUserInfo queries the account info (UID, nickname, enterpriseID).
 func (c *Client) GetUserInfo(a *Auth) (uid, nickname, enterpriseID string, err error) {
-	host := a.ApiHost
+	host := a.APIHost
 	if host == "" {
 		host = c.OAuthHost
 	}

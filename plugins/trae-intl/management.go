@@ -315,7 +315,7 @@ type storedTokens struct {
 	RefreshToken string `json:"refreshToken"`
 	ExpiresAt    int64  `json:"expiresAt"`
 	Domain       string `json:"domain"`
-	ApiHost      string `json:"apiHost"`
+	APIHost string `json:"apiHost"`
 	Region       string `json:"region,omitempty"`
 	Scope        string `json:"scope,omitempty"`
 	Tenant       string `json:"tenant,omitempty"`

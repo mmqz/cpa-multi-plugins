@@ -325,7 +325,7 @@ type storedTokens struct {
         RefreshToken string `json:"refreshToken"`
         ExpiresAt    int64  `json:"expiresAt"`
         Domain       string `json:"domain"`
-        ApiHost      string `json:"apiHost"`
+        APIHost string `json:"apiHost"`
         MachineID    string `json:"machineId"`
         DeviceID     string `json:"deviceId"`
 }
@@ -365,7 +365,7 @@ func hostAuthAsUpstream(sa *storedAuth) *auth.Auth {
                 RefreshToken: sa.Auth.RefreshToken,
                 ExpiresAt:    sa.Auth.ExpiresAt,
                 Domain:       sa.Auth.Domain,
-                ApiHost:      sa.Auth.ApiHost,
+                APIHost:      sa.Auth.APIHost,
                 MachineID:    sa.Auth.MachineID,
                 DeviceID:     sa.Auth.DeviceID,
                 UID:          sa.Account.UID,
