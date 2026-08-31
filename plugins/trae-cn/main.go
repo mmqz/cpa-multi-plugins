@@ -1,4 +1,4 @@
-// Package main implements the trae-cn CLIProxyAPI dynamic plugin.
+// Package main implements the trae-solo-cn CLIProxyAPI dynamic plugin.
 //
 // trae-solo-cn wraps TRAE Work CN / SOLO CN (trae-api-cn.mchost.guru +
 // api.trae.cn) as a cliproxy provider: Trae OAuth (GetLoginGuidance +
@@ -477,7 +477,11 @@ func staticModels() []pluginapi.ModelInfo {
         }
         out := make([]pluginapi.ModelInfo, 0, len(known))
         for _, id := range known {
-                out = append(out, pluginapi.ModelInfo{ID: id, Name: id})
+                out = append(out, pluginapi.ModelInfo{
+                        ID:      id,
+                        Name:    id,
+                        OwnedBy: providerName,
+                })
         }
         return out
 }

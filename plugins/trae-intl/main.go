@@ -343,7 +343,7 @@ func handleModelForAuth(request []byte) ([]byte, error) {
         }
         out := make([]pluginapi.ModelInfo, 0, len(dynamic))
         for _, id := range dynamic {
-                out = append(out, pluginapi.ModelInfo{ID: id, Name: id})
+                out = append(out, pluginapi.ModelInfo{ID: id, Name: id, OwnedBy: providerName})
         }
         // Always include "auto" and "work" as virtual models.
         out = append(out,
@@ -357,7 +357,7 @@ func staticModels() []pluginapi.ModelInfo {
         known := []string{"auto", "work", "gpt-5.2", "gemini-3.1-pro", "kimi-k2.5", "claude-sonnet-4-5"}
         out := make([]pluginapi.ModelInfo, 0, len(known))
         for _, id := range known {
-                out = append(out, pluginapi.ModelInfo{ID: id, Name: id})
+                out = append(out, pluginapi.ModelInfo{ID: id, Name: id, OwnedBy: providerName})
         }
         return out
 }

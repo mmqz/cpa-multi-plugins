@@ -588,6 +588,8 @@ func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *auth.Auth) {
                 fileName = fmt.Sprintf("%s-%s.json", providerName, a.UID)
         }
         storageJSON, _ := json.MarshalIndent(map[string]any{
+                "type":     providerName,
+                "provider": providerName,
                 "auth": map[string]any{
                         "accessToken":  a.AccessToken,
                         "refreshToken": a.RefreshToken,
@@ -602,6 +604,7 @@ func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *auth.Auth) {
                         "enterpriseId": a.EnterpriseID,
                         "nickname":     a.Nickname,
                 },
+                "disabled": false,
         }, "", "  ")
         if err := hostAuthSave(fileName, storageJSON); err != nil {
                 log.Printf("persist refreshed auth %s: %v", a.UID, err)
@@ -630,7 +633,11 @@ func handleImportAuth(req pluginapi.ManagementRequest) map[string]any {
                 return map[string]any{"success": false, "error": err.Error()}
         }
         // Build nested storage JSON for host.auth.save.
+        // CRITICAL: include "type" and "provider" fields so CPA can route this
+        // auth file to the correct plugin provider (matches workbuddy pattern).
         storageJSON, _ := json.MarshalIndent(map[string]any{
+                "type": providerName,
+                "provider": providerName,
                 "auth": map[string]any{
                         "accessToken":  a.AccessToken,
                         "refreshToken": a.RefreshToken,
@@ -645,6 +652,7 @@ func handleImportAuth(req pluginapi.ManagementRequest) map[string]any {
                         "enterpriseId": a.EnterpriseID,
                         "nickname":     a.Nickname,
                 },
+                "disabled": false,
         }, "", "  ")
         fileName := fmt.Sprintf("%s-%s.json", providerName, a.UID)
         if err := hostAuthSave(fileName, storageJSON); err != nil {

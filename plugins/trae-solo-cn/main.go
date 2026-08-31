@@ -477,7 +477,11 @@ func staticModels() []pluginapi.ModelInfo {
         }
         out := make([]pluginapi.ModelInfo, 0, len(known))
         for _, id := range known {
-                out = append(out, pluginapi.ModelInfo{ID: id, Name: id})
+                out = append(out, pluginapi.ModelInfo{
+                        ID:      id,
+                        Name:    id,
+                        OwnedBy: providerName,
+                })
         }
         return out
 }
