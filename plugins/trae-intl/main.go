@@ -488,6 +488,9 @@ func handleParseAuth(request []byte) ([]byte, error) {
 }
 
 func handleStartLogin(_ []byte) ([]byte, error) {
+        // Generate PKCE pair (code_verifier + code_challenge S256).
+        codeVerifier, codeChallenge := generatePKCEPair()
+
         ln, err := net.Listen("tcp", "127.0.0.1:0")
         if err != nil {
                 return nil, fmt.Errorf("allocate callback port: %w", err)
@@ -496,10 +499,12 @@ func handleStartLogin(_ []byte) ([]byte, error) {
         guidanceURL := upstreamClient.OAuthHost + "/cloudide/api/v3/trae/GetLoginGuidance"
         cbURL := fmt.Sprintf("http://127.0.0.1:%d/authorize", port)
         body := map[string]any{
-                "ClientID":    upstreamClient.ClientID,
-                "RedirectUri": cbURL,
-                "DeviceInfo":  map[string]any{"DeviceId": randomHex(16), "MachineId": randomHex(16)},
-                "IDEVersion":  "3.5.66",
+                "ClientID":      upstreamClient.ClientID,
+                "RedirectUri":   cbURL,
+                "DeviceInfo":    map[string]any{"DeviceId": randomHex(16), "MachineId": randomHex(16)},
+                "IDEVersion":    "3.5.66",
+                "CodeChallenge": codeChallenge,
+                "CodeVerifier":  codeVerifier,
         }
         bodyBytes, _ := json.Marshal(body)
         req, err := http.NewRequest(http.MethodPost, guidanceURL, bytes.NewReader(bodyBytes))
@@ -534,32 +539,64 @@ func handleStartLogin(_ []byte) ([]byte, error) {
                 ln.Close()
                 return nil, fmt.Errorf("GetLoginGuidance: missing LoginURL or State")
         }
+        // Append PKCE challenge to the verification URL's query string so the
+        // upstream OAuth server can validate the verifier on token exchange.
+        loginURL := appendPKCEParams(env.Result.LoginURL, codeChallenge)
         state := env.Result.State
         loginStates.Store(state, &loginCtx{
-                listener: ln,
-                state:    state,
-                cbURL:    cbURL,
-                expires:  time.Now().Add(loginTTL),
+                listener:      ln,
+                state:         state,
+                cbURL:         cbURL,
+                expires:       time.Now().Add(loginTTL),
+                codeVerifier:  codeVerifier,
+                codeChallenge: codeChallenge,
         })
         go acceptCallback(state)
         return okEnvelope(pluginapi.AuthLoginStartResponse{
                 Provider:  providerName,
-                URL:       env.Result.LoginURL,
+                URL:       loginURL,
                 State:     state,
                 ExpiresAt: time.Now().Add(loginTTL).UTC(),
                 Metadata:  map[string]any{"logo": pluginLogoURL, "callback_url": cbURL},
         })
 }
 
+// appendPKCEParams appends code_challenge + code_challenge_method=S256 to the
+// query string of the given login URL. It parses the URL, adds the params to
+// the existing query (preserving all other params), and re-encodes. If the URL
+// cannot be parsed, it appends the params naively as a fallback.
+func appendPKCEParams(loginURL, codeChallenge string) string {
+        if codeChallenge == "" {
+                return loginURL
+        }
+        if u, err := url.Parse(loginURL); err == nil {
+                q := u.Query()
+                q.Set("code_challenge", codeChallenge)
+                q.Set("code_challenge_method", "S256")
+                u.RawQuery = q.Encode()
+                return u.String()
+        }
+        // Fallback: naive append.
+        sep := "&"
+        if !strings.Contains(loginURL, "?") {
+                sep = "?"
+        }
+        return loginURL + sep + "code_challenge=" + urlEncode(codeChallenge) + "&code_challenge_method=S256"
+}
+
 type loginCtx struct {
-        listener    net.Listener
-        state       string
-        cbURL       string
-        expires     time.Time
-        authCode    string
-        codeVerifier string
-        err         error
-        done        chan struct{}
+        listener      net.Listener
+        state         string
+        cbURL         string
+        expires       time.Time
+        authCode      string
+        codeVerifier  string
+        codeChallenge string
+        // Filled by acceptCallback when the user completes login.
+        refreshToken string
+        loginHost    string // for ExchangeToken (from callback or fallback)
+        err          error
+        done         chan struct{}
 }
 
 func acceptCallback(state string) {
@@ -582,19 +619,36 @@ func acceptCallback(state string) {
         }
         defer conn.Close()
         _ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-        buf := make([]byte, 8192)
+        buf := make([]byte, 16384)
         n, _ := conn.Read(buf)
         req := string(buf[:n])
-        idx := strings.Index(req, " ")
-        if idx < 0 {
-                lc.err = fmt.Errorf("callback: malformed request")
+        // Parse the first HTTP request line: "GET /authorize?... HTTP/1.1".
+        // The first space-separated token is the HTTP method (GET); the path
+        // with query string is the second token. Trailing HTTP version (e.g.
+        // " HTTP/1.1") is trimmed via LastIndex(" ").
+        firstLine := req
+        if nl := strings.Index(req, "\r\n"); nl >= 0 {
+                firstLine = req[:nl]
+        }
+        sp := strings.Index(firstLine, " ")
+        if sp < 0 {
+                lc.err = fmt.Errorf("callback: malformed request line")
+                body := "<html><body><h2>Login failed</h2><p>malformed request</p></body></html>"
+                fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+                        len(body), body)
                 return
         }
-        path := req[:idx]
-        if q := strings.Index(path, "?"); q >= 0 {
-                vals, _ := url.ParseQuery(path[q+1:])
+        rest := firstLine[sp+1:]
+        // Trim trailing HTTP version (e.g. " HTTP/1.1").
+        if sp2 := strings.LastIndex(rest, " "); sp2 >= 0 {
+                rest = rest[:sp2]
+        }
+        if q := strings.Index(rest, "?"); q >= 0 {
+                vals, _ := url.ParseQuery(rest[q+1:])
                 lc.authCode = vals.Get("authCode")
                 lc.codeVerifier = vals.Get("codeVerifier")
+                lc.refreshToken = vals.Get("refreshToken")
+                lc.loginHost = vals.Get("loginHost")
         }
         body := "<html><body><h2>Login successful</h2><p>You can close this window now.</p></body></html>"
         fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
@@ -716,6 +770,8 @@ func handlePollLogin(request []byte) ([]byte, error) {
         a.Nickname = nickname
         a.EnterpriseID = entID
         storageJSON, _ := json.MarshalIndent(map[string]any{
+                "type":     providerName,
+                "provider": providerName,
                 "auth": map[string]any{
                         "accessToken":  a.AccessToken,
                         "refreshToken": a.RefreshToken,
@@ -733,6 +789,7 @@ func handlePollLogin(request []byte) ([]byte, error) {
                         "enterpriseId": a.EnterpriseID,
                         "nickname":     a.Nickname,
                 },
+                "disabled": false,
         }, "", "  ")
         loginStates.Delete(state)
         lc.listener.Close()
@@ -763,6 +820,8 @@ func handleRefreshAuth(request []byte) ([]byte, error) {
                 return nil, fmt.Errorf("refresh: ExchangeToken: %w", err)
         }
         storageJSON, _ := json.MarshalIndent(map[string]any{
+                "type":     providerName,
+                "provider": providerName,
                 "auth": map[string]any{
                         "accessToken":  a.AccessToken,
                         "refreshToken": a.RefreshToken,
@@ -780,6 +839,7 @@ func handleRefreshAuth(request []byte) ([]byte, error) {
                         "enterpriseId": a.EnterpriseID,
                         "nickname":     a.Nickname,
                 },
+                "disabled": false,
         }, "", "  ")
         return okEnvelope(pluginapi.AuthRefreshResponse{
                 Auth: pluginapi.AuthData{

@@ -27,18 +27,18 @@ extern const char *_GoStringPtr(_GoString_ s);
 #include <stdlib.h>
 
 typedef struct {
-	void* ptr;
-	size_t len;
+        void* ptr;
+        size_t len;
 } cliproxy_buffer;
 
 typedef int (*cliproxy_host_call_fn)(void*, const char*, const uint8_t*, size_t, cliproxy_buffer*);
 typedef void (*cliproxy_host_free_fn)(void*, size_t);
 
 typedef struct {
-	uint32_t abi_version;
-	void* host_ctx;
-	cliproxy_host_call_fn call;
-	cliproxy_host_free_fn free_buffer;
+        uint32_t abi_version;
+        void* host_ctx;
+        cliproxy_host_call_fn call;
+        cliproxy_host_free_fn free_buffer;
 } cliproxy_host_api;
 
 typedef int (*cliproxy_plugin_call_fn)(char*, uint8_t*, size_t, cliproxy_buffer*);
@@ -46,19 +46,19 @@ typedef void (*cliproxy_plugin_free_fn)(void*, size_t);
 typedef void (*cliproxy_plugin_shutdown_fn)(void);
 
 typedef struct {
-	uint32_t abi_version;
-	cliproxy_plugin_call_fn call;
-	cliproxy_plugin_free_fn free_buffer;
-	cliproxy_plugin_shutdown_fn shutdown;
+        uint32_t abi_version;
+        cliproxy_plugin_call_fn call;
+        cliproxy_plugin_free_fn free_buffer;
+        cliproxy_plugin_shutdown_fn shutdown;
 } cliproxy_plugin_api;
 
 // Wrappers so Go can invoke the host function-pointer table via cgo. The host
 // API captured at init is used to push streaming chunks back asynchronously.
 static int wb_call_host(cliproxy_host_api* api, const char* method, const uint8_t* request, size_t request_len, cliproxy_buffer* response) {
-	return api->call(api->host_ctx, method, request, request_len, response);
+        return api->call(api->host_ctx, method, request, request_len, response);
 }
 static void wb_free_host_buffer(cliproxy_host_api* api, void* ptr, size_t len) {
-	api->free_buffer(ptr, len);
+        api->free_buffer(ptr, len);
 }
 
 extern int cliproxyPluginCall(char*, uint8_t*, size_t, cliproxy_buffer*);

@@ -637,7 +637,7 @@ func toAuthDataOpts(sa *storedAuth, cr *creditsSummary, disabled bool) pluginapi
         if sa != nil {
                 if uid := sanitizeUIDForFileName(sa.Account.UID); uid != "" {
                         id = uid
-                        fileName = "workbuddy-" + uid + ".json"
+                        fileName = providerName + "-" + uid + ".json"
                 }
         }
         label := labelForAuth(sa)
