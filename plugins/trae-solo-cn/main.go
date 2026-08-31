@@ -949,8 +949,11 @@ func handlePollLogin(request []byte) ([]byte, error) {
         a.Nickname = nickname
         a.EnterpriseID = entID
 
-        // Persist the auth file (nested form: {auth:{...}, account:{...}}).
+        // Persist the auth file (nested form: {type, provider, auth:{...}, account:{...}}).
+        // CRITICAL: include type+provider so CPA can route this auth to the correct plugin.
         storageJSON, _ := json.MarshalIndent(map[string]any{
+                "type":     providerName,
+                "provider": providerName,
                 "auth": map[string]any{
                         "accessToken":  a.AccessToken,
                         "refreshToken": a.RefreshToken,
@@ -965,6 +968,7 @@ func handlePollLogin(request []byte) ([]byte, error) {
                         "enterpriseId": a.EnterpriseID,
                         "nickname":     a.Nickname,
                 },
+                "disabled": false,
         }, "", "  ")
 
         // Register in pool.
@@ -1248,6 +1252,8 @@ func handleRefreshAuth(request []byte) ([]byte, error) {
                 return nil, fmt.Errorf("refresh: ExchangeToken: %w", err)
         }
         storageJSON, _ := json.MarshalIndent(map[string]any{
+                "type":     providerName,
+                "provider": providerName,
                 "auth": map[string]any{
                         "accessToken":  a.AccessToken,
                         "refreshToken": a.RefreshToken,
@@ -1262,6 +1268,7 @@ func handleRefreshAuth(request []byte) ([]byte, error) {
                         "enterpriseId": a.EnterpriseID,
                         "nickname":     a.Nickname,
                 },
+                "disabled": false,
         }, "", "  ")
         return okEnvelope(pluginapi.AuthRefreshResponse{
                 Auth: pluginapi.AuthData{
