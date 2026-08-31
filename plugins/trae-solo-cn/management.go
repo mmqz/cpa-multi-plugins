@@ -561,10 +561,13 @@ func handleRefresh() map[string]any {
 // hostAuthSave persists credential JSON via host.auth.save RPC.
 // Used by executor to write back refreshed tokens so they survive CPA restart.
 func hostAuthSave(name string, raw []byte) error {
-        saveBody, _ := json.Marshal(map[string]any{
-                "name": name,
-                "json": raw,
-        })
+        // Use pluginapi.HostAuthSaveRequest so JSON field (json.RawMessage) is
+        // embedded raw, NOT base64-encoded (which map[string]any{"json": raw} would do).
+        saveReq := pluginapi.HostAuthSaveRequest{
+                Name: name,
+                JSON: raw,
+        }
+        saveBody, _ := json.Marshal(saveReq)
         rawResp, err := hostCall(pluginabi.MethodHostAuthSave, saveBody)
         if err != nil {
                 return fmt.Errorf("host.auth.save RPC: %w", err)

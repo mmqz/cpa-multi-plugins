@@ -1,6 +1,6 @@
 // Package main implements the trae-cn CLIProxyAPI dynamic plugin.
 //
-// trae-cn wraps TRAE Work CN / SOLO CN (trae-api-cn.mchost.guru +
+// trae-solo-cn wraps TRAE Work CN / SOLO CN (trae-api-cn.mchost.guru +
 // api.trae.cn) as a cliproxy provider: Trae OAuth (GetLoginGuidance +
 // AuthCode ExchangeToken), Cloud-IDE-JWT auth, llm_utils_chat +
 // function=solo_work_lite chat executor, daily check-in via checkin_credits,
@@ -176,7 +176,7 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
                 return 1
         }
         hostAPI = host
-	C.store_host_api(host) // CRITICAL: store in C global for call_host_api wrapper
+        C.store_host_api(host) // CRITICAL: store in C global for call_host_api wrapper
         plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
         plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
         plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
@@ -376,7 +376,9 @@ type registrationPayload struct {
 }
 
 type registrationCapability struct {
+        ModelProvider         bool                         `json:"model_provider"`
         AuthProvider          bool                         `json:"auth_provider"`
+        FrontendAuthProvider  bool                         `json:"frontend_auth_provider"`
         Executor              bool                         `json:"executor"`
         ExecutorModelScope    pluginapi.ExecutorModelScope `json:"executor_model_scope"`
         ExecutorInputFormats  []string                     `json:"executor_input_formats,omitempty"`
@@ -402,6 +404,7 @@ func buildRegistration() registrationPayload {
                         },
                 },
                 Capabilities: registrationCapability{
+                        ModelProvider:         true,
                         AuthProvider:          true,
                         Executor:              true,
                         ExecutorModelScope:    pluginapi.ExecutorModelScopeOAuth,
@@ -420,8 +423,10 @@ func buildRegistration() registrationPayload {
 
 func handleModelStatic(_ []byte) ([]byte, error) {
         // Return static fallback model list (used when no accounts are loaded).
-        models := staticModels()
-        return okEnvelope(map[string]any{"models": models})
+        return okEnvelope(pluginapi.ModelResponse{
+                Provider: providerName,
+                Models:   staticModels(),
+        })
 }
 
 func handleModelForAuth(request []byte) ([]byte, error) {
@@ -435,23 +440,32 @@ func handleModelForAuth(request []byte) ([]byte, error) {
         a, err := parseStoredAuth(req.Auth.StorageJSON)
         if err != nil {
                 // Fall back to static list if we can't parse the auth.
-                return okEnvelope(map[string]any{"models": staticModels()})
+                return okEnvelope(pluginapi.ModelResponse{
+                        Provider: providerName,
+                        Models:   staticModels(),
+                })
         }
         dynamic, err := upstreamClient.FetchModels(a)
         if err != nil {
                 log.Printf("model.for_auth %s: %v — falling back to static", a.UID, err)
-                return okEnvelope(map[string]any{"models": staticModels()})
+                return okEnvelope(pluginapi.ModelResponse{
+                        Provider: providerName,
+                        Models:   staticModels(),
+                })
         }
         out := make([]pluginapi.ModelInfo, 0, len(dynamic))
         for _, m := range dynamic {
                 out = append(out, pluginapi.ModelInfo{
-                        ID:           m.ID,
-                        Name:         m.Name,
+                        ID:            m.ID,
+                        Name:          m.Name,
                         ContextLength: m.ContextWindow,
                         MaxCompletionTokens: m.MaxTokens,
                 })
         }
-        return okEnvelope(map[string]any{"models": out})
+        return okEnvelope(pluginapi.ModelResponse{
+                Provider: providerName,
+                Models:   out,
+        })
 }
 
 // staticModels returns the known SOLO CN model list (subset).

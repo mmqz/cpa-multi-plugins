@@ -320,7 +320,7 @@ func buildRegistration() registrationPayload {
 // -----------------------------------------------------------------------------
 
 func handleModelStatic(_ []byte) ([]byte, error) {
-        return okEnvelope(map[string]any{"models": staticModels()})
+        return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: staticModels()})
 }
 
 func handleModelForAuth(request []byte) ([]byte, error) {
@@ -332,12 +332,12 @@ func handleModelForAuth(request []byte) ([]byte, error) {
         }
         a, err := parseStoredAuth(req.Auth.StorageJSON)
         if err != nil {
-                return okEnvelope(map[string]any{"models": staticModels()})
+                return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: staticModels()})
         }
         dynamic, err := upstreamClient.FetchModels(a)
         if err != nil {
                 log.Printf("model.for_auth %s: %v — falling back to static", a.UID, err)
-                return okEnvelope(map[string]any{"models": staticModels()})
+                return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: staticModels()})
         }
         out := make([]pluginapi.ModelInfo, 0, len(dynamic))
         for _, id := range dynamic {
@@ -348,7 +348,7 @@ func handleModelForAuth(request []byte) ([]byte, error) {
                 pluginapi.ModelInfo{ID: "auto", Name: "auto (server pick)"},
                 pluginapi.ModelInfo{ID: "work", Name: "work (fast mode)"},
         )
-        return okEnvelope(map[string]any{"models": out})
+        return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: out})
 }
 
 func staticModels() []pluginapi.ModelInfo {

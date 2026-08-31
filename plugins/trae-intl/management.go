@@ -356,7 +356,7 @@ func hostAuthGet(authIndex string) (*storedAuth, error) {
 
 // hostAuthSave persists credential JSON via host.auth.save RPC.
 func hostAuthSave(name string, raw []byte) error {
-	saveBody, _ := json.Marshal(map[string]any{
+	saveReq := pluginapi.HostAuthSaveRequest{
 		"name": name,
 		"json": raw,
 	})
