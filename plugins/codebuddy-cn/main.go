@@ -502,6 +502,7 @@ func commonHeaders(req *http.Request) {
         req.Header.Set("X-IDE-Type", "CodeBuddyIDE")
         req.Header.Set("X-IDE-Name", "CodeBuddyIDE")
         req.Header.Set("X-IDE-Version", "4.9.7")
+	req.Header.Set("X-Product-Version", "4.9.7")
 }
 
 // originRefererFor returns the Origin/Referer base URL appropriate for the

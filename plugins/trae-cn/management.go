@@ -94,7 +94,7 @@ func managementRegistration() managementRegistrationResponse {
                         {Method: http.MethodPost, Path: base + "/import", Description: "Import Trae credential JSON (nested or flat) into host auth store."},
                 },
                 Resources: []resourceRoute{
-                        {Path: "/panel", Menu: "Trae SOLO CN", Description: "Trae Work CN dashboard: credits, check-in, accounts."},
+                        {Path: "/panel", Menu: "Trae CN", Description: "Trae Code CN dashboard: credits, check-in, accounts."},
                 },
         }
 }

@@ -155,7 +155,7 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodGet, Path: base + "/keepalive/status", Description: "Last keepalive run summary + config."},
 		},
 		Resources: []resourceRoute{
-			{Path: "/panel", Menu: "WorkBuddy", Description: "WorkBuddy dashboard: credits, check-in, plan, import."},
+			{Path: "/panel", Menu: "CodeBuddy CN", Description: "CodeBuddy CN dashboard: credits, check-in, plan, import."},
 		},
 	}
 }

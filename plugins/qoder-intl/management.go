@@ -128,7 +128,7 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodGet, Path: base + "/keepalive/status", Description: "Last keepalive run summary + config."},
 		},
 		Resources: []resourceRoute{
-			{Path: "/panel", Menu: "QoderWork", Description: "QoderWork dashboard: credits, check-in, plan, import."},
+			{Path: "/panel", Menu: "Qoder Intl", Description: "Qoder Intl dashboard: credits, plan, import."},
 		},
 	}
 }
