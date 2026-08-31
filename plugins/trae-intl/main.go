@@ -110,7 +110,7 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
                 return 1
         }
         hostAPI = host
-	C.store_host_api(host) // CRITICAL: store in C global for call_host_api wrapper
+        C.store_host_api(host) // CRITICAL: store in C global for call_host_api wrapper
         plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
         plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
         plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
@@ -283,6 +283,7 @@ type registrationPayload struct {
 }
 
 type registrationCapability struct {
+        ModelProvider         bool                         `json:"model_provider"`
         AuthProvider          bool                         `json:"auth_provider"`
         Executor              bool                         `json:"executor"`
         ExecutorModelScope    pluginapi.ExecutorModelScope `json:"executor_model_scope"`
@@ -305,6 +306,7 @@ func buildRegistration() registrationPayload {
                         },
                 },
                 Capabilities: registrationCapability{
+                        ModelProvider:         true,
                         AuthProvider:          true,
                         Executor:              true,
                         ExecutorModelScope:    pluginapi.ExecutorModelScopeOAuth,
