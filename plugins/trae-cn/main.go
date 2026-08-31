@@ -1,6 +1,6 @@
 // Package main implements the trae-cn CLIProxyAPI dynamic plugin.
 //
-// trae-solo-cn wraps TRAE Work CN / SOLO CN (trae-api-cn.mchost.guru +
+// trae-cn wraps TRAE Work CN / SOLO CN (trae-api-cn.mchost.guru +
 // api.trae.cn) as a cliproxy provider: Trae OAuth (GetLoginGuidance +
 // AuthCode ExchangeToken), Cloud-IDE-JWT auth, llm_utils_chat +
 // function=solo_work_lite chat executor, daily check-in via checkin_credits,
@@ -193,6 +193,29 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
                 RefreshSkew:  defaultRefreshSkew,
         })
         go sched.Run(schedulerCtx)
+
+        // Janitor: sweep abandoned login states every minute to prevent listener leaks.
+        go func() {
+                ticker := time.NewTicker(time.Minute)
+                defer ticker.Stop()
+                for {
+                        select {
+                        case <-schedulerCtx.Done():
+                                return
+                        case <-ticker.C:
+                                now := time.Now()
+                                loginStates.Range(func(key, value any) bool {
+                                        if lc, ok := value.(*loginCtx); ok && now.After(lc.expires) {
+                                                loginStates.Delete(key)
+                                                if lc.listener != nil {
+                                                        lc.listener.Close()
+                                                }
+                                        }
+                                        return true
+                                })
+                        }
+                }
+        }()
 
         return 0
 }
@@ -642,7 +665,10 @@ func acceptCallback(state string) {
         _ = ln.(*netTCPListener).SetDeadline(time.Now().Add(loginTTL))
         conn, err := ln.Accept()
         if err != nil {
+                // Accept failed (deadline exceeded or listener closed). Close the listener
+                // so it doesn't leak — janitor will also clean up the loginStates entry.
                 lc.err = fmt.Errorf("callback accept: %w", err)
+                lc.listener.Close()
                 return
         }
         defer conn.Close()

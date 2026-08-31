@@ -116,6 +116,25 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
         plugin.shutdown = C.cliproxy_plugin_shutdown_fn(C.cliproxyPluginShutdown)
 
         upstreamClient = upstream.New()
+
+        // Janitor: sweep abandoned login states every minute to prevent listener leaks.
+        go func() {
+                ticker := time.NewTicker(time.Minute)
+                defer ticker.Stop()
+                for range ticker.C {
+                        now := time.Now()
+                        loginStates.Range(func(key, value any) bool {
+                                if lc, ok := value.(*loginCtx); ok && now.After(lc.expires) {
+                                        loginStates.Delete(key)
+                                        if lc.listener != nil {
+                                                lc.listener.Close()
+                                        }
+                                }
+                                return true
+                        })
+                }
+        }()
+
         return 0
 }
 
@@ -552,7 +571,10 @@ func acceptCallback(state string) {
         _ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(loginTTL))
         conn, err := ln.Accept()
         if err != nil {
+                // Accept failed (deadline exceeded or listener closed). Close the listener
+                // so it doesn't leak — janitor will also clean up the loginStates entry.
                 lc.err = fmt.Errorf("callback accept: %w", err)
+                lc.listener.Close()
                 return
         }
         defer conn.Close()
