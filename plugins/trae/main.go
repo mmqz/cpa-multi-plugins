@@ -619,30 +619,47 @@ func parseStoredAuth(raw []byte) (*auth.Auth, error) {
 }
 
 func handleParseAuth(request []byte) ([]byte, error) {
+	// v0.12.4 fix: the host wire format is pluginapi.AuthParseRequest —
+	// {"Provider":...,"FileName":...,"RawJSON":"<base64>"} ([]byte fields
+	// are base64-encoded strings; encoding/json never equates StorageJSON
+	// with storage_json). The previous reader never matched on the real
+	// host, so auth.parse always failed and CPA claimed trae files via its
+	// generic metadata fallback (generic labels, no pool registration).
 	var req struct {
 		StorageJSON json.RawMessage `json:"storage_json"`
-		FileName    string          `json:"file_name"`
+		FileName    string          `json:"FileName"`
+		RawJSON     json.RawMessage `json:"RawJSON"`
 	}
 	if err := json.Unmarshal(request, &req); err != nil {
 		return nil, err
 	}
-	a, err := parseStoredAuth(req.StorageJSON)
+	payload, ok := extractAuthPayload(request)
+	if !ok {
+		payload, ok = req.StorageJSON, len(req.StorageJSON) > 0
+	}
+	if !ok {
+		return errorEnvelope("parse_error", "no storage_json/raw_json payload in auth.parse request"), nil
+	}
+	a, err := parseStoredAuth(payload)
 	if err != nil {
 		return errorEnvelope("parse_error", err.Error()), nil
 	}
 	// Register the account in the pool (cn/solo only; intl accounts are
 	// handled by the intl handler set and skipped here).
-	if a.Variant != "intl" {
+	if a.Variant != "intl" && accountPool != nil {
 		accountPool.Add(a)
 	}
 	return okEnvelope(pluginapi.AuthParseResponse{
 		Handled: true,
 		Auth: pluginapi.AuthData{
-			Provider:    providerName,
-			ID:          a.UID,
-			FileName:    nonEmpty(req.FileName, authFileName),
-			Label:       nonEmpty(a.Nickname, variantLabel(a.Variant)+" "+a.UID),
-			StorageJSON: req.StorageJSON,
+			Provider: providerName,
+			ID:       a.UID,
+			FileName: nonEmpty(req.FileName, authFileName),
+			Label:    nonEmpty(a.Nickname, variantLabel(a.Variant)+" "+a.UID),
+			// Return the DECODED storage object — returning the raw base64
+			// string made the host persist an undecodable auth and broke
+			// model.for_auth / executor dispatch downstream.
+			StorageJSON: payload,
 			Metadata:    map[string]any{"type": providerName, "uid": a.UID},
 		},
 	})
@@ -660,20 +677,32 @@ func handleParseAuth(request []byte) ([]byte, error) {
 //  5. Build verification URI: {loginHost}/authorization?... with PKCE challenge.
 //  6. Persist login state (state = login_trace_id) and start callback server.
 //  7. Return AuthLoginStartResponse{URL: verificationURI, State: loginTraceID}.
-func handleStartLogin(_ []byte) ([]byte, error) {
+func handleStartLogin(request []byte) ([]byte, error) {
+	// Step 0: host login context. When CPA supplies BaseURL (its own
+	// management oauth-callback endpoint) the callback targets the plugin
+	// resource route on the SAME origin the user is already browsing —
+	// zero-config and reachable from local/LAN/docker deployments. The
+	// configured local listener stays as the stand-alone fallback.
+	host := parseLoginHostContext(request)
+
 	// Step 1: PKCE + login_trace_id.
 	loginTraceID := newLoginTraceID()
 	codeVerifier, codeChallenge := generatePKCEPair()
 
-	// Step 2: Allocate local callback port.
-	ln, err := netListen("tcp", loadedCallbackBind()+":0")
-	if err != nil {
-		return nil, fmt.Errorf("allocate callback port: %w", err)
+	// Step 2: Callback URL.
+	var ln netListener
+	cbURL := resourceCallbackURL(host.BaseURL)
+	if cbURL == "" {
+		var err error
+		ln, err = netListen("tcp", loadedCallbackBind()+":0")
+		if err != nil {
+			return nil, fmt.Errorf("allocate callback port: %w", err)
+		}
+		port := ln.Addr().(*netTCPAddr).Port
+		// callback_public_host lets Docker/remote deployments advertise a host
+		// the user's browser can actually reach (v0.12.2).
+		cbURL = fmt.Sprintf("http://%s:%d/authorize", loadedCallbackPublicHost(), port)
 	}
-	port := ln.Addr().(*netTCPAddr).Port
-	// callback_public_host lets Docker/remote deployments advertise a host
-	// the user's browser can actually reach (v0.12.2).
-	cbURL := fmt.Sprintf("http://%s:%d/authorize", loadedCallbackPublicHost(), port)
 
 	// Step 3: POST GetLoginGuidance with multi-endpoint fallback
 	// (cockpit-tools request_login_guidance). CN tries api.trae.cn →
@@ -681,7 +710,7 @@ func handleStartLogin(_ []byte) ([]byte, error) {
 	// host on total failure instead of erroring out.
 	loginHost, err := requestLoginGuidance(true, loginTraceID)
 	if err != nil {
-		ln.Close()
+		closeListener(ln)
 		return nil, fmt.Errorf("GetLoginGuidance failed: %w", err)
 	}
 
@@ -712,6 +741,7 @@ func handleStartLogin(_ []byte) ([]byte, error) {
 	loginStates.Store(state, &loginCtx{
 		variant:       lv,
 		listener:      ln,
+		authDir:       host.AuthDir,
 		state:         state,
 		cbURL:         cbURL,
 		expires:       time.Now().Add(loginTTL),
@@ -722,8 +752,11 @@ func handleStartLogin(_ []byte) ([]byte, error) {
 		machineID:     machineID,
 	})
 
-	// Step 7: Start callback server goroutine.
-	go acceptCallback(state)
+	// Step 7: accept loop only for the local-listener flow; resource
+	// flows are completed by the CPA resource route / .oauth file.
+	if ln != nil {
+		go acceptCallback(state)
+	}
 
 	return okEnvelope(pluginapi.AuthLoginStartResponse{
 		Provider:  providerName,
@@ -753,6 +786,12 @@ type loginCtx struct {
 	deviceID      string
 	machineID     string
 
+	// authDir: host-provided auth dir (auth.login.start) enabling the
+	// .oauth callback-file fallback for resource-callback flows.
+	authDir string
+	// doneOnce guards done for the resource-callback completion path.
+	doneOnce sync.Once
+
 	// Filled by acceptCallback when the user completes login.
 	authCode     string
 	refreshToken string
@@ -778,7 +817,7 @@ func acceptCallback(state string) {
 	_ = ln.(*netTCPListener).SetDeadline(time.Now().Add(loginTTL))
 	for {
 		if time.Now().After(lc.expires) {
-			lc.listener.Close()
+			closeListener(lc.listener)
 			return
 		}
 		conn, err := ln.Accept()
@@ -787,11 +826,11 @@ func acceptCallback(state string) {
 			if lc.err == nil {
 				lc.err = fmt.Errorf("callback accept: %w", err)
 			}
-			lc.listener.Close()
+			closeListener(lc.listener)
 			return
 		}
 		if handleCallbackConn(conn, lc) {
-			lc.listener.Close()
+			closeListener(lc.listener)
 			return
 		}
 	}
@@ -939,7 +978,7 @@ func handlePollLogin(request []byte) ([]byte, error) {
 	lc := v.(*loginCtx)
 	if time.Now().After(lc.expires) {
 		loginStates.Delete(state)
-		lc.listener.Close()
+		closeListener(lc.listener)
 		return nil, fmt.Errorf("poll: login expired (15 min timeout) — please re-initiate")
 	}
 
@@ -948,16 +987,35 @@ func handlePollLogin(request []byte) ([]byte, error) {
 	case <-lc.done:
 		// Callback received.
 	default:
-		return okEnvelope(pluginapi.AuthLoginPollResponse{
-			Status:  pluginapi.AuthLoginStatusPending,
-			Message: "waiting for browser login",
-		})
+		if lc.listener == nil {
+			// Resource-callback flow: the browser redirect completed the
+			// flow on the CPA resource route; if the host intercepted the
+			// redirect at its own oauth-callback endpoint instead, pick
+			// the code up from the .oauth callback file it wrote.
+			if code, cbErr, ok := readHostCallbackFile(lc.authDir, state); ok {
+				if cbErr != "" {
+					lc.err = fmt.Errorf("oauth callback error: %s", cbErr)
+				} else if code != "" {
+					lc.authCode = code
+				}
+				completeLogin(lc)
+			}
+		}
+		select {
+		case <-lc.done:
+			// Completed via the fallback above.
+		default:
+			return okEnvelope(pluginapi.AuthLoginPollResponse{
+				Status:  pluginapi.AuthLoginStatusPending,
+				Message: "waiting for browser login",
+			})
+		}
 	}
 
 	// fail is a helper that cleans up the login state and returns an error envelope.
 	fail := func(msg string) ([]byte, error) {
 		loginStates.Delete(state)
-		lc.listener.Close()
+		closeListener(lc.listener)
 		raw, _ := okEnvelope(pluginapi.AuthLoginPollResponse{
 			Status:  pluginapi.AuthLoginStatusError,
 			Message: msg,
@@ -1084,7 +1142,7 @@ func handlePollLogin(request []byte) ([]byte, error) {
 
 	// Cleanup login state.
 	loginStates.Delete(state)
-	lc.listener.Close()
+	closeListener(lc.listener)
 
 	return okEnvelope(pluginapi.AuthLoginPollResponse{
 		Status:  pluginapi.AuthLoginStatusSuccess,

@@ -166,7 +166,11 @@ func configureVariant(raw []byte) {
 func sniffVariantFromJSON(raw []byte) string {
 	var probe struct {
 		Auth struct {
-			Variant string `json:"variant"`
+			Variant      string `json:"variant"`
+			WebID        string `json:"webId"`
+			Tenant       string `json:"tenant"`
+			UserIdentity string `json:"userIdentity"`
+			Scope        string `json:"scope"`
 		} `json:"auth"`
 		Variant      string `json:"variant"`
 		WebID        string `json:"webId"`
@@ -181,7 +185,13 @@ func sniffVariantFromJSON(raw []byte) string {
 		return normalizeVariant(probe.Variant)
 	}
 	// Intl files carry webId / tenant / userIdentity (marscode.com realm).
-	if probe.WebID != "" || probe.Tenant != "" || probe.UserIdentity != "" {
+	// v0.12.4 fix: v0.12.2/3 intl logins write the Intl markers NESTED
+	// under auth without an explicit variant; recognize both layouts or
+	// every account created by the merged plugin's own Intl login sniffs
+	// as cn and is served by the CN handlers.
+	if probe.WebID != "" || probe.Tenant != "" || probe.UserIdentity != "" ||
+		probe.Auth.WebID != "" || probe.Auth.Tenant != "" || probe.Auth.UserIdentity != "" ||
+		probe.Auth.Scope != "" {
 		return variantIntl
 	}
 	return variantCN
@@ -216,6 +226,36 @@ func requestVariantIsIntl(request []byte) bool {
 		return sniffVariantFromJSON(legacy.StorageJSON) == variantIntl
 	}
 	return false
+}
+
+// extractAuthPayload pulls the auth storage payload out of an RPC request,
+// decoding the base64 string wrapper that encoding/json applies to []byte
+// fields. Accepts StorageJSON (model.for_auth / auth.refresh / executor /
+// auth.parse on the pluginapi wire) and the legacy snake_case storage_json
+// raw-object form. Returns ok=false when no payload is present.
+func extractAuthPayload(request []byte) ([]byte, bool) {
+	var req struct {
+		StorageJSON   json.RawMessage `json:"StorageJSON"`
+		RawJSON       json.RawMessage `json:"RawJSON"`
+		LegacyStorage json.RawMessage `json:"storage_json"`
+	}
+	if err := json.Unmarshal(request, &req); err != nil {
+		return nil, false
+	}
+	for _, field := range [][]byte{req.StorageJSON, req.RawJSON, req.LegacyStorage} {
+		if len(field) == 0 {
+			continue
+		}
+		if field[0] == '"' {
+			var decoded []byte
+			if err := json.Unmarshal(field, &decoded); err != nil || len(decoded) == 0 {
+				continue
+			}
+			return decoded, true
+		}
+		return field, true
+	}
+	return nil, false
 }
 
 // loginVariantIsIntl reports whether NEW logins target the Intl realm.

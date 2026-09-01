@@ -383,14 +383,24 @@ func intlparseStoredAuth(raw []byte) (*upstream.Auth, error) {
 }
 
 func intlhandleParseAuth(request []byte) ([]byte, error) {
+	// v0.12.4 fix: accept the host wire format (RawJSON base64) — see
+	// handleParseAuth for the full rationale.
 	var req struct {
 		StorageJSON json.RawMessage `json:"storage_json"`
-		FileName    string          `json:"file_name"`
+		FileName    string          `json:"FileName"`
+		RawJSON     json.RawMessage `json:"RawJSON"`
 	}
 	if err := json.Unmarshal(request, &req); err != nil {
 		return nil, err
 	}
-	a, err := intlparseStoredAuth(req.StorageJSON)
+	payload, ok := extractAuthPayload(request)
+	if !ok {
+		payload, ok = req.StorageJSON, len(req.StorageJSON) > 0
+	}
+	if !ok {
+		return errorEnvelope("parse_error", "no storage_json/raw_json payload in auth.parse request"), nil
+	}
+	a, err := intlparseStoredAuth(payload)
 	if err != nil {
 		return errorEnvelope("parse_error", err.Error()), nil
 	}
@@ -401,13 +411,13 @@ func intlhandleParseAuth(request []byte) ([]byte, error) {
 			ID:          a.UID,
 			FileName:    intlnonEmpty(req.FileName, intlauthFileName),
 			Label:       intlnonEmpty(a.Nickname, "Trae Intl "+a.UID),
-			StorageJSON: req.StorageJSON,
+			StorageJSON: payload,
 			Metadata:    map[string]any{"type": intlproviderName, "uid": a.UID},
 		},
 	})
 }
 
-func intlhandleStartLogin(_ []byte) ([]byte, error) {
+func intlhandleStartLogin(request []byte) ([]byte, error) {
 	// Step 1: PKCE + login_trace_id.
 	loginTraceID := newLoginTraceID()
 	codeVerifier, codeChallenge := generatePKCEPair()
@@ -415,12 +425,19 @@ func intlhandleStartLogin(_ []byte) ([]byte, error) {
 	// Step 2: Allocate local callback port. callback_bind/callback_public_host
 	// let Docker/remote deployments pick a reachable address (v0.12.3 parity
 	// with the CN/SOLO flow in main.go).
-	ln, err := net.Listen("tcp", loadedCallbackBind()+":0")
-	if err != nil {
-		return nil, fmt.Errorf("allocate callback port: %w", err)
+	host := parseLoginHostContext(request)
+
+	var ln net.Listener
+	cbURL := resourceCallbackURL(host.BaseURL)
+	if cbURL == "" {
+		var err error
+		ln, err = net.Listen("tcp", loadedCallbackBind()+":0")
+		if err != nil {
+			return nil, fmt.Errorf("allocate callback port: %w", err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		cbURL = fmt.Sprintf("http://%s:%d/authorize", loadedCallbackPublicHost(), port)
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	cbURL := fmt.Sprintf("http://%s:%d/authorize", loadedCallbackPublicHost(), port)
 
 	// Step 3: POST GetLoginGuidance with multi-endpoint fallback
 	// (cockpit-tools request_login_guidance). Intl tries api.marscode.com →
@@ -428,7 +445,7 @@ func intlhandleStartLogin(_ []byte) ([]byte, error) {
 	// kills the login flow with "GetLoginGuidance upstream 404".
 	loginHost, err := intlrequestLoginGuidance(false, loginTraceID)
 	if err != nil {
-		ln.Close()
+		closeListener(ln)
 		return nil, fmt.Errorf("GetLoginGuidance failed: %w", err)
 	}
 
@@ -456,6 +473,7 @@ func intlhandleStartLogin(_ []byte) ([]byte, error) {
 	// Step 6: Store login state.
 	intlloginStates.Store(loginTraceID, &intlloginCtx{
 		listener:      ln,
+		authDir:       host.AuthDir,
 		state:         loginTraceID,
 		cbURL:         cbURL,
 		expires:       time.Now().Add(loginTTL),
@@ -466,7 +484,9 @@ func intlhandleStartLogin(_ []byte) ([]byte, error) {
 		machineID:     machineID,
 	})
 
-	go intlacceptCallback(loginTraceID)
+	if ln != nil {
+		go intlacceptCallback(loginTraceID)
+	}
 
 	return okEnvelope(pluginapi.AuthLoginStartResponse{
 		Provider:  intlproviderName,
@@ -493,20 +513,36 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 	lc := v.(*intlloginCtx)
 	if time.Now().After(lc.expires) {
 		intlloginStates.Delete(state)
-		lc.listener.Close()
+		closeListener(lc.listener)
 		return nil, fmt.Errorf("poll: login expired (15 min timeout) — please re-initiate")
 	}
 	select {
 	case <-lc.done:
 	default:
-		return okEnvelope(pluginapi.AuthLoginPollResponse{
-			Status:  pluginapi.AuthLoginStatusPending,
-			Message: "waiting for browser login",
-		})
+		if lc.listener == nil {
+			// Resource-callback flow: pick up the host oauth-callback
+			// file if the redirect landed there instead of our route.
+			if code, cbErr, ok := readHostCallbackFile(lc.authDir, state); ok {
+				if cbErr != "" {
+					lc.err = fmt.Errorf("oauth callback error: %s", cbErr)
+				} else if code != "" {
+					lc.authCode = code
+				}
+				intlCompleteLogin(lc)
+			}
+		}
+		select {
+		case <-lc.done:
+		default:
+			return okEnvelope(pluginapi.AuthLoginPollResponse{
+				Status:  pluginapi.AuthLoginStatusPending,
+				Message: "waiting for browser login",
+			})
+		}
 	}
 	if lc.err != nil {
 		intlloginStates.Delete(state)
-		lc.listener.Close()
+		closeListener(lc.listener)
 		return okEnvelope(pluginapi.AuthLoginPollResponse{
 			Status:  pluginapi.AuthLoginStatusError,
 			Message: lc.err.Error(),
@@ -514,7 +550,7 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 	}
 	if lc.authCode == "" {
 		intlloginStates.Delete(state)
-		lc.listener.Close()
+		closeListener(lc.listener)
 		return okEnvelope(pluginapi.AuthLoginPollResponse{
 			Status:  pluginapi.AuthLoginStatusError,
 			Message: "login completed but no authCode received — please retry",
@@ -542,7 +578,7 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 		intlbuildAPIURLs(lc.loginHost, "/trae/api/v3/oauth/ExchangeToken", false), tokenBytes)
 	if exErr != nil {
 		intlloginStates.Delete(state)
-		lc.listener.Close()
+		closeListener(lc.listener)
 		return okEnvelope(pluginapi.AuthLoginPollResponse{
 			Status:  pluginapi.AuthLoginStatusError,
 			Message: exErr.Error(),
@@ -559,7 +595,7 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 	}
 	if err := json.Unmarshal(tokenRaw, &tokenEnv); err != nil {
 		intlloginStates.Delete(state)
-		lc.listener.Close()
+		closeListener(lc.listener)
 		return okEnvelope(pluginapi.AuthLoginPollResponse{
 			Status:  pluginapi.AuthLoginStatusError,
 			Message: fmt.Sprintf("parse ExchangeToken: %v", err),
@@ -597,6 +633,7 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 			"expiresAt":    a.ExpiresAt,
 			"domain":       a.Domain,
 			"apiHost":      a.APIHost,
+			"variant":      "intl",
 			"region":       a.Region,
 			"scope":        a.Scope,
 			"tenant":       a.Tenant,
@@ -611,7 +648,7 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 		"disabled": false,
 	}, "", "  ")
 	intlloginStates.Delete(state)
-	lc.listener.Close()
+	closeListener(lc.listener)
 	return okEnvelope(pluginapi.AuthLoginPollResponse{
 		Status:  pluginapi.AuthLoginStatusSuccess,
 		Message: fmt.Sprintf("login complete (uid=%s)", a.UID),
@@ -647,6 +684,7 @@ func intlhandleRefreshAuth(request []byte) ([]byte, error) {
 			"expiresAt":    a.ExpiresAt,
 			"domain":       a.Domain,
 			"apiHost":      a.APIHost,
+			"variant":      "intl",
 			"region":       a.Region,
 			"scope":        a.Scope,
 			"tenant":       a.Tenant,
@@ -902,6 +940,11 @@ type intlloginCtx struct {
 	authCode      string
 	err           error
 	done          chan struct{}
+
+	// authDir: host auth dir for the .oauth callback-file fallback.
+	authDir string
+	// doneOnce guards done for the resource-callback completion path.
+	doneOnce sync.Once
 }
 
 // intlacceptCallback accepts OAuth callback GET /authorize?... requests until
@@ -922,7 +965,7 @@ func intlacceptCallback(state string) {
 	_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(loginTTL))
 	for {
 		if time.Now().After(lc.expires) {
-			lc.listener.Close()
+			closeListener(lc.listener)
 			return
 		}
 		conn, err := ln.Accept()
@@ -931,11 +974,11 @@ func intlacceptCallback(state string) {
 			if lc.err == nil {
 				lc.err = fmt.Errorf("callback accept: %w", err)
 			}
-			lc.listener.Close()
+			closeListener(lc.listener)
 			return
 		}
 		if intlHandleCallbackConn(conn, lc) {
-			lc.listener.Close()
+			closeListener(lc.listener)
 			return
 		}
 	}
