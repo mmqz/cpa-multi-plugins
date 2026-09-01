@@ -15,16 +15,11 @@ echo "Target: $TARGET_OS/$TARGET_ARCH"
 echo "Plugins dir: $PLUGINS_DIR"
 echo ""
 
-# 插件清单
+# 插件清单（v0.12.0 收敛为 3 个统一插件）
 PLUGINS=(
   "workbuddy"
-  "codebuddy-cn"
-  "codebuddy-intl"
-  "trae-cn"
-  "trae-solo-cn"
-  "trae-intl"
-  "qoder-cn"
-  "qoder-intl"
+  "qoder"
+  "trae"
 )
 
 # 输出目录

@@ -8,7 +8,7 @@ import (
 )
 
 func TestPrepareBodyForcesStreamAndFunction(t *testing.T) {
-	out := PrepareBody([]byte(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`))
+	out := PrepareBody([]byte(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`), "solo")
 	var m map[string]any
 	json.Unmarshal(out, &m)
 	if m["stream"] != true {
@@ -29,7 +29,7 @@ func TestPrepareBodyForcesStreamAndFunction(t *testing.T) {
 }
 
 func TestPrepareBodyKeepsArrayContent(t *testing.T) {
-	out := PrepareBody([]byte(`{"model":"glm-5.2","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`))
+	out := PrepareBody([]byte(`{"model":"glm-5.2","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`), "cn")
 	var m map[string]any
 	json.Unmarshal(out, &m)
 	msgs := m["messages"].([]any)
@@ -40,7 +40,7 @@ func TestPrepareBodyKeepsArrayContent(t *testing.T) {
 }
 
 func TestPrepareBodyToolChoiceFunctionObject(t *testing.T) {
-	out := PrepareBody([]byte(`{"model":"glm-5.2","tool_choice":{"type":"function","function":{"name":"get_weather"}},"tools":[{"type":"function","function":{"name":"get_weather"}}]}`))
+	out := PrepareBody([]byte(`{"model":"glm-5.2","tool_choice":{"type":"function","function":{"name":"get_weather"}},"tools":[{"type":"function","function":{"name":"get_weather"}}]}`), "cn")
 	var m map[string]any
 	json.Unmarshal(out, &m)
 	if m["tool_choice"] != "get_weather" {
@@ -52,7 +52,7 @@ func TestPrepareBodyToolChoiceFunctionObject(t *testing.T) {
 }
 
 func TestPrepareBodyToolChoiceNone(t *testing.T) {
-	out := PrepareBody([]byte(`{"model":"glm-5.2","tool_choice":"none","tools":[{}],"functions":[{}]}`))
+	out := PrepareBody([]byte(`{"model":"glm-5.2","tool_choice":"none","tools":[{}],"functions":[{}]}`), "cn")
 	var m map[string]any
 	json.Unmarshal(out, &m)
 	if _, ok := m["tool_choice"]; ok {
@@ -68,7 +68,7 @@ func TestPrepareBodyToolChoiceNone(t *testing.T) {
 
 func TestPrepareBodyInvalidJSON(t *testing.T) {
 	in := []byte(`{broken`)
-	out := PrepareBody(in)
+	out := PrepareBody(in, "cn")
 	if string(out) != string(in) {
 		t.Error("invalid json should pass through unchanged")
 	}
@@ -198,7 +198,7 @@ func TestStreamGuaranteesDone(t *testing.T) {
 
 func TestPrepareBodyToolsParametersStringified(t *testing.T) {
 	src := `{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"get_weather","description":"weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]}`
-	out := PrepareBody([]byte(src))
+	out := PrepareBody([]byte(src), "cn")
 	var obj map[string]any
 	if err := json.Unmarshal(out, &obj); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -220,7 +220,7 @@ func TestPrepareBodyToolsParametersStringified(t *testing.T) {
 
 func TestPrepareBodyToolsInvalidEntriesDropped(t *testing.T) {
 	src := `{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"ok","parameters":{"type":"object"}}},{"bad":1}]}`
-	out := PrepareBody([]byte(src))
+	out := PrepareBody([]byte(src), "cn")
 	var obj map[string]any
 	_ = json.Unmarshal(out, &obj)
 	tools, ok := obj["tools"].([]any)
@@ -283,7 +283,7 @@ func TestPrepareBodyAssistantToolCallsToFunctionCall(t *testing.T) {
 	  {"role":"assistant","content":null,"tool_calls":[{"id":"call_x","type":"function","function":{"name":"skill_view","arguments":"{\"name\":\"hermes-agent\"}"}}]},
 	  {"role":"tool","tool_call_id":"call_x","content":"skill content"}
 	],"tools":[{"type":"function","function":{"name":"skill_view"}}]}`
-	out := PrepareBody([]byte(src))
+	out := PrepareBody([]byte(src), "cn")
 	var obj map[string]any
 	_ = json.Unmarshal(out, &obj)
 	msgs := obj["messages"].([]any)
@@ -307,7 +307,7 @@ func TestPrepareBodyToolCallWithoutNameDropped(t *testing.T) {
 	  {"role":"user","content":"hi"},
 	  {"role":"assistant","tool_calls":[{"id":"call_bad","type":"function","function":{"arguments":"{}"}}]}
 	]}`
-	out := PrepareBody([]byte(src))
+	out := PrepareBody([]byte(src), "cn")
 	var obj map[string]any
 	_ = json.Unmarshal(out, &obj)
 	msgs := obj["messages"].([]any)

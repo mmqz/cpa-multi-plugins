@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -66,7 +67,7 @@ func TestRefreshTokenExchange(t *testing.T) {
 			return nil, errors.New("missing content-type")
 		}
 		body, _ := io.ReadAll(r.Body)
-		if !bytes.Contains(body, []byte(`"ClientID":"en1oxy7wnw8j9n"`)) || !bytes.Contains(body, []byte(`"RefreshToken":"oldrt"`)) {
+		if !bytes.Contains(body, []byte(`"ClientID":"`+ClientID+`"`)) || !bytes.Contains(body, []byte(`"RefreshToken":"oldrt"`)) {
 			return nil, errors.New("bad body: " + string(body))
 		}
 		return jsonResp(200, `{"Result":{"Token":"newat","RefreshToken":"newrt","TokenExpireAt":1786805537,"TokenExpireDuration":1209600}}`), nil
@@ -184,7 +185,7 @@ func TestChatStreamSendsHeadersAndRewritesBody(t *testing.T) {
 	if gotAppID != AppID || gotIdeVer != "0.1.43" {
 		t.Errorf("app headers: appid=%q idever=%q", gotAppID, gotIdeVer)
 	}
-	if !bytes.Contains(gotBody, []byte(`"stream":true`)) || !bytes.Contains(gotBody, []byte(`"function":"solo_work_lite"`)) {
+	if !bytes.Contains(gotBody, []byte(`"stream":true`)) || !bytes.Contains(gotBody, []byte(`"function":"inline_chat"`)) {
 		t.Errorf("body not rewritten: %s", gotBody)
 	}
 }
@@ -239,12 +240,51 @@ func TestUserEntUsageAggregation(t *testing.T) {
 			{"entitlement_base_info":{"quota":{"credits_limit":500}}}
 		]}`), nil
 	})
-	remain, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
+	res, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
 	if err != nil {
 		t.Fatalf("ent usage: %v", err)
 	}
-	if remain != 2500 {
-		t.Errorf("remain=%d want 2500", remain)
+	if !res.IsCreditsBilling {
+		t.Error("is_credits_billing should be true")
+	}
+	pack := SelectActivePack(res.UserEntitlementPackList, true)
+	if pack == nil {
+		t.Fatal("no active pack selected")
+	}
+	if pack.EntitlementBaseInfo.Quota.CreditsLimit != 2000 {
+		t.Errorf("active pack credits=%d want 2000", pack.EntitlementBaseInfo.Quota.CreditsLimit)
+	}
+}
+
+func TestSelectActivePackPriority(t *testing.T) {
+	body := `[` +
+		`{"entitlement_base_info":{"product_type":1,"quota":{"credits_limit":300}}},` +
+		`{"entitlement_base_info":{"product_type":6,"quota":{"credits_limit":1500}}},` +
+		`{"entitlement_base_info":{"product_type":0,"quota":{"credits_limit":100}}}` +
+		`]`
+	var packs []EntitlementPack
+	if err := json.Unmarshal([]byte(body), &packs); err != nil {
+		t.Fatal(err)
+	}
+	if p := SelectActivePack(packs, true); p == nil || p.EntitlementBaseInfo.Quota.CreditsLimit != 1500 {
+		t.Errorf("CN should pick Ultra(6)=1500, got %+v", p)
+	}
+	if p := SelectActivePack(packs, false); p == nil || p.EntitlementBaseInfo.Quota.CreditsLimit != 1500 {
+		t.Errorf("Intl should pick Ultra(6)=1500, got %+v", p)
+	}
+
+	// 隐藏 (is_hide) 与已取消 (status=3) 的 pack 必须被过滤
+	body2 := `[` +
+		`{"entitlement_base_info":{"product_type":100,"quota":{"credits_limit":9000},"is_hide":true}},` +
+		`{"entitlement_base_info":{"product_type":5,"quota":{"credits_limit":800},"status":3}},` +
+		`{"entitlement_base_info":{"product_type":1,"quota":{"credits_limit":300}}}` +
+		`]`
+	var packs2 []EntitlementPack
+	if err := json.Unmarshal([]byte(body2), &packs2); err != nil {
+		t.Fatal(err)
+	}
+	if p := SelectActivePack(packs2, true); p == nil || p.EntitlementBaseInfo.Quota.CreditsLimit != 300 {
+		t.Errorf("hidden/cancelled must be skipped, want Pro(1)=300, got %+v", p)
 	}
 }
 
@@ -257,12 +297,12 @@ func TestCheckinStatusAndClaim(t *testing.T) {
 		}
 		return jsonResp(200, `{"checked_in":false,"credits":200,"enable":true}`), nil
 	})
-	checkedIn, credits, enable, err := c.CheckinStatus(&auth.Auth{AccessToken: "at"})
+	res, err := c.CheckinStatus(&auth.Auth{AccessToken: "at"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if checkedIn || !enable || credits != 200 {
-		t.Errorf("status: checked=%v enable=%v credits=%d", checkedIn, enable, credits)
+	if res.CheckedIn || !res.Enable || res.Credits != 200 {
+		t.Errorf("status: checked=%v enable=%v credits=%d", res.CheckedIn, res.Enable, res.Credits)
 	}
 	if path != EpCheckinStatus {
 		t.Errorf("path=%s", path)
