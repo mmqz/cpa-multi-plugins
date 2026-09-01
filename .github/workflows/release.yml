@@ -22,6 +22,7 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
+      max-parallel: 5
       matrix:
         include:
           - os: linux
@@ -38,14 +39,9 @@ jobs:
             goarch: arm64
             cc: gcc
             ext: so
-          - os: darwin
-            arch: amd64
-            runner: macos-13
-            goos: darwin
-            goarch: amd64
-            cc: clang
-            ext: dylib
-            optional: true
+          # NOTE: darwin-amd64 (macos-13 Intel runner) removed — GitHub retired
+          # Intel macOS hosted runners; the job queued forever and blocked the
+          # release job (needs: build). Re-add only if an Intel runner appears.
           - os: darwin
             arch: arm64
             runner: macos-14
@@ -200,41 +196,38 @@ jobs:
           body: |
             # cpa-multi-plugins ${{ steps.version.outputs.version }}
 
-            8 CPA plugins for CodeBuddy / WorkBuddy / Trae / Qoder (CN + Intl versions).
+            3 unified CPA plugins: **CodeBuddy/WorkBuddy**, **Qoder**, **Trae** — each merges the former CN/Intl/solo variants with automatic legacy auth-file adoption.
 
             ## Downloads
             - `cpa-multi-plugins-linux-amd64.zip` — Linux x86_64
             - `cpa-multi-plugins-linux-arm64.zip` — Linux ARM64
-            - `cpa-multi-plugins-darwin-amd64.zip` — macOS Intel
             - `cpa-multi-plugins-darwin-arm64.zip` — macOS Apple Silicon
             - `cpa-multi-plugins-windows-amd64.zip` — Windows x86_64
 
-            ## Installation
+            > macOS Intel (darwin-amd64) is paused: GitHub retired Intel macOS runners.
+
+            ## Installation (verified against real CLIProxyAPI host)
             1. Download and unzip the archive for your platform.
-            2. Copy the `.so`/`.dylib`/`.dll` files to your CPA `plugins/` directory.
-            3. Enable plugins in `config.yaml`:
+            2. Copy the `.so`/`.dylib`/`.dll` files to your CPA plugins directory (e.g. `plugins/linux/amd64/`).
+            3. **Each plugin must be explicitly enabled** in `config.yaml` (per-plugin default is disabled):
                ```yaml
                plugins:
                  enabled: true
-                 dir: "./plugins"
+                 dir: "plugins"
                  configs:
                    workbuddy: { enabled: true }
-                   trae-cn: { enabled: true }
-                   trae-solo-cn: { enabled: true }
-                   # ... etc
+                   qoder: { enabled: true }
+                   trae: { enabled: true }
                ```
-            4. Restart CPA. Login accounts via CPAMP or Management API.
+            4. Restart CPA and check logs for `pluginhost: plugin registered plugin_id=workbuddy/qoder/trae`.
+            5. Login accounts via the management panel or Management API. Legacy `codebuddy-cn-/codebuddy-intl-/qoder-cn-/qoder-intl-/trae-cn-/trae-solo-cn-/trae-intl-` auth files are adopted automatically.
 
             ## Plugins
-            | Plugin | Platform | Protocol | Check-in |
+            | Plugin | Covers | Realms | Login options |
             |---|---|---|---|
-            | workbuddy | CodeBuddy CN/WorkBuddy (merged) | OpenAI compat | ✅ |
-            | codebuddy-intl | CodeBuddy Intl | OpenAI compat | ❌ |
-            | trae-cn | Trae Code CN | llm_utils_chat | ✅ |
-            | trae-solo-cn | Trae Work CN/SOLO CN | llm_utils_chat | ✅ |
-            | trae-intl | Trae Intl | Web SOLO remote | ❌ |
-            | qoder-cn | QoderWork CN | COSY-signed | ✅ |
-            | qoder-intl | Qoder Intl | COSY-signed | ❌ |
+            | workbuddy | CodeBuddy + WorkBuddy + codebuddy-cn + codebuddy-intl | CN (copilot.tencent.com) / Global (workbuddy.ai) / Intl (codebuddy.ai) | CLI + IDE, per-account region |
+            | qoder | Qoder + qoder-cn + qoder-intl | CN (qoder.com.cn) / Intl (qoder.com) | Device flow + PAT, per-account region |
+            | trae | Trae CN + Trae SOLO CN + Trae Intl | CN (api.trae.cn) / SOLO / Intl (marscode) | Per-variant device flow |
 
             See [README](https://github.com/mmqz/cpa-multi-plugins#readme) for details.
           files: release/*.zip
