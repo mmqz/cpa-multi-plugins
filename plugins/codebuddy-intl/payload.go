@@ -139,7 +139,7 @@ func normalizeToolsInPlace(obj map[string]any) bool {
 //     apply sanitizeBlockedTemplates (single-word substitutions).
 //  2. Strip reasoning_effort "none"/"off" (Tencent rejects them); mirror
 //     other values to reasoning_summary="auto" (OmniRoute codebuddy-cn.ts).
-//  3. forceMaxThinking for hy3-family models.
+//  3. forceMaxThinking for hy3/hy4-family models.
 func rewriteSystemInPlace(obj map[string]any) bool {
         messages, _ := obj["messages"].([]any)
         changed := false
@@ -505,13 +505,16 @@ func sanitizeBlockedTemplates(s string) string {
         return s
 }
 
-// forceMaxThinking pins reasoning_effort to "high" for hy3-family models so
-// Tencent Hunyuan 3 always reasons at maximum depth. CodeBuddy only honors
-// "high" for deep thinking (medium/low/max/xhigh/ultra all fall back to no
-// reasoning), so we override whatever the client sent. Returns true if changed.
+// forceMaxThinking pins reasoning_effort to "high" for hy3/hy4-family models
+// (Tencent Hunyuan) so they always reason at maximum depth. CodeBuddy only
+// honors "high" for deep thinking (medium/low/max/xhigh/ultra all fall back to
+// no reasoning), so we override whatever the client sent. Matching is
+// case-insensitive because this runs before rewriteModelInPlace swaps the
+// client-facing model name for the upstream ID. Returns true if changed.
 func forceMaxThinking(obj map[string]any) bool {
         model, _ := obj["model"].(string)
-        if !strings.HasPrefix(model, "hy3") {
+        lm := strings.ToLower(model)
+        if !strings.HasPrefix(lm, "hy3") && !strings.HasPrefix(lm, "hy4") {
                 return false
         }
         if eff, _ := obj["reasoning_effort"].(string); eff == "high" {

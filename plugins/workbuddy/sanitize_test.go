@@ -41,6 +41,27 @@ func TestForceMaxThinking_Hy3Model(t *testing.T) {
 	}
 }
 
+func TestForceMaxThinking_Hy4Model(t *testing.T) {
+	obj := map[string]any{"model": "hy4-preview"}
+	changed := forceMaxThinking(obj)
+	if !changed {
+		t.Fatal("should change hy4 model")
+	}
+	if obj["reasoning_effort"] != "high" {
+		t.Fatal("should set high")
+	}
+}
+
+func TestForceMaxThinking_Hy4ModelCaseInsensitive(t *testing.T) {
+	obj := map[string]any{"model": "Hy4 Preview"}
+	if !forceMaxThinking(obj) {
+		t.Fatal("should match Hy4 case-insensitively (pre-rewrite alias form)")
+	}
+	if obj["reasoning_effort"] != "high" {
+		t.Fatal("should set high")
+	}
+}
+
 func TestForceMaxThinking_NonHy3Model(t *testing.T) {
 	obj := map[string]any{"model": "glm-5.2"}
 	changed := forceMaxThinking(obj)
