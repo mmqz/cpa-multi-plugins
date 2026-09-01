@@ -18,13 +18,10 @@
 
 | 插件 | 平台 | 协议 | 签到 | 配额 | 状态 |
 |---|---|---|---|---|---|
-| `workbuddy` | CodeBuddy CN/WorkBuddy（合并版） | OpenAI 兼容 | ✅ 每日 | ✅ credits | ✅ functional |
-| `codebuddy-intl` | CodeBuddy Intl | OpenAI 兼容 | ❌ | ✅ credits | ✅ functional |
-| `trae-cn` | Trae Code CN | llm_utils_chat + inline_chat | ✅ 每日 | ✅ v2 pack 优先级 | ✅ functional |
-| `trae-solo-cn` | Trae Work CN/SOLO CN | llm_utils_chat + solo_work_lite | ✅ 每日 | ✅ v2 pack 优先级 | ✅ functional |
-| `trae-intl` | Trae Intl | Web SOLO remote | ❌ | ✅ v1 | ✅ functional |
-| `qoder-cn` | QoderWork CN | COSY 签名 | ✅ 每日 | ✅ quota | ✅ functional |
-| `qoder-intl` | Qoder Intl | COSY 签名 | ❌ | ✅ quota | ✅ functional |
+| `workbuddy` | CodeBuddy / WorkBuddy 三区合并（CN + Global + Intl） | OpenAI 兼容 | ✅ 每日 | ✅ credits | ✅ functional |
+| `trae` | Trae 三变体合并（Code CN + SOLO CN + Intl） | llm_utils_chat / Web SOLO | ✅ 每日 | ✅ v2 pack 优先级 | ✅ functional |
+| `qoder` | Qoder 双区合并（CN + Intl） | COSY 签名 | ✅ 每日 | ✅ quota | ✅ functional |
+
 
 ## 功能对标
 
@@ -78,7 +75,7 @@
 
 ## 为什么是 8 个独立插件而不是合并？
 
-CPA 的插件架构基于 `auth.identifier` + `executor.identifier`——**每个 `.so` 只能注册一个 provider name**。CPA 的 `HasAuthProvider(provider)` 按 identifier 精确匹配，所以一个插件无法同时响应 `qoder-cn` 和 `qoder-intl` 两个 provider key。
+CPA 的插件架构基于 `auth.identifier` + `executor.identifier`——**每个 `.so` 只能注册一个 provider name**。CPA 的 `HasAuthProvider(provider)` 按 identifier 精确匹配，所以合并家族后统一使用单一 provider key（`workbuddy` / `qoder` / `trae`），区域内差异（CN/Intl/SOLO 等）通过账号文件内的字段路由，旧插件名的账号文件启动时自动收养。
 
 ### 如果你想减少插件数量
 
@@ -101,18 +98,18 @@ openai-compatibility:
 
 **方案 2：只装你需要的插件**
 
-7 个插件互相独立，不需要全装。按需选择：
+3 个插件互相独立，不需要全装。每个插件内部支持区域/变体选择（配置或自动收养）：
 
 | 你的需求 | 装哪些插件 |
 |---|---|
-| 只用 Trae Work CN（薅羊毛） | `trae-solo-cn` |
-| 只用 Trae Code CN | `trae-cn` |
-| 只用 Trae Intl | `trae-intl` |
-| 只用 CodeBuddy CN / WorkBuddy | `workbuddy`（v0.9.0 起两者合并，双登录方式 + 自动收养 codebuddy-cn 账号文件） |
-| 只用 CodeBuddy Intl | `codebuddy-intl` |
-| 只用 QoderWork CN | `qoder-cn` |
-| 只用 Qoder Intl | `qoder-intl` |
-| 全都要 | 全部 7 个 |
+| Trae Code CN | `trae`（login_variant: "cn"，默认） |
+| Trae Work CN（薅羊毛） | `trae`（login_variant: "solo"，自动收养 trae-solo-cn 账号文件） |
+| Trae Intl | `trae`（login_variant: "intl"，自动收养 trae-intl 账号文件） |
+| CodeBuddy CN / WorkBuddy | `workbuddy`（login_platform: CLI 或 ide；v0.9.0 起合并） |
+| CodeBuddy Intl | `workbuddy`（login_region: "intl"；自动收养 codebuddy-intl 账号文件） |
+| QoderWork CN | `qoder`（login_region: "cn"，默认） |
+| Qoder Intl | `qoder`（login_region: "intl"，自动收养 qoder-intl 账号文件） |
+| 全都要 | 全部 3 个 |
 
 **方案 3：等 CPA 上游支持多 provider 插件**
 
@@ -143,13 +140,9 @@ plugins:
   enabled: true
   dir: "./plugins"
   configs:
-    workbuddy: { enabled: true, login_platform: "CLI" }  # CLI 或 ide，v0.9.0 起二合一
-    codebuddy-intl: { enabled: true }
-    trae-cn: { enabled: true }
-    trae-solo-cn: { enabled: true }
-    trae-intl: { enabled: true }
-    qoder-cn: { enabled: true }
-    qoder-intl: { enabled: true }
+    workbuddy: { enabled: true, login_platform: "CLI", login_region: "cn" }  # CLI/ide；region: cn|intl（v0.11.0 起三区合一）
+    trae: { enabled: true, login_variant: "cn" }  # cn|solo|intl（v0.12.0 起三合一）
+    qoder: { enabled: true, login_region: "cn" }  # cn|intl（v0.10.0 起二合一）
 ```
 
 ### 4. 重启 CPA，登录账号
@@ -168,7 +161,7 @@ make all  # 或 ./scripts/build.sh
 ./scripts/build.sh windows amd64
 
 # 单个插件
-cd plugins/trae-cn && CGO_ENABLED=1 go build -buildmode=c-shared -o trae-cn.so .
+cd plugins/trae && CGO_ENABLED=1 go build -buildmode=c-shared -o trae.so .
 ```
 
 **要求**：Go 1.23+（自动下载 1.26 toolchain）、CGO 启用、C 编译器（gcc/clang/mingw）。
@@ -202,7 +195,9 @@ cd plugins/trae-cn && CGO_ENABLED=1 go build -buildmode=c-shared -o trae-cn.so .
 - 旧 `codebuddy-cn-<uid>.json` 账号文件在插件启动时自动收养为 `workbuddy-<uid>.json`（loginPlatform=ide）
 - 参考：`cockpit-tools/src-tauri/src/modules/codebuddy_cn_oauth.rs:8` 的 platform 参数
 
-#### `plugins/codebuddy-intl` (adapted from workbuddy)
+> ℹ️ v0.10.0–v0.12.0 起家族合并：codebuddy-intl 并入 workbuddy、qoder-cn/qoder-intl 并入 qoder、trae-cn/trae-solo-cn/trae-intl 并入 trae。以下为历史来源说明。
+
+#### `plugins/codebuddy-intl` (adapted from workbuddy — merged into workbuddy)
 - 全部同 workbuddy
 - **Global host**：`www.codebuddy.ai`（vs CN 的 `www.codebuddy.cn` / `copilot.tencent.com`）
 - 参考：`OmniRoute/open-sse/config/providers/registry/codebuddy-intl/`（如果存在）

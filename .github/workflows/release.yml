@@ -69,7 +69,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.26'
           cache: false
 
       - name: Set up MSYS2 (Windows only)
@@ -92,7 +92,7 @@ jobs:
           which gcc 2>&1 || echo "which gcc failed"
           gcc --version 2>&1 | head -1 || echo "gcc invocation failed"
           mkdir -p dist/${{ matrix.os }}-${{ matrix.arch }}
-          PLUGINS="workbuddy codebuddy-intl trae-cn trae-solo-cn trae-intl qoder-cn qoder-intl"
+          PLUGINS="workbuddy qoder trae"
           for plugin in $PLUGINS; do
             echo "=== Building $plugin ==="
             cd plugins/$plugin
@@ -118,7 +118,7 @@ jobs:
           CC: ${{ matrix.cc }}
         run: |
           mkdir -p dist/${{ matrix.os }}-${{ matrix.arch }}
-          PLUGINS="workbuddy codebuddy-intl trae-cn trae-solo-cn trae-intl qoder-cn qoder-intl"
+          PLUGINS="workbuddy qoder trae"
           for plugin in $PLUGINS; do
             echo "=== Building $plugin ==="
             cd plugins/$plugin
