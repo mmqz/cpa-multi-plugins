@@ -31,3 +31,12 @@ Thumbs.db
 *.pem
 auths/
 data/
+
+# Compiled plugin binaries (go build output in plugin dirs)
+plugins/workbuddy/workbuddy
+plugins/codebuddy-intl/codebuddy-intl
+plugins/trae-cn/trae-cn
+plugins/trae-solo-cn/trae-solo-cn
+plugins/trae-intl/trae-intl
+plugins/qoder-cn/qoder-cn
+plugins/qoder-intl/qoder-intl
