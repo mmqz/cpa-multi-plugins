@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"sync"
+	"time"
 )
 
 // Aliases so main.go can reference them as netListen / netTCPAddr etc.
@@ -67,4 +69,21 @@ func newLoginTraceID() string {
 	b[6] = (b[6] & 0x0f) | 0x40 // version 4
 	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// sweepExpiredLoginStates deletes expired login states from one sync.Map and
+// closes their callback listeners. Shared by the CN/SOLO (loginStates) and
+// Intl (intlloginStates) janitors (v0.12.3: the Intl map was previously never
+// swept, leaking one listener per abandoned login until process restart).
+func sweepExpiredLoginStates(now time.Time, m *sync.Map, project func(any) (time.Time, netListener, bool)) {
+	m.Range(func(key, value any) bool {
+		expires, listener, ok := project(value)
+		if ok && now.After(expires) {
+			m.Delete(key)
+			if listener != nil {
+				listener.Close()
+			}
+		}
+		return true
+	})
 }

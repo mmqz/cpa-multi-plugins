@@ -129,7 +129,7 @@ const (
 )
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.1.0"
+var version = "0.12.3"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -210,15 +210,22 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 				return
 			case <-ticker.C:
 				now := time.Now()
-				loginStates.Range(func(key, value any) bool {
-					if lc, ok := value.(*loginCtx); ok && now.After(lc.expires) {
-						loginStates.Delete(key)
-						if lc.listener != nil {
-							lc.listener.Close()
+				sweepExpiredLoginStates(now, &loginStates,
+					func(v any) (time.Time, netListener, bool) {
+						lc, ok := v.(*loginCtx)
+						if !ok {
+							return time.Time{}, nil, false
 						}
-					}
-					return true
-				})
+						return lc.expires, lc.listener, true
+					})
+				sweepExpiredLoginStates(now, &intlloginStates,
+					func(v any) (time.Time, netListener, bool) {
+						lc, ok := v.(*intlloginCtx)
+						if !ok {
+							return time.Time{}, nil, false
+						}
+						return lc.expires, lc.listener, true
+					})
 			}
 		}
 	}()
@@ -331,7 +338,10 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		return handleStartLogin(request)
 
 	case pluginabi.MethodAuthLoginPoll:
-		if loginVariantIsIntl() {
+		// Route by where the state lives (v0.12.3) — the login_variant global
+		// can flip mid-flight on a bare Reconfigure, which would send an Intl
+		// poll to the CN handler (or vice versa) and fail with "unknown state".
+		if pollStateIsIntl(request) {
 			return intlhandlePollLogin(request)
 		}
 		return handlePollLogin(request)

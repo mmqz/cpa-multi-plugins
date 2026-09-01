@@ -412,13 +412,15 @@ func intlhandleStartLogin(_ []byte) ([]byte, error) {
 	loginTraceID := newLoginTraceID()
 	codeVerifier, codeChallenge := generatePKCEPair()
 
-	// Step 2: Allocate local callback port.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// Step 2: Allocate local callback port. callback_bind/callback_public_host
+	// let Docker/remote deployments pick a reachable address (v0.12.3 parity
+	// with the CN/SOLO flow in main.go).
+	ln, err := net.Listen("tcp", loadedCallbackBind()+":0")
 	if err != nil {
 		return nil, fmt.Errorf("allocate callback port: %w", err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	cbURL := fmt.Sprintf("http://127.0.0.1:%d/authorize", port)
+	cbURL := fmt.Sprintf("http://%s:%d/authorize", loadedCallbackPublicHost(), port)
 
 	// Step 3: POST GetLoginGuidance with multi-endpoint fallback
 	// (cockpit-tools request_login_guidance). Intl tries api.marscode.com →
@@ -492,7 +494,7 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 	if time.Now().After(lc.expires) {
 		intlloginStates.Delete(state)
 		lc.listener.Close()
-		return nil, fmt.Errorf("poll: login expired (5 min timeout) — please re-initiate")
+		return nil, fmt.Errorf("poll: login expired (15 min timeout) — please re-initiate")
 	}
 	select {
 	case <-lc.done:
@@ -902,7 +904,11 @@ type intlloginCtx struct {
 	done          chan struct{}
 }
 
-// intlacceptCallback accepts the OAuth callback from the browser.
+// intlacceptCallback accepts OAuth callback GET /authorize?... requests until
+// the flow completes or the TTL expires. v0.12.3: looping Accept — the
+// previous single-Accept version died on browser preconnects, favicon
+// probes and retries before the real redirect arrived (same bug class the
+// CN/SOLO flow hit and fixed in v0.12.2).
 func intlacceptCallback(state string) {
 	v, ok := intlloginStates.Load(state)
 	if !ok {
@@ -914,39 +920,112 @@ func intlacceptCallback(state string) {
 
 	ln := lc.listener
 	_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(loginTTL))
-	conn, err := ln.Accept()
-	if err != nil {
-		lc.err = fmt.Errorf("callback accept: %w", err)
-		lc.listener.Close()
-		return
+	for {
+		if time.Now().After(lc.expires) {
+			lc.listener.Close()
+			return
+		}
+		conn, err := ln.Accept()
+		if err != nil {
+			// Deadline exceeded or listener closed — janitor cleans the state.
+			if lc.err == nil {
+				lc.err = fmt.Errorf("callback accept: %w", err)
+			}
+			lc.listener.Close()
+			return
+		}
+		if intlHandleCallbackConn(conn, lc) {
+			lc.listener.Close()
+			return
+		}
 	}
+}
+
+// intlHandleCallbackConn serves ONE callback connection and returns true
+// when the OAuth flow is resolved (authCode captured, or the provider
+// reported an error). Anything else (favicon, "/", preconnects) gets a 404
+// and the listener keeps waiting for the real redirect.
+func intlHandleCallbackConn(conn net.Conn, lc *intlloginCtx) bool {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	buf := make([]byte, 16384)
 	n, _ := conn.Read(buf)
 	req := string(buf[:n])
-	// Parse "GET /authorize?... HTTP/1.1"
+	// Parse the first HTTP request line: "GET /authorize?... HTTP/1.1"
 	firstLine := req
 	if nl := strings.Index(req, "\r\n"); nl >= 0 {
 		firstLine = req[:nl]
 	}
 	sp := strings.Index(firstLine, " ")
 	if sp < 0 {
-		lc.err = fmt.Errorf("callback: malformed request line")
-		writeCallbackHTML(conn, "Login failed", "malformed request")
-		return
+		writeCallbackStatus(conn, "400 Bad Request")
+		return false
 	}
 	rest := firstLine[sp+1:]
+	// Trim trailing HTTP version (e.g. " HTTP/1.1").
 	if sp2 := strings.LastIndex(rest, " "); sp2 >= 0 {
 		rest = rest[:sp2]
 	}
-	vals := url.Values{}
-	if q := strings.Index(rest, "?"); q >= 0 {
-		vals, _ = url.ParseQuery(rest[q+1:])
+	q := strings.Index(rest, "?")
+	if q < 0 {
+		// No query string at all (e.g. "GET / HTTP/1.1", favicon probes).
+		writeCallbackStatus(conn, "404 Not Found")
+		return false
 	}
-	lc.authCode = vals.Get("authCode")
-	lc.loginHost = vals.Get("loginHost")
-	body := "<html><body><h2>Login successful</h2><p>You can close this window now.</p></body></html>"
-	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
-		len(body), body)
+	vals, _ := url.ParseQuery(rest[q+1:])
+
+	// Error path (same parameter names as the CN/SOLO callback).
+	for _, k := range []string{"error", "error_code", "err", "errorCode"} {
+		if ev := vals.Get(k); ev != "" {
+			lc.err = fmt.Errorf("oauth callback error: %s=%s", k, ev)
+			writeCallbackHTML(conn, "Login failed", lc.err.Error())
+			return true
+		}
+	}
+	if ir := vals.Get("isRedirect"); ir == "false" {
+		lc.err = fmt.Errorf("oauth callback: isRedirect=false")
+		writeCallbackHTML(conn, "Login failed", "isRedirect=false")
+		return true
+	}
+
+	// loginHost (used for ExchangeToken; falls back to the Intl default).
+	for _, k := range []string{"loginHost", "login_host", "LoginHost", "host", "consoleHost"} {
+		if v := vals.Get(k); v != "" {
+			lc.loginHost = v
+			break
+		}
+	}
+
+	// Auth code (multiple names; first non-empty wins).
+	for _, k := range []string{"authCode", "auth_code", "AuthCode", "authorization_code", "code"} {
+		if v := vals.Get(k); v != "" {
+			lc.authCode = v
+			break
+		}
+	}
+
+	// authCodeInfo — extract auth code from JSON payload.
+	if lc.authCode == "" {
+		for _, k := range []string{"authCodeInfo", "auth_code_info", "AuthCodeInfo"} {
+			if v := vals.Get(k); v != "" {
+				if ac := extractAuthCodeFromAuthCodeInfo(v); ac != "" {
+					lc.authCode = ac
+					break
+				}
+			}
+		}
+	}
+
+	// Final sanity check + browser response.
+	switch {
+	case lc.err != nil:
+		writeCallbackHTML(conn, "Login failed", lc.err.Error())
+		return true
+	case lc.authCode != "":
+		writeCallbackHTML(conn, "Login successful", "You can close this window now.")
+		return true
+	default:
+		writeCallbackStatus(conn, "404 Not Found")
+		return false
+	}
 }

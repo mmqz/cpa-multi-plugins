@@ -129,9 +129,13 @@ func configureCallback(lines []string) {
 }
 
 // configureVariant parses login_variant (and callback knobs) from the
-// plugin config block.
+// plugin config block. STICKY semantics (v0.12.3): login_variant only
+// changes when the incoming config explicitly carries a login_variant
+// line — the host may resend Register/Reconfigure with a bare or foreign
+// config block (e.g. during auth-store churn), and resetting to the cn
+// default mid-flight broke INTL logins by rerouting their polls.
 func configureVariant(raw []byte) {
-	next := variantCN
+	next := ""
 	if len(raw) > 0 {
 		var req struct {
 			ConfigYAML []byte `json:"config_yaml"`
@@ -147,6 +151,9 @@ func configureVariant(raw []byte) {
 			}
 			configureCallback(lines)
 		}
+	}
+	if next == "" {
+		return
 	}
 	loginVariantMu.Lock()
 	loginVariant = next
@@ -214,4 +221,23 @@ func requestVariantIsIntl(request []byte) bool {
 // loginVariantIsIntl reports whether NEW logins target the Intl realm.
 func loginVariantIsIntl() bool {
 	return loadedLoginVariant() == variantIntl
+}
+
+// pollStateIsIntl reports whether a login-poll request's state was created
+// by the Intl login flow (i.e. lives in intlloginStates). Routing polls by
+// state location instead of the mutable login_variant global keeps
+// in-flight logins immune to mid-flight variant flips (v0.12.3).
+func pollStateIsIntl(request []byte) bool {
+	var req struct {
+		State string `json:"State"`
+	}
+	if err := json.Unmarshal(request, &req); err != nil {
+		return false
+	}
+	state := strings.TrimSpace(req.State)
+	if state == "" {
+		return false
+	}
+	_, ok := intlloginStates.Load(state)
+	return ok
 }
