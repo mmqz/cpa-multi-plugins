@@ -96,9 +96,10 @@ func managementRegistration() managementRegistrationResponse {
                         {Method: http.MethodGet, Path: base + "/intl/status", Description: "Trae Intl: plugin status."},
                         {Method: http.MethodPost, Path: base + "/intl/import", Description: "Trae Intl: import credential JSON into host auth store."},
                 },
+                // Single menu entry (v0.12.2): /panel covers CN + SOLO + Intl
+                // accounts. Legacy /intl_panel path serves the same panel.
                 Resources: []resourceRoute{
-                        {Path: "/panel", Menu: "Trae", Description: "Trae dashboard (CN + SOLO): credits, check-in, accounts."},
-                        {Path: "/intl_panel", Menu: "Trae Intl", Description: "Trae Intl dashboard: accounts."},
+                        {Path: "/panel", Menu: "Trae", Description: "Trae dashboard: CN/SOLO credits, check-in, accounts + Intl accounts."},
                 },
         }
 }
@@ -174,7 +175,9 @@ var panelHTML []byte
 // servePanel returns the embedded panel.html for valid sub-paths, or a 404
 // stub for unknown resources.
 func servePanel(sub string) []byte {
-        if sub != "" && sub != "/" && sub != "/panel" && sub != "/panel.html" {
+        // /intl_panel stays as a hidden alias — it serves the unified panel
+        // (v0.12.2 removed the separate Intl menu entry).
+        if sub != "" && sub != "/" && sub != "/panel" && sub != "/panel.html" && sub != "/intl_panel" {
                 return []byte("<h1>404</h1>")
         }
         return panelHTML
@@ -199,6 +202,7 @@ type traeAccount struct {
         Credits   *traeCredits    `json:"credits,omitempty"`
         Checkin   *traeCheckin     `json:"checkin,omitempty"`
         Error     string          `json:"error,omitempty"`
+        Variant   string          `json:"variant,omitempty"`
 }
 
 type traeCredits struct {
@@ -239,6 +243,7 @@ func buildDashboard() map[string]any {
                 }
                 acct.UID = sa.Account.UID
                 acct.Nickname = sa.Account.Nickname
+                acct.Variant = sa.Variant
 
                 // Cached credits / checkin (filled by scheduler + manual endpoints).
                 if v, ok := accountCache.Load(f.AuthIndex); ok {
@@ -326,6 +331,10 @@ func hostAuthList() ([]pluginapi.HostAuthFileEntry, error) {
 type storedAuth struct {
         Auth    storedTokens  `json:"auth"`
         Account storedAccount `json:"account"`
+        // Variant is not persisted separately (it lives in Auth in the JSON);
+        // it is resolved at load time (hostAuthGet) so management operations
+        // hit the right upstream endpoints for cn/solo/intl accounts (v0.12.2).
+        Variant string `json:"-"`
 }
 
 type storedTokens struct {
@@ -336,6 +345,7 @@ type storedTokens struct {
         APIHost string `json:"apiHost"`
         MachineID    string `json:"machineId"`
         DeviceID     string `json:"deviceId"`
+        Variant      string `json:"variant"`
 }
 
 type storedAccount struct {
@@ -362,6 +372,11 @@ func hostAuthGet(authIndex string) (*storedAuth, error) {
         if err := json.Unmarshal(resp.JSON, &sa); err != nil {
                 return nil, fmt.Errorf("parse stored auth: %w", err)
         }
+        // Explicit auth.variant wins; sniff covers legacy files (v0.12.2).
+        sa.Variant = sa.Auth.Variant
+        if sa.Variant == "" {
+                sa.Variant = sniffVariantFromJSON(resp.JSON)
+        }
         return &sa, nil
 }
 
@@ -379,6 +394,7 @@ func hostAuthAsUpstream(sa *storedAuth) *auth.Auth {
                 UID:          sa.Account.UID,
                 EnterpriseID: sa.Account.EnterpriseID,
                 Nickname:     sa.Account.Nickname,
+                Variant:      sa.Variant,
         }
 }
 

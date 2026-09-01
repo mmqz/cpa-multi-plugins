@@ -17,6 +17,7 @@ type (
 	netListener    = net.Listener
 	netTCPAddr     = net.TCPAddr
 	netTCPListener = net.TCPListener
+	netConn        = net.Conn
 )
 
 func netListen(network, addr string) (netListener, error) {

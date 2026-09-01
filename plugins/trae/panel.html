@@ -301,6 +301,7 @@ function planBadgeClass(plan){
   return "badge disabled";
 }
 function card(a){
+  const isIntl=a.variant==="intl";
   const ci=a.checkin||{};
   const cr=a.credits;
   const pool=poolByUID[a.uid]||{};
@@ -309,7 +310,10 @@ function card(a){
   const cooling=!!pool.cooling;
   const disabled=!!a.disabled||!!pool.disabled;
   const plan=a.credits&&a.credits.plan?a.credits.plan:(a.plan||"unknown");
-  const badges=
+  const vBadge = isIntl ? '<span class="badge" style="background:#6b7cff;color:#fff">INTL</span>'
+    : (a.variant==="solo" ? '<span class="badge" style="background:#0e9f6e;color:#fff">SOLO</span>'
+    : '<span class="badge" style="background:#3b82f6;color:#fff">CN</span>');
+  const badges= vBadge+
     (disabled?`<span class="badge disabled">已禁用</span>`:"")+
     (cooling?`<span class="badge cooling" title="${escAttr(pool.reason||"")} ${pool.until?("· until "+esc(String(pool.until).replace('T',' ').replace('Z',' UTC'))):""}">冷却中</span>`:"")+
     (exhausted?`<span class="badge exhausted">耗尽</span>`:"")+
@@ -318,21 +322,26 @@ function card(a){
   const btnClass=checkedIn?"done":"sec";
   const btnText=checkedIn?"已签到":"签到";
   const btnDisabled=checkedIn?" disabled=\"disabled\"":"";
-  const actionHTML=`<button class="${btnClass}" data-action="checkin" data-auth-index="${escAttr(a.auth_index)}"${btnDisabled}>${btnText}</button>`;
-  const refreshBtn=`<button class="sec" data-action="refresh" data-auth-index="${escAttr(a.auth_index)}" title="查询实时积分">刷新积分</button>`;
+  const actionHTML=isIntl?"":`<button class="${btnClass}" data-action="checkin" data-auth-index="${escAttr(a.auth_index)}"${btnDisabled}>${btnText}</button>`;
+  const refreshBtn=isIntl?"":`<button class="sec" data-action="refresh" data-auth-index="${escAttr(a.auth_index)}" title="查询实时积分">刷新积分</button>`;
+  const bodyHTML=isIntl
+    ? ((a.token_expiry?`<div class="row"><span class="k">Token 到期</span><span class="v">${esc(String(a.token_expiry).replace('T',' ').replace('Z',' UTC'))}</span></div>`:"")
+       +(a.region?`<div class="row"><span class="k">区域</span><span class="v">${esc(a.region)}</span></div>`:"")
+       +'<div class="row"><span class="k">类型</span><span class="v">Trae Intl（marscode · 无积分/签到）</span></div>')
+    : progressHTML(cr);
   return `<div class="card" data-uid="${escAttr(a.uid)}" data-auth="${escAttr(a.auth_index)}">
   <h2>${esc(a.nickname||a.label||a.name)} <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
-  ${progressHTML(cr)}
+  ${bodyHTML}
   ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
   ${pool.reason&&!cooling?`<div class="row"><span class="k">池状态</span><span class="v warn">${esc(pool.reason)}</span></div>`:""}
-  <div class="actions">${refreshBtn}${actionHTML}</div>
+  ${(refreshBtn||actionHTML)?`<div class="actions">${refreshBtn}${actionHTML}</div>`:""}
   </div>`;
 }
 function lazyLoadCredits(accounts){
   // For cards whose credits are missing/stale, fetch /credits per-account.
   // trae /credits does a live upstream call (slow) — parallel is OK for small pools.
-  const need=accounts.filter(a=>!a.credits && !a.error && !a.disabled);
+  const need=accounts.filter(a=>a.variant!=="intl" && !a.credits && !a.error && !a.disabled);
   if(!need.length) return;
   need.forEach(a=>{
     const idx=a.auth_index;
@@ -451,13 +460,18 @@ async function load(force, btn){
     const d = force
       ? await api("/refresh", {method:"POST"})
       : await api("/accounts");
+    // Unified panel (v0.12.2): Intl accounts ride in the same grid.
+    // They have no credits/checkin — identity + token expiry only.
+    let intlAccounts=[];
+    try{ const di=await api("/intl/accounts"); intlAccounts=di.accounts||[]; }catch(e){}
     document.getElementById("svtime").textContent="服务器时间 "+(d.server_time||"");
     if(d.error){
       g.innerHTML='<div class="loading">'+esc(d.error)+"</div>";
       if(force) toast("刷新失败", "err", d.error);
       return;
     }
-    const accounts=d.accounts||[];
+    const accounts=(d.accounts||[]).map(a=>Object.assign({variant:a.variant||"cn"},a))
+      .concat(intlAccounts.map(a=>Object.assign({variant:"intl"},a)));
     lastAccounts=accounts;
     // Merge pool status (cooling/disabled) — best effort.
     await loadPoolStatus();

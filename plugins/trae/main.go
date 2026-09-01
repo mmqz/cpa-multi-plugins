@@ -93,7 +93,7 @@ const (
 	pluginLogoURL = ""
 
 	// OAuth login flow timeout (5 min).
-	loginTTL = 5 * time.Minute
+	loginTTL = 15 * time.Minute
 
 	// Scheduler defaults.
 	defaultCheckinHour = 9
@@ -186,6 +186,9 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 
 	// Initialize upstream client + pool + scheduler.
 	upstreamClient = upstream.New()
+	// Intl variant has a parallel handler set (intl_main.go) whose client
+	// initializes as a package-level var there (was nil in v0.12.0-0.12.1:
+	// nil-receiver SIGSEGV on the first Intl RPC; fixed in v0.12.2).
 	accountPool = pool.New("") // state file optional; host persists auth
 	schedulerCtx, schedulerCancel = context.WithCancel(context.Background())
 	sched = scheduler.New(scheduler.Config{
@@ -302,9 +305,8 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		return okEnvelope(buildRegistration())
 
 	case pluginabi.MethodModelStatic:
-		if loadedLoginVariant() == variantIntl {
-			return intlhandleModelStatic(request)
-		}
+		// Single union catalog for all variants (v0.12.2) — model.static must
+		// not depend on login_variant, which only controls NEW logins.
 		return handleModelStatic(request)
 
 	case pluginabi.MethodModelForAuth:
@@ -371,7 +373,7 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 
 	case pluginabi.MethodManagementHandle:
 		var mgmtReq pluginapi.ManagementRequest
-		if json.Unmarshal(request, &mgmtReq) == nil && strings.Contains(mgmtReq.Path, "/intl_") {
+		if json.Unmarshal(request, &mgmtReq) == nil && strings.Contains(mgmtReq.Path, "/intl/") {
 			return intlhandleManagement(request)
 		}
 		return handleManagement(request)
@@ -431,6 +433,8 @@ func buildRegistration() registrationPayload {
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 09:00 local time (default true)."},
 				{Name: "login_variant", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "solo", "intl"}, Description: "Variant for NEW logins: cn (Trae Code CN, default), solo (Trae SOLO CN) or intl (Trae Intl, marscode.com). Existing accounts keep the variant recorded at login/adoption time."},
+				{Name: "callback_bind", Type: pluginapi.ConfigFieldTypeString, Description: "Bind address for the OAuth callback listener (default 127.0.0.1). Set 0.0.0.0 when CPA runs in Docker or on a remote host so the port can be published."},
+				{Name: "callback_public_host", Type: pluginapi.ConfigFieldTypeString, Description: "Host advertised in the OAuth redirect URL (default 127.0.0.1). Set to the server IP/hostname when the browser runs on a different machine."},
 				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily access-token refresh at 03:00 to prevent session expiry (default true)."},
 				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled."},
 			},
@@ -453,51 +457,119 @@ func buildRegistration() registrationPayload {
 // Models
 // -----------------------------------------------------------------------------
 
+// modelSuffixSolo / modelSuffixIntl namespace every model ID by credential
+// variant so the host can never route a chat request across credential
+// classes (v0.12.2). cn keeps plain IDs (back-compat with trae-cn users);
+// solo appends "-solo"; intl appends "-intl" (handled in intl_main.go).
+const (
+	modelSuffixSolo = "-solo"
+	modelSuffixIntl = "-intl"
+)
+
+// suffixModels appends the variant suffix to every model ID.
+func suffixModels(in []pluginapi.ModelInfo, suffix string) []pluginapi.ModelInfo {
+	if suffix == "" {
+		return in
+	}
+	out := make([]pluginapi.ModelInfo, 0, len(in))
+	for _, m := range in {
+		out = append(out, pluginapi.ModelInfo{ID: m.ID + suffix, Name: m.Name, OwnedBy: m.OwnedBy})
+	}
+	return out
+}
+
 func handleModelStatic(_ []byte) ([]byte, error) {
-	// Return static fallback model list (used when no accounts are loaded).
+	// Advertise the UNION of all variant namespaces (used when no accounts
+	// are loaded, and for management UI model pickers): cn plain IDs +
+	// solo "-solo" + intl (auto/work virtual + "-intl" suffixed).
+	out := make([]pluginapi.ModelInfo, 0, 24)
+	seen := make(map[string]bool, 24)
+	add := func(ms []pluginapi.ModelInfo) {
+		for _, m := range ms {
+			if m.ID == "" || seen[m.ID] {
+				continue
+			}
+			seen[m.ID] = true
+			out = append(out, m)
+		}
+	}
+	add(staticModels())
+	add(suffixModels(staticModels(), modelSuffixSolo))
+	add(intlstaticModels())
 	return okEnvelope(pluginapi.ModelResponse{
 		Provider: providerName,
-		Models:   staticModels(),
+		Models:   out,
 	})
 }
 
 func handleModelForAuth(request []byte) ([]byte, error) {
+	// Host contract (pluginapi.AuthModelRequest): StorageJSON sits at the TOP
+	// level of the request and is base64-encoded ([]byte JSON encoding) —
+	// NOT nested under "auth" (v0.12.0-0.12.1 parsed the wrong shape, so every
+	// account silently fell back to the same static list; fixed in v0.12.2).
 	var req struct {
-		Auth pluginapi.AuthData `json:"auth"`
+		StorageJSON  []byte            `json:"StorageJSON"`
+		AuthProvider string            `json:"AuthProvider"`
+		Metadata     map[string]any    `json:"Metadata"`
+		Attributes   map[string]string `json:"Attributes"`
 	}
 	if err := json.Unmarshal(request, &req); err != nil {
 		return nil, err
 	}
 	// Try dynamic model fetch via the account's auth.
-	a, err := parseStoredAuth(req.Auth.StorageJSON)
+	a, err := parseStoredAuth(req.StorageJSON)
 	if err != nil {
-		// Fall back to static list if we can't parse the auth.
+		log.Printf("model.for_auth: parse storage failed (%v) — static fallback", err)
+		// Fall back to the cn static list if we can't parse the auth.
 		return okEnvelope(pluginapi.ModelResponse{
 			Provider: providerName,
 			Models:   staticModels(),
 		})
+	}
+	return okEnvelope(pluginapi.ModelResponse{
+		Provider: providerName,
+		Models:   modelsForVariant(a),
+	})
+}
+
+// modelsForVariant returns the model catalog for ONE account, namespaced
+// by the credential's variant (v0.12.2). Dynamic fetch already targets the
+// account's own function (inline_chat vs solo_work_lite); every returned
+// ID gets the variant suffix so identical upstream names never collide
+// across cn/solo credential classes.
+func modelsForVariant(a *auth.Auth) []pluginapi.ModelInfo {
+	suffix := ""
+	if a.Variant == variantSolo {
+		suffix = modelSuffixSolo
 	}
 	dynamic, err := upstreamClient.FetchModels(a)
 	if err != nil {
-		log.Printf("model.for_auth %s: %v — falling back to static", a.UID, err)
-		return okEnvelope(pluginapi.ModelResponse{
-			Provider: providerName,
-			Models:   staticModels(),
-		})
+		log.Printf("model.for_auth %s (%s): %v — falling back to static", a.UID, a.Variant, err)
+		return suffixModels(staticModels(), suffix)
 	}
 	out := make([]pluginapi.ModelInfo, 0, len(dynamic))
+	seen := make(map[string]bool, len(dynamic))
 	for _, m := range dynamic {
+		if m.ID == "" || seen[m.ID] {
+			continue
+		}
+		// "auto"/"work" are Intl-exclusive virtual names — never expose
+		// them on CN/SOLO accounts even if the catalog lists them.
+		if m.ID == "auto" || m.ID == "work" {
+			continue
+		}
+		seen[m.ID] = true
 		out = append(out, pluginapi.ModelInfo{
-			ID:                  m.ID,
+			ID:                  m.ID + suffix,
 			Name:                m.Name,
 			ContextLength:       m.ContextWindow,
 			MaxCompletionTokens: m.MaxTokens,
 		})
 	}
-	return okEnvelope(pluginapi.ModelResponse{
-		Provider: providerName,
-		Models:   out,
-	})
+	if len(out) == 0 {
+		return suffixModels(staticModels(), suffix)
+	}
+	return out
 }
 
 // staticModels returns the known SOLO CN model list (subset).
@@ -584,12 +656,14 @@ func handleStartLogin(_ []byte) ([]byte, error) {
 	codeVerifier, codeChallenge := generatePKCEPair()
 
 	// Step 2: Allocate local callback port.
-	ln, err := netListen("tcp", "127.0.0.1:0")
+	ln, err := netListen("tcp", loadedCallbackBind()+":0")
 	if err != nil {
 		return nil, fmt.Errorf("allocate callback port: %w", err)
 	}
 	port := ln.Addr().(*netTCPAddr).Port
-	cbURL := fmt.Sprintf("http://127.0.0.1:%d/authorize", port)
+	// callback_public_host lets Docker/remote deployments advertise a host
+	// the user's browser can actually reach (v0.12.2).
+	cbURL := fmt.Sprintf("http://%s:%d/authorize", loadedCallbackPublicHost(), port)
 
 	// Step 3: POST GetLoginGuidance with multi-endpoint fallback
 	// (cockpit-tools request_login_guidance). CN tries api.trae.cn →
@@ -677,16 +751,10 @@ type loginCtx struct {
 	done         chan struct{}
 }
 
-// acceptCallback accepts the OAuth callback GET /authorize?... and parses
-// parameters. Mirrors cockpit-tools trae_oauth.rs:1170-1196 callback handling.
-//
-// Parameter precedence (per cockpit-tools):
-//   - error / error_code / err / errorCode → callback error
-//   - isRedirect=false → callback error
-//   - refreshToken / refresh_token / RefreshToken / refresh-token → use directly
-//   - authCode / auth_code / AuthCode / authorization_code / code → ExchangeToken (auth code)
-//   - authCodeInfo / auth_code_info / AuthCodeInfo → extract auth code from JSON
-//   - loginHost / login_host / LoginHost / host / consoleHost → for ExchangeToken
+// acceptCallback accepts OAuth callback GET /authorize?... requests until the
+// flow completes or the TTL expires. The looping Accept handles browser
+// preconnects, favicon probes and retries that would otherwise leave a
+// single-Accept listener dead before the real redirect arrives (v0.12.2).
 func acceptCallback(state string) {
 	v, ok := loginStates.Load(state)
 	if !ok {
@@ -698,14 +766,32 @@ func acceptCallback(state string) {
 
 	ln := lc.listener
 	_ = ln.(*netTCPListener).SetDeadline(time.Now().Add(loginTTL))
-	conn, err := ln.Accept()
-	if err != nil {
-		// Accept failed (deadline exceeded or listener closed). Close the listener
-		// so it doesn't leak — janitor will also clean up the loginStates entry.
-		lc.err = fmt.Errorf("callback accept: %w", err)
-		lc.listener.Close()
-		return
+	for {
+		if time.Now().After(lc.expires) {
+			lc.listener.Close()
+			return
+		}
+		conn, err := ln.Accept()
+		if err != nil {
+			// Deadline exceeded or listener closed — janitor cleans the state.
+			if lc.err == nil {
+				lc.err = fmt.Errorf("callback accept: %w", err)
+			}
+			lc.listener.Close()
+			return
+		}
+		if handleCallbackConn(conn, lc) {
+			lc.listener.Close()
+			return
+		}
 	}
+}
+
+// handleCallbackConn serves ONE callback connection. It returns true when the
+// OAuth flow is resolved (token captured, or the provider reported an error).
+// Anything else (favicon, plain "/", browser preconnects) gets a 404 and the
+// listener keeps waiting for the real redirect.
+func handleCallbackConn(conn netConn, lc *loginCtx) bool {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	buf := make([]byte, 16384)
@@ -718,32 +804,34 @@ func acceptCallback(state string) {
 	}
 	sp := strings.Index(firstLine, " ")
 	if sp < 0 {
-		lc.err = fmt.Errorf("callback: malformed request line")
-		writeCallbackHTML(conn, "Login failed", "malformed request")
-		return
+		writeCallbackStatus(conn, "400 Bad Request")
+		return false
 	}
 	rest := firstLine[sp+1:]
 	// Trim trailing HTTP version (e.g. " HTTP/1.1").
 	if sp2 := strings.LastIndex(rest, " "); sp2 >= 0 {
 		rest = rest[:sp2]
 	}
-	vals := url.Values{}
-	if q := strings.Index(rest, "?"); q >= 0 {
-		vals, _ = url.ParseQuery(rest[q+1:])
+	q := strings.Index(rest, "?")
+	if q < 0 {
+		// No query string at all (e.g. "GET / HTTP/1.1", favicon probes).
+		writeCallbackStatus(conn, "404 Not Found")
+		return false
 	}
+	vals, _ := url.ParseQuery(rest[q+1:])
 
 	// Error path.
 	for _, k := range []string{"error", "error_code", "err", "errorCode"} {
 		if ev := vals.Get(k); ev != "" {
 			lc.err = fmt.Errorf("oauth callback error: %s=%s", k, ev)
 			writeCallbackHTML(conn, "Login failed", lc.err.Error())
-			return
+			return true
 		}
 	}
 	if ir := vals.Get("isRedirect"); ir == "false" {
 		lc.err = fmt.Errorf("oauth callback: isRedirect=false")
 		writeCallbackHTML(conn, "Login failed", "isRedirect=false")
-		return
+		return true
 	}
 
 	// loginHost (used for ExchangeToken; falls back to oauthDefaultHost).
@@ -786,11 +874,13 @@ func acceptCallback(state string) {
 	switch {
 	case lc.err != nil:
 		writeCallbackHTML(conn, "Login failed", lc.err.Error())
+		return true
 	case lc.refreshToken != "" || lc.authCode != "":
 		writeCallbackHTML(conn, "Login successful", "You can close this window now.")
+		return true
 	default:
-		lc.err = fmt.Errorf("oauth callback: no authCode/refreshToken in callback params")
-		writeCallbackHTML(conn, "Login failed", "no auth code received")
+		writeCallbackStatus(conn, "404 Not Found")
+		return false
 	}
 }
 
@@ -799,6 +889,14 @@ func writeCallbackHTML(w io.Writer, title, msg string) {
 	body := fmt.Sprintf("<html><body><h2>%s</h2><p>%s</p></body></html>", title, msg)
 	fmt.Fprintf(w, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 		len(body), body)
+}
+
+// writeCallbackStatus answers non-callback probes (favicon, "/", preconnects)
+// with a bare status so browsers close cleanly and the listener keeps waiting.
+func writeCallbackStatus(w io.Writer, status string) {
+	body := "not an OAuth callback"
+	fmt.Fprintf(w, "HTTP/1.1 %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		status, len(body), body)
 }
 
 // handlePollLogin polls the callback server for completion, then exchanges
@@ -832,7 +930,7 @@ func handlePollLogin(request []byte) ([]byte, error) {
 	if time.Now().After(lc.expires) {
 		loginStates.Delete(state)
 		lc.listener.Close()
-		return nil, fmt.Errorf("poll: login expired (5 min timeout) — please re-initiate")
+		return nil, fmt.Errorf("poll: login expired (15 min timeout) — please re-initiate")
 	}
 
 	// Wait briefly for the callback to complete (non-blocking).

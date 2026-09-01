@@ -103,7 +103,12 @@ var intlversion = "0.1.0"
 var (
 	intlloginStates sync.Map
 
-	intlupstreamClient *upstream.Client
+	// intlupstreamClient: the identifier `upstream` below is the package
+	// name declared INSIDE the intlupstream module (not the CN/SOLO
+	// trae/upstream package). Package-var initialization guarantees the
+	// client exists before any RPC — v0.12.0-0.12.1 left it nil and the
+	// first Intl model.for_auth crashed with a nil-receiver SIGSEGV.
+	intlupstreamClient = upstream.New()
 )
 
 func intlhandleMethod(method string, request []byte) ([]byte, error) {
@@ -221,14 +226,20 @@ func intlhandleModelStatic(_ []byte) ([]byte, error) {
 }
 
 func intlhandleModelForAuth(request []byte) ([]byte, error) {
+	// Host contract: top-level base64 StorageJSON (see handleModelForAuth,
+	// v0.12.2 fix — the nested "auth" shape never matched the host request).
 	var req struct {
-		Auth pluginapi.AuthData `json:"auth"`
+		StorageJSON  []byte            `json:"StorageJSON"`
+		AuthProvider string            `json:"AuthProvider"`
+		Metadata     map[string]any    `json:"Metadata"`
+		Attributes   map[string]string `json:"Attributes"`
 	}
 	if err := json.Unmarshal(request, &req); err != nil {
 		return nil, err
 	}
-	a, err := intlparseStoredAuth(req.Auth.StorageJSON)
+	a, err := intlparseStoredAuth(req.StorageJSON)
 	if err != nil {
+		log.Printf("intl model.for_auth: parse storage failed (%v) — static fallback", err)
 		return okEnvelope(pluginapi.ModelResponse{Provider: intlproviderName, Models: intlstaticModels()})
 	}
 	dynamic, err := intlupstreamClient.FetchModels(a)
@@ -236,9 +247,20 @@ func intlhandleModelForAuth(request []byte) ([]byte, error) {
 		log.Printf("model.for_auth %s: %v — falling back to static", a.UID, err)
 		return okEnvelope(pluginapi.ModelResponse{Provider: intlproviderName, Models: intlstaticModels()})
 	}
-	out := make([]pluginapi.ModelInfo, 0, len(dynamic))
+	// Namespace every dynamic ID with -intl (v0.12.2) and skip auto/work so
+	// the virtual models below are not duplicated.
+	out := make([]pluginapi.ModelInfo, 0, len(dynamic)+2)
+	seen := map[string]bool{"auto": true, "work": true}
 	for _, id := range dynamic {
-		out = append(out, pluginapi.ModelInfo{ID: id, Name: id, OwnedBy: intlproviderName})
+		if id == "" || id == "auto" || id == "work" {
+			continue
+		}
+		nid := id + "-intl"
+		if seen[nid] {
+			continue
+		}
+		seen[nid] = true
+		out = append(out, pluginapi.ModelInfo{ID: nid, Name: nid, OwnedBy: intlproviderName})
 	}
 	// Always include "auto" and "work" as virtual models.
 	out = append(out,
@@ -249,7 +271,10 @@ func intlhandleModelForAuth(request []byte) ([]byte, error) {
 }
 
 func intlstaticModels() []pluginapi.ModelInfo {
-	known := []string{"auto", "work", "gpt-5.2", "gemini-3.1-pro", "kimi-k2.5", "claude-sonnet-4-5"}
+	// "-intl" suffix namespaces Intl models so host routing can never send
+	// a CN/SOLO-model request to an Intl credential (or vice versa).
+	// "auto"/"work" are Intl-exclusive virtual names and stay unsuffixed.
+	known := []string{"auto", "work", "gpt-5.2-intl", "gemini-3.1-pro-intl", "kimi-k2.5-intl", "claude-sonnet-4-5-intl"}
 	out := make([]pluginapi.ModelInfo, 0, len(known))
 	for _, id := range known {
 		out = append(out, pluginapi.ModelInfo{ID: id, Name: id, OwnedBy: intlproviderName})

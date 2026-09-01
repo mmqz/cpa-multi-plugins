@@ -75,7 +75,61 @@ func loadedLoginVariant() string {
 	return loginVariant
 }
 
-// configureVariant parses login_variant from the plugin config block.
+// OAuth callback listener knobs (v0.12.2): callback_bind controls the local
+// bind address (0.0.0.0 for Docker/remote), callback_public_host controls
+// the host advertised in the redirect URL (server IP/hostname for remote).
+var (
+	callbackBindMu      sync.RWMutex
+	callbackBindValue   = "127.0.0.1"
+	callbackPublicMu    sync.RWMutex
+	callbackPublicValue = "127.0.0.1"
+)
+
+// loadedCallbackBind returns the local bind address for callback listeners.
+func loadedCallbackBind() string {
+	callbackBindMu.RLock()
+	defer callbackBindMu.RUnlock()
+	if callbackBindValue == "" {
+		return "127.0.0.1"
+	}
+	return callbackBindValue
+}
+
+// loadedCallbackPublicHost returns the host used in the redirect URL.
+func loadedCallbackPublicHost() string {
+	callbackPublicMu.RLock()
+	defer callbackPublicMu.RUnlock()
+	if callbackPublicValue == "" {
+		return "127.0.0.1"
+	}
+	return callbackPublicValue
+}
+
+// configureCallback parses callback_bind / callback_public_host from the
+// plugin config block (same YAML line format as login_variant).
+func configureCallback(lines []string) {
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "callback_bind:") {
+			v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "callback_bind:")), "\"'")
+			if v != "" {
+				callbackBindMu.Lock()
+				callbackBindValue = v
+				callbackBindMu.Unlock()
+			}
+		} else if strings.HasPrefix(line, "callback_public_host:") {
+			v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "callback_public_host:")), "\"'")
+			if v != "" {
+				callbackPublicMu.Lock()
+				callbackPublicValue = v
+				callbackPublicMu.Unlock()
+			}
+		}
+	}
+}
+
+// configureVariant parses login_variant (and callback knobs) from the
+// plugin config block.
 func configureVariant(raw []byte) {
 	next := variantCN
 	if len(raw) > 0 {
@@ -83,13 +137,15 @@ func configureVariant(raw []byte) {
 			ConfigYAML []byte `json:"config_yaml"`
 		}
 		if err := json.Unmarshal(raw, &req); err == nil {
-			for _, line := range strings.Split(string(req.ConfigYAML), "\n") {
+			lines := strings.Split(string(req.ConfigYAML), "\n")
+			for _, line := range lines {
 				line = strings.TrimSpace(line)
 				if strings.HasPrefix(line, "login_variant:") {
 					v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "login_variant:")), "\"'")
 					next = normalizeVariant(v)
 				}
 			}
+			configureCallback(lines)
 		}
 	}
 	loginVariantMu.Lock()
@@ -124,16 +180,35 @@ func sniffVariantFromJSON(raw []byte) string {
 	return variantCN
 }
 
-// requestVariantIsIntl reports whether an RPC request carrying storage_json
-// targets an Intl account (merged trae-intl variant).
+// requestVariantIsIntl reports whether an RPC request targets an Intl account
+// (merged trae-intl variant). The host sends the credential in different
+// shapes per method, all base64-encoded ([]byte JSON encoding):
+//   - AuthModelRequest / ExecutorRequest / refresh: top-level "StorageJSON"
+//   - AuthParseRequest: top-level "RawJSON"
+//   - legacy plugin-side shape: snake_case "storage_json" raw JSON object
+//
+// v0.12.0-0.12.1 only probed the legacy shape, so Intl accounts silently
+// routed through the CN/SOLO handlers (wrong protocol, wrong model list).
 func requestVariantIsIntl(request []byte) bool {
-	var req struct {
+	var withStorage struct {
+		StorageJSON []byte `json:"StorageJSON"`
+	}
+	if err := json.Unmarshal(request, &withStorage); err == nil && len(withStorage.StorageJSON) > 0 {
+		return sniffVariantFromJSON(withStorage.StorageJSON) == variantIntl
+	}
+	var withRaw struct {
+		RawJSON []byte `json:"RawJSON"`
+	}
+	if err := json.Unmarshal(request, &withRaw); err == nil && len(withRaw.RawJSON) > 0 {
+		return sniffVariantFromJSON(withRaw.RawJSON) == variantIntl
+	}
+	var legacy struct {
 		StorageJSON json.RawMessage `json:"storage_json"`
 	}
-	if err := json.Unmarshal(request, &req); err != nil {
-		return false
+	if err := json.Unmarshal(request, &legacy); err == nil && len(legacy.StorageJSON) > 0 && legacy.StorageJSON[0] == '{' {
+		return sniffVariantFromJSON(legacy.StorageJSON) == variantIntl
 	}
-	return sniffVariantFromJSON(req.StorageJSON) == variantIntl
+	return false
 }
 
 // loginVariantIsIntl reports whether NEW logins target the Intl realm.

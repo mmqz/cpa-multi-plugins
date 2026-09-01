@@ -88,9 +88,8 @@ func intlmanagementRegistration() intlmanagementRegistrationResponse {
 			{Method: http.MethodGet, Path: base + "/intl/status", Description: "Trae Intl plugin status (no pool — reflects host auth store count + upstream reachability)."},
 			{Method: http.MethodPost, Path: base + "/intl/import", Description: "Import Trae Intl credential JSON into host auth store."},
 		},
-		Resources: []intlresourceRoute{
-			{Path: "/intl_panel", Menu: "Trae Intl", Description: "Trae Intl dashboard: accounts."},
-		},
+		// v0.12.2: no separate Intl menu — /panel covers all variants.
+		Resources: []intlresourceRoute{},
 	}
 }
 
