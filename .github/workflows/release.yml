@@ -92,7 +92,7 @@ jobs:
           which gcc 2>&1 || echo "which gcc failed"
           gcc --version 2>&1 | head -1 || echo "gcc invocation failed"
           mkdir -p dist/${{ matrix.os }}-${{ matrix.arch }}
-          PLUGINS="workbuddy codebuddy-cn codebuddy-intl trae-cn trae-solo-cn trae-intl qoder-cn qoder-intl"
+          PLUGINS="workbuddy codebuddy-intl trae-cn trae-solo-cn trae-intl qoder-cn qoder-intl"
           for plugin in $PLUGINS; do
             echo "=== Building $plugin ==="
             cd plugins/$plugin
@@ -118,7 +118,7 @@ jobs:
           CC: ${{ matrix.cc }}
         run: |
           mkdir -p dist/${{ matrix.os }}-${{ matrix.arch }}
-          PLUGINS="workbuddy codebuddy-cn codebuddy-intl trae-cn trae-solo-cn trae-intl qoder-cn qoder-intl"
+          PLUGINS="workbuddy codebuddy-intl trae-cn trae-solo-cn trae-intl qoder-cn qoder-intl"
           for plugin in $PLUGINS; do
             echo "=== Building $plugin ==="
             cd plugins/$plugin
@@ -218,7 +218,7 @@ jobs:
                  enabled: true
                  dir: "./plugins"
                  configs:
-                   codebuddy-cn: { enabled: true }
+                   workbuddy: { enabled: true }
                    trae-cn: { enabled: true }
                    trae-solo-cn: { enabled: true }
                    # ... etc
@@ -228,8 +228,7 @@ jobs:
             ## Plugins
             | Plugin | Platform | Protocol | Check-in |
             |---|---|---|---|
-            | workbuddy | CodeBuddy CN/WorkBuddy | OpenAI compat | ✅ |
-            | codebuddy-cn | CodeBuddy CN | OpenAI compat | ✅ |
+            | workbuddy | CodeBuddy CN/WorkBuddy (merged) | OpenAI compat | ✅ |
             | codebuddy-intl | CodeBuddy Intl | OpenAI compat | ❌ |
             | trae-cn | Trae Code CN | llm_utils_chat | ✅ |
             | trae-solo-cn | Trae Work CN/SOLO CN | llm_utils_chat | ✅ |

@@ -2,7 +2,7 @@
 
 > CPA (CLIProxyAPI) 动态库插件集合：CodeBuddy / WorkBuddy / Trae / Qoder 的 CN + Intl 版本
 >
-> 8 个插件覆盖 4 个平台 × 2 个版本，让 CPA 一个 `/v1/chat/completions` 接口调用所有模型。
+> 7 个插件覆盖 4 个平台 × 2 个版本（CodeBuddy CN 与 WorkBuddy 已合并），让 CPA 一个 `/v1/chat/completions` 接口调用所有模型。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -18,8 +18,7 @@
 
 | 插件 | 平台 | 协议 | 签到 | 配额 | 状态 |
 |---|---|---|---|---|---|
-| `workbuddy` | CodeBuddy CN/WorkBuddy | OpenAI 兼容 | ✅ 每日 | ✅ credits | ✅ functional |
-| `codebuddy-cn` | CodeBuddy CN | OpenAI 兼容 | ✅ 每日 | ✅ credits | ✅ functional |
+| `workbuddy` | CodeBuddy CN/WorkBuddy（合并版） | OpenAI 兼容 | ✅ 每日 | ✅ credits | ✅ functional |
 | `codebuddy-intl` | CodeBuddy Intl | OpenAI 兼容 | ❌ | ✅ credits | ✅ functional |
 | `trae-cn` | Trae Code CN | llm_utils_chat + inline_chat | ✅ 每日 | ✅ v2 pack 优先级 | ✅ functional |
 | `trae-solo-cn` | Trae Work CN/SOLO CN | llm_utils_chat + solo_work_lite | ✅ 每日 | ✅ v2 pack 优先级 | ✅ functional |
@@ -89,10 +88,10 @@ CodeBuddy（CN/Intl）和 Trae Intl 走 OpenAI 兼容协议，可以不装插件
 
 ```yaml
 openai-compatibility:
-  - name: "codebuddy-cn"
+  - name: "workbuddy"
     base-url: "https://copilot.tencent.com/v2"
     api-key-entries:
-      - api-key: "<你的 CodeBuddy access_token>"
+      - api-key: "<你的 CodeBuddy/WorkBuddy access_token>"
     models:
       - name: "hy3"
       - name: "glm-5.2"
@@ -102,18 +101,18 @@ openai-compatibility:
 
 **方案 2：只装你需要的插件**
 
-8 个插件互相独立，不需要全装。按需选择：
+7 个插件互相独立，不需要全装。按需选择：
 
 | 你的需求 | 装哪些插件 |
 |---|---|
 | 只用 Trae Work CN（薅羊毛） | `trae-solo-cn` |
 | 只用 Trae Code CN | `trae-cn` |
 | 只用 Trae Intl | `trae-intl` |
-| 只用 CodeBuddy CN | `codebuddy-cn`（或 `workbuddy`，两者协议相同） |
+| 只用 CodeBuddy CN / WorkBuddy | `workbuddy`（v0.9.0 起两者合并，双登录方式 + 自动收养 codebuddy-cn 账号文件） |
 | 只用 CodeBuddy Intl | `codebuddy-intl` |
 | 只用 QoderWork CN | `qoder-cn` |
 | 只用 Qoder Intl | `qoder-intl` |
-| 全都要 | 全部 8 个 |
+| 全都要 | 全部 7 个 |
 
 **方案 3：等 CPA 上游支持多 provider 插件**
 
@@ -144,8 +143,7 @@ plugins:
   enabled: true
   dir: "./plugins"
   configs:
-    workbuddy: { enabled: true }
-    codebuddy-cn: { enabled: true }
+    workbuddy: { enabled: true, login_platform: "CLI" }  # CLI 或 ide，v0.9.0 起二合一
     codebuddy-intl: { enabled: true }
     trae-cn: { enabled: true }
     trae-solo-cn: { enabled: true }
@@ -188,7 +186,7 @@ cd plugins/trae-cn && CGO_ENABLED=1 go build -buildmode=c-shared -o trae-cn.so .
 | **[OmniRoute](https://github.com/diegosouzapw/OmniRoute)** | TypeScript | Trae Intl Web SOLO remote 协议（trae.ts）<br>CodeBuddy CN content filter 规避（codebuddy-cn.ts）<br>CodeBuddy CN/intl executor | trae-intl, workbuddy, codebuddy-cn, codebuddy-intl |
 | **[9router](https://github.com/decolua/9router)** | JavaScript | Trae 三区域切换（regions: cn/sg/us）<br>Trae Intl chat_sessions/events SSE | trae-intl |
 | **[cockpit-tools](https://github.com/jlcodes99/cockpit-tools)** | Rust | Trae v2 积分制 pack 优先级（apply_usage_response）<br>Trae 4 变体差异（TraePlatformKind）<br>CodeBuddy CN 签到状态机（workbuddy_auto_checkin.rs）<br>CodeBuddy CN 签到字段解析（codebuddy_cn_oauth.rs）<br>Trae 签到 API headers（x-app-type, Origin, Referer） | trae-cn, trae-solo-cn, workbuddy, codebuddy-cn |
-| **[router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** | Go | CPA 插件 SDK（examples/plugin/{executor,auth}/go/）<br>pluginapi / pluginabi 类型定义 | 全部 8 个插件 |
+| **[router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** | Go | CPA 插件 SDK（examples/plugin/{executor,auth}/go/）<br>pluginapi / pluginabi 类型定义 | 全部 7 个插件 |
 
 ### 各插件的具体借鉴文件
 
@@ -198,9 +196,10 @@ cd plugins/trae-cn && CGO_ENABLED=1 go build -buildmode=c-shared -o trae-cn.so .
 - **签到状态机**：`cockpit-tools/src-tauri/src/modules/workbuddy_auto_checkin.rs` line 33-64, 406-754（WorkbuddyAutoCheckinConfig + 指数退避调度器）
 - **签到字段解析**：`cockpit-tools/src-tauri/src/modules/codebuddy_cn_oauth.rs` line 1208-1258, 1285-1394, 1423-1587（CheckinStatusResponse 完整字段 + fallback 路径）
 
-#### `plugins/codebuddy-cn` (adapted from workbuddy)
-- 全部同 workbuddy
-- **platform=ide**（vs workbuddy 的 platform=CLI）
+#### `plugins/codebuddy-cn` 已并入 `plugins/workbuddy`（v0.9.0）
+- 两者后端、额度池完全相同（copilot.tencent.com），仅登录 platform（CLI/ide）与 X-IDE-* 请求头不同
+- 合并后通过 `login_platform` 配置选择新登录方式（CLI 默认 / ide）
+- 旧 `codebuddy-cn-<uid>.json` 账号文件在插件启动时自动收养为 `workbuddy-<uid>.json`（loginPlatform=ide）
 - 参考：`cockpit-tools/src-tauri/src/modules/codebuddy_cn_oauth.rs:8` 的 platform 参数
 
 #### `plugins/codebuddy-intl` (adapted from workbuddy)

@@ -224,7 +224,8 @@ func isSafeWorkbuddyAuthPath(path string) bool {
 	}
 	base := filepath.Base(path)
 	lower := strings.ToLower(base)
-	if !strings.HasPrefix(lower, "workbuddy-") && lower != "workbuddy.json" {
+	isCodebuddy := strings.HasPrefix(lower, "codebuddy-cn-") || lower == "codebuddy-cn.json"
+	if !strings.HasPrefix(lower, "workbuddy-") && lower != "workbuddy.json" && !isCodebuddy {
 		return false
 	}
 	if !strings.HasSuffix(lower, ".json") {

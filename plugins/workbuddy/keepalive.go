@@ -76,6 +76,7 @@ func refreshCall(sa *storedAuth) (json.RawMessage, []byte, int, error) {
 		return nil, nil, 0, err
 	}
 	commonHeaders(req)
+	applyPlatformHeaders(req, platformForAuth(sa))
 	req.Header.Set("X-Refresh-Token", sa.Auth.RefreshToken)
 	if sa.Account.EnterpriseID != "" {
 		req.Header.Set("X-Enterprise-Id", sa.Account.EnterpriseID)

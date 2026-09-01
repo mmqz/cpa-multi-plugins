@@ -9,6 +9,9 @@
 | `codebuddy-cn` | Tencent CodeBuddy CN | `copilot.tencent.com` / `www.codebuddy.cn` | 无（state 轮询） | - | ✅ | 1/5 OpenAI 兼容 |
 | `codebuddy-intl` | CodeBuddy Intl | `www.codebuddy.ai` | 无 | - | ❌ | 1/5 |
 | `workbuddy` | Tencent WorkBuddy | 同 codebuddy-cn | 无 | - | ✅ | 1/5 |
+
+> ⚠️ v0.9.0 起 `codebuddy-cn` 与 `workbuddy` 合并为单一插件 `workbuddy`（同一后端、同一额度池），
+> 通过 `login_platform` 配置选择 CLI / ide 登录方式，旧 codebuddy-cn 账号文件自动收养。下表保留两者以说明协议差异。下文 Provider 章节同样保留作协议参考。
 | `trae-intl` | Trae Intl | `api.marscode.com` / `core-normal.trae.ai` | `ono9krqynydwx5` | - | ❌ | 4/5 Web SOLO remote |
 | `trae-cn` | Trae Code CN | `api.trae.cn` / `trae-api-cn.mchost.guru` | `ono9krqynydwx5` | `inline_chat` | ✅ | 4/5 llm_utils_chat |
 | `trae-solo-cn` | Trae Work CN / SOLO CN | 同 trae-cn | `en1oxy7wnw8j9n` | `solo_work_lite` | ✅ | 4/5 |

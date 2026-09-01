@@ -38,7 +38,7 @@ func doJSON(client *http.Client, method, fullURL string, headers func(*http.Requ
 	if headers != nil {
 		headers(req)
 	} else {
-		commonHeaders(req)
+		loginHeaders(req)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -65,9 +65,16 @@ func doJSON(client *http.Client, method, fullURL string, headers func(*http.Requ
 	return env.Data, resp.StatusCode, nil
 }
 
+// loginHeaders applies the base headers plus the X-IDE-* client headers when
+// the current login platform is "ide" (CodeBuddy IDE login variant).
+func loginHeaders(req *http.Request) {
+	commonHeaders(req)
+	applyPlatformHeaders(req, currentLoginPlatform())
+}
+
 func handleStartLogin(raw []byte) ([]byte, error) {
 	client := newLoginClient()
-	data, _, err := doJSON(client, http.MethodPost, endpointAuthState, nil, bytes.NewReader([]byte("{}")))
+	data, _, err := doJSON(client, http.MethodPost, endpointAuthStateBase+currentLoginPlatform(), nil, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return nil, fmt.Errorf("auth state failed: %w", err)
 	}
@@ -135,7 +142,7 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 
 	var acct accountData
 	acctHeaders := func(r *http.Request) {
-		commonHeaders(r)
+		loginHeaders(r)
 		r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 	}
 	if acctRaw, _, errAcct := doJSON(lc.client, http.MethodGet, endpointLoginAcct+state, acctHeaders, nil); errAcct == nil {

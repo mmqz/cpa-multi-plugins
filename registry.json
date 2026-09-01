@@ -2,17 +2,6 @@
   "schema_version": 1,
   "plugins": [
     {
-      "id": "codebuddy-cn",
-      "name": "CodeBuddy CN",
-      "description": "Tencent CodeBuddy CN (copilot.tencent.com) provider for CPA: OAuth device flow, OpenAI-compatible chat executor, daily check-in with streak days, credit lifecycle management, multi-account pool.",
-      "author": "mmqz",
-      "version": "0.1.0",
-      "repository": "https://github.com/mmqz/cpa-multi-plugins",
-      "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/codebuddy-cn",
-      "license": "MIT",
-      "tags": ["Provider", "OAuth", "CodeBuddy", "CheckIn"]
-    },
-    {
       "id": "codebuddy-intl",
       "name": "CodeBuddy Intl",
       "description": "CodeBuddy Intl (codebuddy.ai) provider for CPA: OAuth device flow, OpenAI-compatible chat executor.",
@@ -21,18 +10,28 @@
       "repository": "https://github.com/mmqz/cpa-multi-plugins",
       "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/codebuddy-intl",
       "license": "MIT",
-      "tags": ["Provider", "OAuth", "CodeBuddy"]
+      "tags": [
+        "Provider",
+        "OAuth",
+        "CodeBuddy"
+      ]
     },
     {
       "id": "workbuddy",
       "name": "WorkBuddy",
-      "description": "Tencent WorkBuddy provider for CPA: shares CodeBuddy CN protocol with platform=workbuddy, OAuth device flow, OpenAI-compatible chat, daily check-in, credit lifecycle.",
+      "description": "Tencent WorkBuddy / CodeBuddy CN unified provider (merged in v0.9.0): same copilot.tencent.com backend and credit pool, dual login platforms (CLI + CodeBuddy IDE), auto-adopts legacy codebuddy-cn auth files, OpenAI-compatible chat, daily check-in, credit lifecycle, multi-account pool.",
       "author": "mmqz",
       "version": "0.1.0",
       "repository": "https://github.com/mmqz/cpa-multi-plugins",
       "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/workbuddy",
       "license": "MIT",
-      "tags": ["Provider", "OAuth", "WorkBuddy", "CheckIn"]
+      "tags": [
+        "Provider",
+        "OAuth",
+        "WorkBuddy",
+        "CodeBuddy",
+        "CheckIn"
+      ]
     },
     {
       "id": "trae-intl",
@@ -43,7 +42,11 @@
       "repository": "https://github.com/mmqz/cpa-multi-plugins",
       "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/trae-intl",
       "license": "MIT",
-      "tags": ["Provider", "OAuth", "Trae"]
+      "tags": [
+        "Provider",
+        "OAuth",
+        "Trae"
+      ]
     },
     {
       "id": "trae-cn",
@@ -54,7 +57,12 @@
       "repository": "https://github.com/mmqz/cpa-multi-plugins",
       "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/trae-cn",
       "license": "MIT",
-      "tags": ["Provider", "OAuth", "Trae", "CheckIn"]
+      "tags": [
+        "Provider",
+        "OAuth",
+        "Trae",
+        "CheckIn"
+      ]
     },
     {
       "id": "trae-solo-cn",
@@ -65,7 +73,13 @@
       "repository": "https://github.com/mmqz/cpa-multi-plugins",
       "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/trae-solo-cn",
       "license": "MIT",
-      "tags": ["Provider", "OAuth", "Trae", "TraeWork", "CheckIn"]
+      "tags": [
+        "Provider",
+        "OAuth",
+        "Trae",
+        "TraeWork",
+        "CheckIn"
+      ]
     },
     {
       "id": "qoder-intl",
@@ -76,7 +90,11 @@
       "repository": "https://github.com/mmqz/cpa-multi-plugins",
       "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/qoder-intl",
       "license": "MIT",
-      "tags": ["Provider", "OAuth", "Qoder"]
+      "tags": [
+        "Provider",
+        "OAuth",
+        "Qoder"
+      ]
     },
     {
       "id": "qoder-cn",
@@ -87,7 +105,13 @@
       "repository": "https://github.com/mmqz/cpa-multi-plugins",
       "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/main/plugins/qoder-cn",
       "license": "MIT",
-      "tags": ["Provider", "OAuth", "Qoder", "QoderWork", "CheckIn"]
+      "tags": [
+        "Provider",
+        "OAuth",
+        "Qoder",
+        "QoderWork",
+        "CheckIn"
+      ]
     }
   ]
 }

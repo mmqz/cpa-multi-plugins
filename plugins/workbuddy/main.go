@@ -90,12 +90,12 @@ const (
 	// CN endpoint aliases (login / chat / models). upstreamBaseCN is the only
 	// CN base; Global has its own upstreamBaseGlobal. No "upstreamBase" legacy
 	// alias — removed in v0.6.31 dead-code sweep.
-	endpointAuthState    = upstreamBaseCN + "/v2/plugin/auth/state?platform=CLI"
-	endpointLoginAcct    = upstreamBaseCN + "/v2/plugin/login/account?state="
-	endpointAuthToken    = upstreamBaseCN + "/v2/plugin/auth/token?state="
-	endpointTokenRefresh = upstreamBaseCN + "/v2/plugin/auth/token/refresh"
-	endpointChat         = upstreamBaseCN + "/v2/chat/completions"
-	endpointModels       = upstreamBaseCN + "/console/enterprises/personal/models"
+	endpointAuthStateBase = upstreamBaseCN + "/v2/plugin/auth/state?platform="
+	endpointLoginAcct     = upstreamBaseCN + "/v2/plugin/login/account?state="
+	endpointAuthToken     = upstreamBaseCN + "/v2/plugin/auth/token?state="
+	endpointTokenRefresh  = upstreamBaseCN + "/v2/plugin/auth/token/refresh"
+	endpointChat          = upstreamBaseCN + "/v2/chat/completions"
+	endpointModels        = upstreamBaseCN + "/console/enterprises/personal/models"
 
 	loginTTL = 5 * time.Minute
 )
@@ -327,7 +327,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.8.2"
+var version = "0.9.0"
 
 func wbRegistration() registration {
 	return registration{
@@ -342,6 +342,7 @@ func wbRegistration() registration {
 				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 09:00 and 21:00 local time for CN accounts (default true)."},
 				{Name: "lifecycle_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Auto disable CN / delete Global when credits exhausted; re-enable CN after check-in restores credits (default true)."},
 				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily access-token refresh at 22:00 local time to prevent Keycloak offline-session expiry (default true)."},
+				{Name: "login_platform", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"CLI", "ide"}, Description: "Client variant used for NEW logins: CLI (WorkBuddy, default) or ide (CodeBuddy IDE). Existing accounts keep the platform recorded at login/import time."},
 				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning."},
 				{Name: "scheduler_mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{schedulerModeOff, schedulerModeCredits}, Description: "Multi-account selection: off (defer to built-in, default) or credits (pick highest remaining). WARNING: when off + lifecycle_auto=false, exhausted accounts may still be routed — enable lifecycle_auto or set scheduler_mode=credits."},
 				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional override of CPAMP usage import URL (default http://cpa-manager-plus:18317/v0/management/usage/import; also env USAGE_REPORT_URL)."},
@@ -417,6 +418,10 @@ type storedTokens struct {
 	RefreshToken string `json:"refreshToken"`
 	ExpiresAt    int64  `json:"expiresAt"`
 	Domain       string `json:"domain"`
+	// LoginPlatform records which client produced the token: "CLI"
+	// (workbuddy login) or "ide" (CodeBuddy IDE login). Empty means legacy
+	// CLI-style (no X-IDE-* headers), matching historical workbuddy files.
+	LoginPlatform string `json:"loginPlatform,omitempty"`
 }
 
 type storedAccount struct {
@@ -538,6 +543,7 @@ func endpointModelsFor(sa *storedAuth) string {
 // Empty fields are signalled via the X-No-* convention used by CodeBuddy.
 func backendHeaders(req *http.Request, sa *storedAuth) {
 	commonHeaders(req)
+	applyPlatformHeaders(req, platformForAuth(sa))
 	if sa.Auth.AccessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+sa.Auth.AccessToken)
 	} else {

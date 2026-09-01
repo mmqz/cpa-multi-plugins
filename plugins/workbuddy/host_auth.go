@@ -49,10 +49,17 @@ func hostAuthList() ([]pluginapi.HostAuthFileEntry, error) {
 	// workbuddy- prefix but no type field. Filename prefix is the only
 	// reliable cross-version discriminator.
 	out := make([]pluginapi.HostAuthFileEntry, 0, len(resp.Files))
-	prefix := providerName + "-"
+	// Accept both the canonical workbuddy- prefix and legacy codebuddy-cn-
+	// files (merged plugin). adoptForeignAuths rewrites the latter to the
+	// canonical name; until then they still participate in reconcile.
+	prefixes := []string{providerName + "-", "codebuddy-cn-"}
 	for _, f := range resp.Files {
-		if strings.HasPrefix(strings.ToLower(f.Name), prefix) {
-			out = append(out, f)
+		lower := strings.ToLower(f.Name)
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(lower, prefix) {
+				out = append(out, f)
+				break
+			}
 		}
 	}
 	return out, nil

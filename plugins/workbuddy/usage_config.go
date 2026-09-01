@@ -21,6 +21,12 @@ var (
 	checkinAuto   = true // enabled by default
 	checkinAutoMu sync.RWMutex
 
+	// loginPlatform selects the client variant used for NEW logins:
+	// "CLI" (workbuddy) or "ide" (CodeBuddy IDE). Configured via
+	// config_yaml login_platform: and read at auth.login_start time.
+	loginPlatform   = "CLI"
+	loginPlatformMu sync.RWMutex
+
 	// usageReportURL / usageReportKey: POST NDJSON to CPA-Manager-Plus
 	// /v0/management/usage/import (only path that reaches request monitoring;
 	// c-shared plugins cannot use host usage.DefaultManager/redisqueue).
@@ -62,6 +68,7 @@ func configure(raw []byte) {
 	nextSchedulerMode := schedulerModeOff // reset to default on reconfigure
 	nextKeepaliveAuto := true
 	nextMgmtKey := ""
+	nextLoginPlatform := "CLI"
 
 	cfgURL, cfgKey := "", ""
 	if len(raw) > 0 {
@@ -99,6 +106,13 @@ func configure(raw []byte) {
 					v := strings.TrimSpace(strings.TrimPrefix(line, "management_key:"))
 					nextMgmtKey = strings.Trim(v, "\"'")
 				}
+				if strings.HasPrefix(line, "login_platform:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "login_platform:"))
+					v = strings.Trim(v, "\"'")
+					if strings.EqualFold(v, "ide") {
+						nextLoginPlatform = "ide"
+					}
+				}
 				if strings.HasPrefix(line, "token_keepalive:") {
 					v := strings.TrimSpace(strings.TrimPrefix(line, "token_keepalive:"))
 					v = strings.Trim(v, "\"'")
@@ -112,6 +126,14 @@ func configure(raw []byte) {
 	checkinAutoMu.Lock()
 	checkinAuto = nextCheckinAuto
 	checkinAutoMu.Unlock()
+
+	loginPlatformMu.Lock()
+	loginPlatform = nextLoginPlatform
+	loginPlatformMu.Unlock()
+
+	loginPlatformMu.Lock()
+	loginPlatform = nextLoginPlatform
+	loginPlatformMu.Unlock()
 
 	lifecycleAutoMu.Lock()
 	lifecycleAuto = nextLifecycleAuto
@@ -136,6 +158,8 @@ func configure(raw []byte) {
 
 	resolveUsageReport(cfgURL, cfgKey)
 	ensureScheduler()
+	// Migrate legacy codebuddy-cn auth files (merged plugin, v0.9.0).
+	startAdoption()
 }
 
 // resolveUsageReport fills usageReportURL/key from config → env → secret files.
@@ -195,6 +219,39 @@ func probeURL(target string, timeout time.Duration) bool {
 	// Any HTTP response (even 401) means the endpoint is reachable;
 	// connection refused / DNS failure means not reachable.
 	return resp.StatusCode > 0
+}
+
+// currentLoginPlatform returns the configured platform for NEW logins.
+func currentLoginPlatform() string {
+	loginPlatformMu.RLock()
+	defer loginPlatformMu.RUnlock()
+	if p := strings.TrimSpace(loginPlatform); p != "" {
+		return p
+	}
+	return "CLI"
+}
+
+// platformForAuth returns the login platform recorded for an existing
+// account. Legacy files without the field default to CLI-style headers.
+func platformForAuth(sa *storedAuth) string {
+	if sa != nil {
+		if p := strings.TrimSpace(sa.Auth.LoginPlatform); p != "" {
+			return p
+		}
+	}
+	return "CLI"
+}
+
+// applyPlatformHeaders sets the CodeBuddy IDE client headers for ide-
+// platform tokens (parity with the former codebuddy-cn plugin). CLI
+// tokens keep the historical workbuddy header set (no X-IDE-*).
+func applyPlatformHeaders(req *http.Request, platform string) {
+	if strings.EqualFold(strings.TrimSpace(platform), "ide") {
+		req.Header.Set("X-IDE-Type", "CodeBuddyIDE")
+		req.Header.Set("X-IDE-Name", "CodeBuddyIDE")
+		req.Header.Set("X-IDE-Version", "4.9.7")
+		req.Header.Set("X-Product-Version", "4.9.7")
+	}
 }
 
 func readSecretFile(path string) string {
