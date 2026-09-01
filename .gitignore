@@ -40,3 +40,8 @@ plugins/trae-solo-cn/trae-solo-cn
 plugins/trae-intl/trae-intl
 plugins/qoder-cn/qoder-cn
 plugins/qoder-intl/qoder-intl
+
+# go build ./... stray binaries
+plugins/qoder/qoder
+plugins/trae/trae
+plugins/workbuddy/workbuddy

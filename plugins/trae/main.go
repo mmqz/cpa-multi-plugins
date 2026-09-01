@@ -129,7 +129,7 @@ const (
 )
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.12.3"
+var version = "0.12.5"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -1106,6 +1106,10 @@ func handlePollLogin(request []byte) ([]byte, error) {
 		MachineID:    lc.machineID,
 		DeviceID:     lc.deviceID,
 	}
+	// v0.12.5: stamp the login's variant (cn/solo). Without this the saved
+	// auth file carried variant:"" and a solo login was re-claimed as cn
+	// (wrong ClientID / endpoints / models on every later dispatch).
+	a.Variant = lc.variant
 	uid, nickname, entID, err := upstreamClient.GetUserInfo(a)
 	if err != nil {
 		log.Printf("GetUserInfo failed: %v — proceeding with empty UID", err)
