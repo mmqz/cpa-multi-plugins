@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trae Intl 面板</title>
+<style>
+/* Theme tokens aligned with CPA management panel (key-policy / themes.scss):
+   default :root = light (paper); data-theme=white | dark; embedded iframe syncs parent.
+   Mirrors workbuddy/panel.html so the trae panels share the same look-and-feel. */
+:root{
+  --bg:#faf9f5;--card:#ffffff;--border:#e3e1db;--fg:#2d2a26;--mut:#6d6760;
+  --acc:#4c8dff;--on-acc:#ffffff;--ok:#10b981;--warn:#e0aa14;--err:#c65746;
+  --surface:#f0eee8;--surface-muted:#e9e6df;--btn-sec:#eef1f6;--btn-sec-hover:#e4e8ef;
+  --input-bg:#ffffff;--code-bg:#f3f4f6;--code-fg:#374151;--placeholder:rgba(109,103,96,.55);
+  --ok-soft:rgba(16,185,129,.10);--ok-border:rgba(16,185,129,.30);
+  --warn-soft:rgba(224,170,20,.12);--warn-border:rgba(224,170,20,.32);
+  --err-soft:rgba(198,87,70,.10);--err-border:rgba(198,87,70,.30);
+  --mut-soft:rgba(109,103,96,.12);--mut-border:rgba(109,103,96,.28);
+  --scrim:rgba(45,42,38,.35);--toast-shadow:0 10px 28px rgba(0,0,0,.12),0 0 0 1px rgba(0,0,0,.04);
+  --acc-ring:rgba(76,141,255,.18);--radius-md:12px;--radius-lg:16px;
+  color-scheme:light
+}
+:root[data-theme="white"]{
+  --bg:#f5f5f5;--card:#ffffff;--border:#e6e6e6;--fg:#1f1f1f;--mut:#707070;
+  --surface:#fafafa;--surface-muted:#efefef;--btn-sec:#f0f0f0;--btn-sec-hover:#e8e8e8;
+  --input-bg:#ffffff;--code-bg:#f3f4f6;--code-fg:#374151;--placeholder:rgba(112,112,112,.55);
+  --scrim:rgba(0,0,0,.32);--toast-shadow:0 10px 28px rgba(0,0,0,.10),0 0 0 1px rgba(0,0,0,.04);
+  color-scheme:light
+}
+:root[data-theme="dark"]{
+  --bg:#1e1d1b;--card:#26241f;--border:#3a3833;--fg:#ede9e3;--mut:#9a948c;
+  --acc:#4c8dff;--on-acc:#ffffff;--ok:#34d399;--warn:#f0c050;--err:#e07a6a;
+  --surface:#2f2d28;--surface-muted:#35332e;--btn-sec:#35332e;--btn-sec-hover:#3f3c36;
+  --input-bg:#1e1d1b;--code-bg:#35332e;--code-fg:#d6d1c9;--placeholder:rgba(154,148,140,.55);
+  --ok-soft:rgba(52,211,153,.12);--ok-border:rgba(52,211,153,.38);
+  --warn-soft:rgba(240,192,80,.14);--warn-border:rgba(240,192,80,.38);
+  --err-soft:rgba(224,122,106,.12);--err-border:rgba(224,122,106,.38);
+  --mut-soft:rgba(154,148,140,.16);--mut-border:rgba(154,148,140,.32);
+  --scrim:rgba(0,0,0,.55);--toast-shadow:0 10px 28px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.03);
+  --acc-ring:rgba(76,141,255,.28);
+  color-scheme:dark
+}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:24px 16px}
+h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);font-size:13px;margin-bottom:20px}
+.bar{display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+button{background:var(--acc);color:var(--on-acc);border:0;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:13px}
+button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background:var(--btn-sec-hover)}button:disabled{opacity:.5;cursor:default}
+.toggle{display:flex;gap:8px;align-items:center;color:var(--mut);font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+.card,.summary{background:var(--card);border:1px solid var(--border);border-radius:12px}
+.card{padding:16px}
+.card h2{font-size:15px;margin:0 0 2px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.uid{color:var(--mut);font-size:11px;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:12px}
+.badge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:99px;background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok-border)}
+.badge.warn{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn-border)}
+.badge.err{background:var(--err-soft);color:var(--err);border:1px solid var(--err-border)}
+.badge.disabled{background:var(--mut-soft);color:var(--mut);border:1px solid var(--mut-border)}
+.badge.region{background:var(--acc-ring);color:var(--acc);border:1px solid var(--acc)}
+.summary{padding:16px;margin-bottom:14px}
+.summary-hd{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.summary-title{font-weight:700;font-size:14px}
+.summary-meta{color:var(--mut);font-size:12px}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:10px}
+.summary-item{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px}
+.summary-item .k{color:var(--mut);font-size:11px;margin-bottom:4px}
+.summary-item .v{font-size:18px;font-weight:700}
+.summary-item .v.ok{color:var(--ok)}
+.summary-item .v.warn{color:var(--warn)}
+.summary-item .v.err{color:var(--err)}
+.row{display:flex;justify-content:space-between;padding:5px 0;border-top:1px dashed var(--border);gap:8px}
+.row:first-of-type{border-top:0}.k{color:var(--mut)}.v{font-weight:600;text-align:right;word-break:break-all}
+.v.ok{color:var(--ok)}.v.warn{color:var(--warn)}.v.err{color:var(--err)}
+.field-input{flex:1;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--fg)}
+.toasts{position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:10px;z-index:9999;max-width:360px}
+.toast{background:var(--card);border:1px solid var(--border);border-left:4px solid var(--acc);border-radius:var(--radius-md);padding:14px 18px;font-size:13px;box-shadow:var(--toast-shadow);transform:translateX(120%);opacity:0;transition:transform .3s cubic-bezier(.2,.9,.3,1.1),opacity .25s;cursor:pointer;word-break:break-all}
+.toast.show{transform:translateX(0);opacity:1}
+.toast.ok{border-left-color:var(--ok);background:var(--ok-soft)}
+.toast.warn{border-left-color:var(--warn);background:var(--warn-soft)}
+.toast.err{border-left-color:var(--err);background:var(--err-soft)}
+.toast .t{font-weight:600;margin-bottom:3px}
+.toast .d{color:var(--mut);font-size:12px;line-height:1.45}
+.spin{display:inline-block;width:12px;height:12px;border:2px solid var(--on-acc);border-top-color:transparent;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px;margin-right:6px}
+@keyframes sp{to{transform:rotate(360deg)}}
+button .spin{border-color:var(--on-acc);border-top-color:transparent}
+.loading{color:var(--mut);text-align:center;padding:40px}
+</style>
+<script>
+/* Early theme sync (before body paint): mirror CPA parent data-theme when
+   embedded; standalone falls back to prefers-color-scheme. Same semantics as
+   workbuddy/panel.html / cpa-plugin-key-policy themeSync. */
+(function(){
+  var ATTR="data-theme";
+  function embedded(){try{return window.self!==window.top}catch(e){return false}}
+  function apply(t){
+    var el=document.documentElement;
+    if(t==="white"||t==="dark")el.setAttribute(ATTR,t);
+    else el.removeAttribute(ATTR);
+  }
+  function parentTheme(){
+    if(!embedded())return null;
+    try{
+      var raw=window.parent.document.documentElement.getAttribute(ATTR);
+      if(raw==="white"||raw==="dark")return raw;
+      return "light";
+    }catch(e){return null}
+  }
+  function systemTheme(){
+    try{return window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"}catch(e){return "light"}
+  }
+  function sync(){apply(parentTheme()||systemTheme())}
+  sync();
+  window.__traeThemeSync=function(){
+    sync();
+    if(!embedded()){
+      try{
+        var mq=window.matchMedia("(prefers-color-scheme: dark)");
+        var on=function(){sync()};
+        if(mq.addEventListener)mq.addEventListener("change",on);
+        else if(mq.addListener)mq.addListener(on);
+      }catch(e){}
+      return;
+    }
+    try{
+      var parentEl=window.parent.document.documentElement;
+      new MutationObserver(sync).observe(parentEl,{attributes:true,attributeFilter:[ATTR]});
+      window.addEventListener("storage",function(e){if(e.key==="cli-proxy-theme")sync()});
+    }catch(e){}
+  };
+})();
+</script>
+</head>
+<body>
+<div class="wrap">
+  <h1>Trae Intl 账号面板</h1>
+  <div class="sub">Web SOLO remote 协议（core-normal.trae.ai）· 无签到 · 无积分池 · Token 由 host.auth.refresh 刷新</div>
+  <div id="authBox" class="card" style="display:none;margin-bottom:16px">
+    <div style="margin-bottom:8px;color:var(--mut)">Trae Intl 插件本身不强制 management key；当 CPA 主面板要求鉴权时，从嵌入环境自动获取。若自动获取失败，可在此手动粘贴 management key（仅存 sessionStorage）。</div>
+    <div style="display:flex;gap:8px">
+      <input id="keyInput" type="password" placeholder="management key（可选）" class="field-input">
+      <button onclick="saveKey()">连接</button>
+    </div>
+  </div>
+  <div class="bar">
+    <button id="refreshBtn" onclick="load(true,this)">刷新数据</button>
+    <span class="toggle" id="svtime"></span>
+  </div>
+  <div class="summary card" id="summaryBox" style="display:none"></div>
+  <div id="grid" class="grid"><div class="loading">加载中…</div></div>
+</div>
+<div class="toasts" id="toasts"></div>
+<script>
+const providerName = "trae";
+const INTL_PREFIX = "/intl";
+const API = "/v0/management/plugins/" + providerName + INTL_PREFIX;
+
+/* ---------- management key acquisition (3 fallbacks, zero config) ----------
+   1) CPA main panel localStorage "cli-proxy-auth" (XOR+base64, same-origin
+      iframe embed) — same approach as cpa-plugin-key-policy / workbuddy.
+   2) ?key= URL param (cleaned from history after read, kept in sessionStorage).
+   3) Manual input (sessionStorage only, never persisted).
+   NOTE: trae-intl has no plugin-layer key check (no checkManagementAuth), so the
+   panel attempts every call with whatever key it has — the host CPA middleware
+   is the actual guard. On 401 we surface the manual input box. */
+const ENC_PREFIX = "enc::v1::";
+const SECRET_SALT = "cli-proxy-api-webui::secure-storage";
+const PANEL_STORE = "cli-proxy-auth";
+const SS_KEY = providerName + "-mgmt-key";
+
+function _enc(t){return new TextEncoder().encode(t)}
+function _dec(b){return new TextDecoder().decode(b)}
+function _keyBytes(){try{return _enc(SECRET_SALT+"|"+window.location.host+"|"+navigator.userAgent)}catch(e){return _enc(SECRET_SALT)}}
+function _xor(d,k){const r=new Uint8Array(d.length);for(let i=0;i<d.length;i++)r[i]=d[i]^k[i%k.length];return r}
+function _b64e(b){let s="";for(let i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);return btoa(s)}
+function _b64d(s){const bin=atob(s);const b=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)b[i]=bin.charCodeAt(i);return b}
+function deobfuscate(p){if(!p||!p.startsWith(ENC_PREFIX))return p;try{return _dec(_xor(_b64d(p.slice(ENC_PREFIX.length)),_keyBytes()))}catch(e){return p}}
+function isEmbedded(){try{return window.self!==window.top}catch(e){return false}}
+
+function readPanelKey(){
+  if(!isEmbedded())return null;
+  let raw;try{raw=localStorage.getItem(PANEL_STORE)}catch(e){return null}
+  if(!raw)return null;
+  try{
+    const parsed=JSON.parse(deobfuscate(raw));
+    const st=(parsed&&parsed.state)||parsed||{};
+    return typeof st.managementKey==="string"&&st.managementKey?st.managementKey:null;
+  }catch(e){return null}
+}
+function readUrlKey(){
+  const m=new URLSearchParams(window.location.search).get("key");
+  if(m){history.replaceState(null,"",window.location.pathname)}
+  return m;
+}
+function getKey(){
+  return sessionStorage.getItem(SS_KEY)||readPanelKey()||readUrlKey();
+}
+function saveKey(){
+  const v=document.getElementById("keyInput").value.trim();
+  if(!v)return;
+  sessionStorage.setItem(SS_KEY,v);
+  document.getElementById("authBox").style.display="none";
+  load(false);
+}
+function showAuth(){document.getElementById("authBox").style.display="block";const i=document.getElementById("keyInput");i&&i.focus()}
+function authHeaders(k){return k?{"Authorization":"Bearer "+k}:{}}
+/* --------------------------------------------------------------------------- */
+
+function toast(title, kind="ok", detail=""){
+  const box=document.getElementById("toasts");
+  const el=document.createElement("div");
+  el.className="toast "+kind;
+  el.innerHTML='<div class="t"></div>'+(detail?'<div class="d"></div>':'');
+  el.querySelector(".t").textContent=title;
+  if(detail)el.querySelector(".d").textContent=detail;
+  box.appendChild(el);
+  requestAnimationFrame(()=>requestAnimationFrame(()=>el.classList.add("show")));
+  const kill=()=>{el.classList.remove("show");setTimeout(()=>el.remove(),300)};
+  el.onclick=kill;
+  setTimeout(kill, kind==="err"?6000:4000);
+  while(box.children.length>5)box.firstChild.remove();
+}
+function busy(btn, on){
+  if(!btn)return;
+  if(on){btn.dataset.orig=btn.innerHTML;btn.disabled=true;btn.innerHTML='<span class="spin"></span>处理中…'}
+  else{btn.disabled=false;if(btn.dataset.orig)btn.innerHTML=btn.dataset.orig}
+}
+function esc(s){return (s==null?"":String(s)).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function escAttr(s){return esc(s)}
+
+/* Token-expiry classification. trae-intl stores ExpiresAt (unix seconds);
+   the /accounts endpoint surfaces it as token_expiry (RFC3339 UTC string). */
+function expiryState(expStr){
+  if(!expStr) return {kind:"none", label:"无过期", cls:"badge"};
+  const t=new Date(expStr).getTime();
+  if(isNaN(t)) return {kind:"none", label:"无过期", cls:"badge"};
+  const now=Date.now();
+  if(t<=now) return {kind:"expired", label:"已过期", cls:"badge err"};
+  const in24h = t - now < 24*60*60*1000;
+  if(in24h) return {kind:"soon", label:"24h 内过期", cls:"badge warn"};
+  return {kind:"ok", label:"有效", cls:"badge"};
+}
+function fmtExpiry(expStr){
+  if(!expStr) return "-";
+  return String(expStr).replace('T',' ').replace('Z',' UTC').replace(/\.\d+$/,'');
+}
+
+let lastAccounts=[];
+let lastStatus={};
+let authFailCount=0;
+let authFailUntil=0;
+
+function card(a){
+  const exp=expiryState(a.token_expiry);
+  const disabled=!!a.disabled;
+  const badges=
+    (disabled?`<span class="badge disabled">已禁用</span>`:"")+
+    (a.region?`<span class="badge region">${esc(a.region)}</span>`:"")+
+    `<span class="${exp.cls}" title="${escAttr(fmtExpiry(a.token_expiry))}">${esc(exp.label)}</span>`;
+  return `<div class="card" data-auth="${escAttr(a.auth_index)}" data-uid="${escAttr(a.uid)}">
+  <h2>${esc(a.nickname||a.label||a.name)} <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${badges}</span></h2>
+  <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
+  <div class="row"><span class="k">UID</span><span class="v">${esc(a.uid||"-")}</span></div>
+  ${a.enterprise_id?`<div class="row"><span class="k">Enterprise</span><span class="v">${esc(a.enterprise_id)}</span></div>`:""}
+  ${a.region?`<div class="row"><span class="k">Region</span><span class="v">${esc(a.region)}</span></div>`:""}
+  <div class="row"><span class="k">Token 过期</span><span class="v ${exp.kind==='expired'?'err':(exp.kind==='soon'?'warn':'ok')}">${esc(fmtExpiry(a.token_expiry))}</span></div>
+  <div class="row"><span class="k">状态</span><span class="v">${esc(a.status||"-")}</span></div>
+  ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
+  </div>`;
+}
+async function api(path, opts={}){
+  // trae-intl has no plugin-layer key check, so we attempt every call directly.
+  // The CPA host middleware is the actual guard; on 401 we surface the key box.
+  if(Date.now()<authFailUntil){
+    throw new Error("认证多次失败，请稍后重试（防 IP 封禁）");
+  }
+  const k=getKey();
+  const r=await fetch(API+path,{...opts,credentials:'omit',headers:{...(opts.headers||{}),...authHeaders(k)}});
+  if(r.status===401){
+    authFailCount++;
+    showAuth();
+    if(authFailCount>=3){
+      authFailUntil=Date.now()+60000;
+      authFailCount=0;
+      throw new Error("认证多次失败，请检查管理密钥后 60s 再试");
+    }
+    throw new Error("management key 无效或缺失");
+  }
+  if(r.status===403){
+    authFailCount++;
+    let body="";try{body=await r.text()}catch(_){}
+    if(/IP banned|too many failed/i.test(body)){
+      let waitMs=60000;
+      const m=body.match(/(\d+)\s*m(?:in(?:ute)?s?)?\s*(\d+)\s*s/i)||body.match(/(\d+)\s*m/i);
+      if(m){
+        const mins=parseInt(m[1],10)||0;
+        const secs=m[2]?parseInt(m[2],10):0;
+        waitMs=Math.min(Math.max((mins*60+secs)*1000,30000),30*60*1000);
+      }
+      authFailUntil=Date.now()+waitMs;
+      throw new Error(body.trim()||"IP 被封禁，请稍后再试");
+    }
+    if(authFailCount>=3){authFailUntil=Date.now()+60000;authFailCount=0;}
+    throw new Error(body.trim()||"禁止访问 (403)");
+  }
+  authFailCount=0;
+  const text=await r.text();
+  if(!text){
+    throw new Error(`空响应 (${r.status}) — 路由可能未注册或上游返回空`);
+  }
+  try{
+    return JSON.parse(text);
+  }catch(e){
+    throw new Error(`JSON 解析失败 (${r.status}): ${text.slice(0,100)}`);
+  }
+}
+async function loadStatus(){
+  try{
+    const d=await api("/intl/status");
+    lastStatus=d||{};
+  }catch(_){ lastStatus={}; }
+}
+async function load(force, btn){
+  const g=document.getElementById("grid");
+  if(force){
+    if(!btn) btn=document.getElementById("refreshBtn");
+    busy(btn, true);
+  }
+  try{
+    // trae-intl has no /refresh endpoint — "刷新数据" just re-fetches /accounts.
+    const d = await api("/intl/accounts");
+    document.getElementById("svtime").textContent="服务器时间 "+(d.server_time||"");
+    if(d.error){
+      g.innerHTML='<div class="loading">'+esc(d.error)+"</div>";
+      if(force) toast("刷新失败", "err", d.error);
+      return;
+    }
+    const accounts=d.accounts||[];
+    lastAccounts=accounts;
+    await loadStatus();
+    if(!accounts.length){
+      g.innerHTML='<div class="loading">暂无 '+esc(providerName)+' 账号</div>';
+      renderSummary([]);
+      if(force) toast("数据已刷新", "warn", "暂无账号");
+      return;
+    }
+    g.innerHTML=accounts.map(card).join("");
+    renderSummary(accounts);
+    if(force){
+      const errN=accounts.filter(a=>a.error).length;
+      let extra=accounts.length+" 个账号";
+      const expired=accounts.filter(a=>expiryState(a.token_expiry).kind==="expired").length;
+      const soon=accounts.filter(a=>expiryState(a.token_expiry).kind==="soon").length;
+      if(expired) extra+=" · "+expired+" 个已过期";
+      if(soon) extra+=" · "+soon+" 个将过期";
+      if(errN) extra+=" · "+errN+" 个有错误";
+      if(errN||expired) toast("数据已刷新", "warn", extra);
+      else toast("数据已刷新", "ok", extra);
+    }
+  }catch(e){
+    if(force) toast("刷新失败", "err", e.message||String(e));
+    if(!force || !g.querySelector(".card")){
+      g.innerHTML='<div class="loading">'+esc(e.message||String(e))+"</div>";
+    }
+  }finally{
+    if(force) busy(btn, false);
+  }
+}
+function renderSummary(accounts){
+  const box=document.getElementById("summaryBox");
+  if(!box) return;
+  const all=accounts||[];
+  if(!all.length){ box.style.display="none"; box.innerHTML=""; return; }
+  let expired=0, soon=0, ok=0, noExp=0, disabledN=0, errN=0;
+  all.forEach(a=>{
+    const st=expiryState(a.token_expiry);
+    if(st.kind==="expired") expired++;
+    else if(st.kind==="soon") soon++;
+    else if(st.kind==="ok") ok++;
+    else noExp++;
+    if(a.disabled) disabledN++;
+    if(a.error) errN++;
+  });
+  const st=lastStatus||{};
+  box.style.display="block";
+  box.innerHTML=`
+    <div class="summary-hd">
+      <div class="summary-title">账号汇总 · ${esc(providerName)}</div>
+      <div class="summary-meta">${all.length} 个账号 · 有效 ${ok} · 将过期 ${soon} · 已过期 ${expired} · 禁用 ${disabledN}${errN?(" · 错误 "+errN):""}</div>
+    </div>
+    <div class="summary-grid">
+      <div class="summary-item"><div class="k">账号数</div><div class="v">${all.length}</div></div>
+      <div class="summary-item"><div class="k">Token 有效</div><div class="v ok">${ok}</div></div>
+      <div class="summary-item"><div class="k">24h 内过期</div><div class="v ${soon?"warn":""}">${soon}</div></div>
+      <div class="summary-item"><div class="k">已过期</div><div class="v ${expired?"err":""}">${expired}</div></div>
+      <div class="summary-item"><div class="k">已禁用</div><div class="v ${disabledN?"err":""}">${disabledN}</div></div>
+      <div class="summary-item"><div class="k">Pool</div><div class="v">${st.pool_enabled===false?"无池":"-"}</div></div>
+    </div>
+  `;
+}
+document.getElementById("keyInput").addEventListener("keydown",e=>{if(e.key==="Enter")saveKey()});
+/* Start theme sync watcher (parent MutationObserver + standalone prefers-color-scheme listener). */
+if(window.__traeThemeSync)window.__traeThemeSync();
+/* trae-intl doesn't require a key on the plugin side; attempt the initial
+   load directly. If the CPA host middleware returns 401, the auth box surfaces. */
+load(false);
+</script>
+</body>
+</html>
