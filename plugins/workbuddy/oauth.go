@@ -72,9 +72,44 @@ func loginHeaders(req *http.Request) {
 	applyPlatformHeaders(req, currentLoginPlatform())
 }
 
+// loginHeadersFor is the realm-aware login header set: Intl (codebuddy.ai)
+// logins additionally drop X-Requested-With and use the Intl IDE client
+// header values (merged codebuddy-intl plugin behavior).
+func loginHeadersFor(req *http.Request, region string) {
+	loginHeaders(req)
+	if region == regionIntl {
+		// No stored auth yet at login time, so apply the Intl client header
+		// set directly.
+		req.Header.Del("X-Requested-With")
+		req.Header.Set("X-IDE-Type", "IDE")
+		req.Header.Set("X-IDE-Name", "CodeBuddy")
+		req.Header.Set("X-IDE-Version", "1.100.0")
+		req.Header.Set("X-Product-Version", "1.100.0")
+	}
+}
+
+// authStateHeaders returns the header func for the auth/state request
+// (nil keeps the historical default: doJSON falls back to loginHeaders).
+func authStateHeaders(region string) func(*http.Request) {
+	if region != regionIntl {
+		return nil
+	}
+	return func(r *http.Request) { loginHeadersFor(r, region) }
+}
+
 func handleStartLogin(raw []byte) ([]byte, error) {
 	client := newLoginClient()
-	data, _, err := doJSON(client, http.MethodPost, endpointAuthStateBase+currentLoginPlatform(), nil, bytes.NewReader([]byte("{}")))
+	region := loadedLoginRegion()
+	platform := currentLoginPlatform()
+	headers := authStateHeaders(region)
+	stateBase := endpointAuthStateBase
+	if region == regionIntl {
+		// The codebuddy.ai login entry is the IDE client only (merged
+		// codebuddy-intl plugin behavior).
+		platform = "ide"
+		stateBase = upstreamBaseForRegion(region) + "/v2/plugin/auth/state?platform="
+	}
+	data, _, err := doJSON(client, http.MethodPost, stateBase+platform, headers, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return nil, fmt.Errorf("auth state failed: %w", err)
 	}
@@ -83,7 +118,7 @@ func handleStartLogin(raw []byte) ([]byte, error) {
 	if st.State == "" || st.AuthURL == "" {
 		return nil, fmt.Errorf("auth state: missing state or authUrl — please restart the login flow")
 	}
-	loginStates.Store(st.State, &loginCtx{client: client, expires: time.Now().Add(loginTTL)})
+	loginStates.Store(st.State, &loginCtx{client: client, region: region, expires: time.Now().Add(loginTTL)})
 	return okEnvelope(pluginapi.AuthLoginStartResponse{
 		Provider:  providerName,
 		URL:       st.AuthURL,
@@ -118,7 +153,13 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 	// with the token bundle once complete. login/account sits behind the
 	// openresty gateway and is rejected (401) until login finishes, so probe
 	// token first and only fetch account once we hold a bearer.
-	tokRaw, status, errTok := doJSON(lc.client, http.MethodGet, endpointAuthToken+state, nil, nil)
+	tokenBase := endpointAuthToken
+	var tokenHeaders func(*http.Request)
+	if lc.region == regionIntl {
+		tokenBase = upstreamBaseForRegion(lc.region) + "/v2/plugin/auth/token?state="
+		tokenHeaders = func(r *http.Request) { loginHeadersFor(r, lc.region) }
+	}
+	tokRaw, status, errTok := doJSON(lc.client, http.MethodGet, tokenBase+state, tokenHeaders, nil)
 	if errTok != nil {
 		// Transport-level failures and 5xx are real errors, not "still waiting":
 		// surface them so the user sees a failure instead of polling until TTL.
@@ -145,7 +186,15 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 		loginHeaders(r)
 		r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 	}
-	if acctRaw, _, errAcct := doJSON(lc.client, http.MethodGet, endpointLoginAcct+state, acctHeaders, nil); errAcct == nil {
+	acctBase := endpointLoginAcct
+	if lc.region == regionIntl {
+		acctBase = upstreamBaseForRegion(lc.region) + "/v2/plugin/login/account?state="
+		acctHeaders = func(r *http.Request) {
+			loginHeadersFor(r, lc.region)
+			r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+		}
+	}
+	if acctRaw, _, errAcct := doJSON(lc.client, http.MethodGet, acctBase+state, acctHeaders, nil); errAcct == nil {
 		_ = json.Unmarshal(acctRaw, &acct)
 	}
 
@@ -161,6 +210,11 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 			EnterpriseID: acct.EnterpriseID,
 			Nickname:     acct.Nickname,
 		},
+	}
+	// Pin the realm for Intl logins whose token response omitted the domain
+	// (gateway routing depends on it).
+	if lc.region == regionIntl && strings.TrimSpace(sa.Auth.Domain) == "" {
+		sa.Auth.Domain = "codebuddy.ai"
 	}
 	loginStates.Delete(state)
 	return okEnvelope(pluginapi.AuthLoginPollResponse{

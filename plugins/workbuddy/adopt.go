@@ -51,6 +51,15 @@ func isLegacyCodebuddyAuthName(name string) bool {
 	return strings.HasPrefix(lower, "codebuddy-cn-") || lower == "codebuddy-cn.json"
 }
 
+// isLegacyCodebuddyIntlAuthName reports whether an auth file name originates
+// from the removed codebuddy-intl plugin (merged in v0.11.0). Those accounts
+// live on the codebuddy.ai realm and adopt into region-qualified
+// workbuddy-intl-<uid>.json names (never collide with CN/Global files).
+func isLegacyCodebuddyIntlAuthName(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	return strings.HasPrefix(lower, "codebuddy-intl-") || lower == "codebuddy-intl.json"
+}
+
 // adoptForeignAuths rewrites every legacy codebuddy-cn auth file into the
 // canonical workbuddy form. Files whose UID already exists as a workbuddy
 // auth are treated as duplicates and removed (same backend credential).
@@ -63,13 +72,13 @@ func adoptForeignAuths() {
 	// Index existing canonical workbuddy files by UID-bearing name.
 	existing := make(map[string]struct{}, len(files))
 	for _, f := range files {
-		if !isLegacyCodebuddyAuthName(f.Name) {
+		if !isLegacyCodebuddyAuthName(f.Name) && !isLegacyCodebuddyIntlAuthName(f.Name) {
 			existing[strings.ToLower(f.Name)] = struct{}{}
 		}
 	}
 	adopted, deduped, skipped := 0, 0, 0
 	for _, f := range files {
-		if !isLegacyCodebuddyAuthName(f.Name) {
+		if !isLegacyCodebuddyAuthName(f.Name) && !isLegacyCodebuddyIntlAuthName(f.Name) {
 			continue
 		}
 		phys, err := hostAuthGetPhysical(f.AuthIndex)
@@ -83,6 +92,12 @@ func adoptForeignAuths() {
 			log.Printf("adopt %s: unparsable or missing uid — left in place (re-import manually)", f.Name)
 			skipped++
 			continue
+		}
+		// Pin the Intl realm before deriving the canonical name: codebuddy.ai
+		// accounts adopt into workbuddy-intl-<uid>.json and must carry the
+		// domain + IDE login origin for routing/headers.
+		if isLegacyCodebuddyIntlAuthName(f.Name) && strings.TrimSpace(sa.Auth.Domain) == "" {
+			sa.Auth.Domain = "codebuddy.ai"
 		}
 		canonical := authFileNameFor(sa)
 		_, dup := existing[strings.ToLower(canonical)]
@@ -106,7 +121,11 @@ func adoptForeignAuths() {
 			sa.Auth.LoginPlatform = "ide"
 		}
 		// Preserve an existing note if the file carried one.
-		note := "migrated from codebuddy-cn"
+		family := "codebuddy-cn"
+		if isLegacyCodebuddyIntlAuthName(f.Name) {
+			family = "codebuddy-intl"
+		}
+		note := "migrated from " + family
 		var meta struct {
 			Note string `json:"note"`
 		}

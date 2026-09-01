@@ -52,7 +52,7 @@ func hostAuthList() ([]pluginapi.HostAuthFileEntry, error) {
 	// Accept both the canonical workbuddy- prefix and legacy codebuddy-cn-
 	// files (merged plugin). adoptForeignAuths rewrites the latter to the
 	// canonical name; until then they still participate in reconcile.
-	prefixes := []string{providerName + "-", "codebuddy-cn-"}
+	prefixes := []string{providerName + "-", "codebuddy-cn-", "codebuddy-intl-"}
 	for _, f := range resp.Files {
 		lower := strings.ToLower(f.Name)
 		for _, prefix := range prefixes {

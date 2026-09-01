@@ -27,6 +27,12 @@ var (
 	loginPlatform   = "CLI"
 	loginPlatformMu sync.RWMutex
 
+	// loginRegion selects the upstream realm for NEW logins: "cn"
+	// (copilot.tencent.com, default) or "intl" (codebuddy.ai, IDE client;
+	// merged codebuddy-intl plugin v0.11.0).
+	loginRegion   = regionCN
+	loginRegionMu sync.RWMutex
+
 	// usageReportURL / usageReportKey: POST NDJSON to CPA-Manager-Plus
 	// /v0/management/usage/import (only path that reaches request monitoring;
 	// c-shared plugins cannot use host usage.DefaultManager/redisqueue).
@@ -69,6 +75,7 @@ func configure(raw []byte) {
 	nextKeepaliveAuto := true
 	nextMgmtKey := ""
 	nextLoginPlatform := "CLI"
+	nextLoginRegion := regionCN
 
 	cfgURL, cfgKey := "", ""
 	if len(raw) > 0 {
@@ -113,6 +120,13 @@ func configure(raw []byte) {
 						nextLoginPlatform = "ide"
 					}
 				}
+				if strings.HasPrefix(line, "login_region:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "login_region:"))
+					v = strings.Trim(v, "\"'")
+					if strings.EqualFold(v, "intl") {
+						nextLoginRegion = regionIntl
+					}
+				}
 				if strings.HasPrefix(line, "token_keepalive:") {
 					v := strings.TrimSpace(strings.TrimPrefix(line, "token_keepalive:"))
 					v = strings.Trim(v, "\"'")
@@ -134,6 +148,10 @@ func configure(raw []byte) {
 	loginPlatformMu.Lock()
 	loginPlatform = nextLoginPlatform
 	loginPlatformMu.Unlock()
+
+	loginRegionMu.Lock()
+	loginRegion = nextLoginRegion
+	loginRegionMu.Unlock()
 
 	lifecycleAutoMu.Lock()
 	lifecycleAuto = nextLifecycleAuto
@@ -229,6 +247,13 @@ func currentLoginPlatform() string {
 		return p
 	}
 	return "CLI"
+}
+
+// loadedLoginRegion returns the configured realm for NEW logins.
+func loadedLoginRegion() string {
+	loginRegionMu.RLock()
+	defer loginRegionMu.RUnlock()
+	return loginRegion
 }
 
 // platformForAuth returns the login platform recorded for an existing

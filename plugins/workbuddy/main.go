@@ -82,10 +82,15 @@ const (
 	upstreamBaseCN = "https://copilot.tencent.com"
 	// Global chat/auth gateway (iss = workbuddy.ai realm). APISIX on
 	// copilot.tencent.com rejects Global JWTs with 401; must use workbuddy.ai.
-	upstreamBaseGlobal  = "https://www.workbuddy.ai"
+	upstreamBaseGlobal = "https://www.workbuddy.ai"
+	// Intl chat/auth gateway (merged codebuddy-intl plugin, v0.11.0):
+	// the codebuddy.ai realm issues its own JWTs — separate from both
+	// copilot.tencent.com and workbuddy.ai.
+	upstreamBaseIntl    = "https://www.codebuddy.ai"
 	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
 	originReferer       = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
+	originRefererIntl   = "https://www.codebuddy.ai"
 
 	// CN endpoint aliases (login / chat / models). upstreamBaseCN is the only
 	// CN base; Global has its own upstreamBaseGlobal. No "upstreamBase" legacy
@@ -105,6 +110,7 @@ const (
 // so we must reuse the same cookie jar across the state request and the polls.
 type loginCtx struct {
 	client  *http.Client
+	region  string // login realm: cn | intl (merged codebuddy-intl)
 	expires time.Time
 }
 
@@ -343,6 +349,7 @@ func wbRegistration() registration {
 				{Name: "lifecycle_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Auto disable CN / delete Global when credits exhausted; re-enable CN after check-in restores credits (default true)."},
 				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily access-token refresh at 22:00 local time to prevent Keycloak offline-session expiry (default true)."},
 				{Name: "login_platform", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"CLI", "ide"}, Description: "Client variant used for NEW logins: CLI (WorkBuddy, default) or ide (CodeBuddy IDE). Existing accounts keep the platform recorded at login/import time."},
+				{Name: "login_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl"}, Description: "Realm for NEW logins: cn (copilot.tencent.com, default) or intl (codebuddy.ai, IDE client; merged codebuddy-intl plugin). Global (workbuddy.ai) accounts are added via panel credential import."},
 				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning."},
 				{Name: "scheduler_mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{schedulerModeOff, schedulerModeCredits}, Description: "Multi-account selection: off (defer to built-in, default) or credits (pick highest remaining). WARNING: when off + lifecycle_auto=false, exhausted accounts may still be routed — enable lifecycle_auto or set scheduler_mode=credits."},
 				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional override of CPAMP usage import URL (default http://cpa-manager-plus:18317/v0/management/usage/import; also env USAGE_REPORT_URL)."},
@@ -511,8 +518,13 @@ func commonHeaders(req *http.Request) {
 // account's domain. Global accounts use https://www.workbuddy.ai; CN (and
 // legacy auth files with empty domain) use the default https://www.codebuddy.cn.
 func originRefererFor(sa *storedAuth) string {
-	if sa != nil && isGlobalDomain(sa.Auth.Domain) {
-		return originRefererGlobal
+	if sa != nil {
+		if isGlobalDomain(sa.Auth.Domain) {
+			return originRefererGlobal
+		}
+		if isIntlDomain(sa.Auth.Domain) {
+			return originRefererIntl
+		}
 	}
 	return originReferer
 }
@@ -521,8 +533,13 @@ func originRefererFor(sa *storedAuth) string {
 // Global JWT iss is workbuddy.ai — those tokens only work on www.workbuddy.ai.
 // CN tokens work on copilot.tencent.com. Mixing them yields APISIX 401.
 func upstreamBaseFor(sa *storedAuth) string {
-	if sa != nil && isGlobalDomain(sa.Auth.Domain) {
-		return upstreamBaseGlobal
+	if sa != nil {
+		if isGlobalDomain(sa.Auth.Domain) {
+			return upstreamBaseGlobal
+		}
+		if isIntlDomain(sa.Auth.Domain) {
+			return upstreamBaseIntl
+		}
 	}
 	return upstreamBaseCN
 }
@@ -544,6 +561,7 @@ func endpointModelsFor(sa *storedAuth) string {
 func backendHeaders(req *http.Request, sa *storedAuth) {
 	commonHeaders(req)
 	applyPlatformHeaders(req, platformForAuth(sa))
+	applyRealmHeaders(req, sa)
 	if sa.Auth.AccessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+sa.Auth.AccessToken)
 	} else {

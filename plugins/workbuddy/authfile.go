@@ -36,6 +36,11 @@ func sanitizeUIDForFileName(uid string) string {
 func authFileNameFor(sa *storedAuth) string {
 	if sa != nil {
 		if uid := sanitizeUIDForFileName(sa.Account.UID); uid != "" {
+			// Intl accounts (merged codebuddy-intl) keep a region-qualified name
+			// so they never collide with a CN/Global account of the same uid.
+			if isIntlDomain(sa.Auth.Domain) {
+				return "workbuddy-intl-" + uid + ".json"
+			}
 			return "workbuddy-" + uid + ".json"
 		}
 	}

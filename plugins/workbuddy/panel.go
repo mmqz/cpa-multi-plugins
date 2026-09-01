@@ -19,7 +19,7 @@ type wbAccount struct {
 	Label        string          `json:"label"`
 	Nickname     string          `json:"nickname"`
 	UID          string          `json:"uid"`
-	Region       string          `json:"region"` // "cn" or "global"
+	Region       string          `json:"region"` // "cn" | "global" | "intl"
 	Plan         string          `json:"plan"`
 	Status       string          `json:"status"`
 	Disabled     bool            `json:"disabled"`
@@ -95,7 +95,7 @@ func buildDashboardEx(force, fetchCredits bool) map[string]any {
 			}
 			acct.Nickname = sa.Account.Nickname
 			acct.UID = sa.Account.UID
-			acct.Region = accountRegion(sa)
+			acct.Region = panelRegion(sa)
 			if fetchCredits {
 				plan, ci, cr, errs := cachedAccountDetails(f.ID, sa, force)
 				acct.Plan = plan

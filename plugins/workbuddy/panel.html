@@ -192,6 +192,7 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     <button type="button" class="ftag active" data-region="all" onclick="filterRegion('all',this)">全部 <span class="cnt" id="cntAll">0</span></button>
     <button type="button" class="ftag" data-region="cn" onclick="filterRegion('cn',this)">CN <span class="cnt" id="cntCn">0</span></button>
     <button type="button" class="ftag" data-region="global" onclick="filterRegion('global',this)">Global <span class="cnt" id="cntGlobal">0</span></button>
+    <button type="button" class="ftag" data-region="intl" onclick="filterRegion('intl',this)">Intl <span class="cnt" id="cntIntl">0</span></button>
     <button type="button" class="ftag" data-region="exhausted" onclick="filterRegion('exhausted',this)">耗尽 <span class="cnt" id="cntExhausted">0</span></button>
   </div>
   <div class="summary card" id="summaryBox" style="display:none"></div>
@@ -337,7 +338,8 @@ function card(a){
   const isGlobal=region==="global";
   const disabled=!!a.disabled;
   const selected=!!a.selected;
-  const regionBadge=`<span class="badge ${region}">${isGlobal?"Global":"CN"}</span>`;
+  const isIntl=region==="intl";
+  const regionBadge=`<span class="badge ${isIntl?"global":region}">${isGlobal?"Global":(isIntl?"Intl":"CN")}</span>`;
   // CN: 签到 button; Global: 领取专家加油包 button (or 已领取 if trial_claimed)
   let actionHTML;
   if(isGlobal){
@@ -468,9 +470,9 @@ function filterRegion(region, btn){
   renderSummary(lastAccounts);
 }
 function updateFilterCounts(accounts){
-  let cn=0, gl=0, ex=0;
+  let cn=0, gl=0, itl=0, ex=0;
   (accounts||[]).forEach(a=>{
-    if((a.region||"cn")==="global") gl++; else cn++;
+    const r=a.region||"cn"; if(r==="global") gl++; else if(r==="intl") itl++; else cn++;
     if(a.exhausted||(a.credits&&a.credits.total_remain===0&&(a.credits.total_used>0||(a.credits.packages&&a.credits.packages.length)))) ex++;
   });
   const elAll=document.getElementById("cntAll");
@@ -479,6 +481,8 @@ function updateFilterCounts(accounts){
   const elEx=document.getElementById("cntExhausted");
   if(elAll) elAll.textContent=String((accounts||[]).length);
   if(elCn) elCn.textContent=String(cn);
+  const elItl=document.getElementById("cntIntl");
+  if(elItl) elItl.textContent=String(itl);
   if(elGl) elGl.textContent=String(gl);
   if(elEx) elEx.textContent=String(ex);
 }
@@ -523,13 +527,13 @@ function renderSummary(accounts){
     const c=creditOf(a);
     if(!c.known) return;
     allRemain+=c.remain; allUsed+=c.used; allSize+=c.size;
-    if((a.region||"cn")==="global"){ glRemain+=c.remain; glUsed+=c.used; }
+    if((a.region||"cn")!=="cn"){ glRemain+=c.remain; glUsed+=c.used; }
     else { cnRemain+=c.remain; cnUsed+=c.used; }
   });
   const total=size>0?size:(remain+used);
   const pct=total>0?Math.round(used/total*100):0;
   let barColor="var(--ok)"; if(pct>60)barColor="var(--warn)"; if(pct>85)barColor="var(--err)";
-  const scopeLabel=currentFilter==="all"?"全部账号":(currentFilter==="global"?"Global 账号":"CN 账号");
+  const scopeLabel=currentFilter==="all"?"全部账号":(currentFilter==="intl"?"Intl 账号":(currentFilter==="global"?"Global 账号":"CN 账号"));
   const allTotal=allSize>0?allSize:(allRemain+allUsed);
   box.style.display="block";
   box.innerHTML=`

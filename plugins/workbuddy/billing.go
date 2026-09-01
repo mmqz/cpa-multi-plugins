@@ -22,6 +22,64 @@ func isGlobalDomain(domain string) bool {
 	return d == "workbuddy.ai" || strings.HasSuffix(d, ".workbuddy.ai")
 }
 
+// realm values used for login routing and panel display.
+const (
+	regionCN     = "cn"
+	regionGlobal = "global"
+	regionIntl   = "intl"
+)
+
+// isIntlDomain reports whether the domain belongs to the codebuddy.ai (Intl)
+// realm adopted from the merged codebuddy-intl plugin (v0.11.0).
+func isIntlDomain(domain string) bool {
+	d := strings.ToLower(strings.TrimSpace(domain))
+	return d == "codebuddy.ai" || strings.HasSuffix(d, ".codebuddy.ai")
+}
+
+// panelRegion returns the display realm: cn | global | intl. Billing and
+// lifecycle keep using accountRegion (cn|global) so Intl accounts preserve
+// their exact pre-merge behavior (they ran the CN code path in the old
+// codebuddy-intl plugin).
+func panelRegion(sa *storedAuth) string {
+	if sa != nil {
+		if isGlobalDomain(sa.Auth.Domain) {
+			return regionGlobal
+		}
+		if isIntlDomain(sa.Auth.Domain) {
+			return regionIntl
+		}
+	}
+	return regionCN
+}
+
+// upstreamBaseForRegion returns the chat/auth gateway for a login region.
+func upstreamBaseForRegion(region string) string {
+	switch region {
+	case regionIntl:
+		return upstreamBaseIntl
+	case regionGlobal:
+		return upstreamBaseGlobal
+	default:
+		return upstreamBaseCN
+	}
+}
+
+// applyRealmHeaders adjusts protocol headers for the Intl (codebuddy.ai)
+// realm: the Intl gateway expects the IDE client header set (X-IDE-Type
+// "IDE", product 1.100.0) and no X-Requested-With. Runs AFTER
+// applyPlatformHeaders so Intl values win for adopted codebuddy-intl
+// accounts (their LoginPlatform is "ide").
+func applyRealmHeaders(req *http.Request, sa *storedAuth) {
+	if sa == nil || !isIntlDomain(sa.Auth.Domain) {
+		return
+	}
+	req.Header.Del("X-Requested-With")
+	req.Header.Set("X-IDE-Type", "IDE")
+	req.Header.Set("X-IDE-Name", "CodeBuddy")
+	req.Header.Set("X-IDE-Version", "1.100.0")
+	req.Header.Set("X-Product-Version", "1.100.0")
+}
+
 // accountRegion returns "cn" or "global" based on the auth's domain field.
 // Empty domain (legacy auth files) defaults to "cn" for backward compat.
 func accountRegion(sa *storedAuth) string {

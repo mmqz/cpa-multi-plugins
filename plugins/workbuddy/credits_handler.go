@@ -177,7 +177,7 @@ func handleSelectAuth(req pluginapi.ManagementRequest) map[string]any {
 		return map[string]any{
 			"ok":          true,
 			"active_auth": f.ID,
-			"region":      accountRegion(sa),
+			"region":      panelRegion(sa),
 			"nickname":    sa.Account.Nickname,
 			"uid":         sa.Account.UID,
 		}
@@ -216,7 +216,7 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 				"auth_index": authIndex,
 				"nickname":   sa.Account.Nickname,
 				"uid":        sa.Account.UID,
-				"region":     accountRegion(sa),
+				"region":     panelRegion(sa),
 				"name":       f.Name,
 				"label":      f.Label,
 				"disabled":   f.Disabled,
