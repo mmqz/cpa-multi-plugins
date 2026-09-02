@@ -407,8 +407,10 @@ func intlhandleParseAuth(request []byte) ([]byte, error) {
 	return okEnvelope(pluginapi.AuthParseResponse{
 		Handled: true,
 		Auth: pluginapi.AuthData{
+			// v0.12.8: leave ID empty — host derives it from the file path
+			// (same rationale as the cn/solo parse handler).
 			Provider:    intlproviderName,
-			ID:          a.UID,
+			ID:          "",
 			FileName:    intlnonEmpty(req.FileName, intlauthFileName),
 			Label:       intlnonEmpty(a.Nickname, "Trae Intl "+a.UID),
 			StorageJSON: payload,
@@ -653,8 +655,9 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 		Status:  pluginapi.AuthLoginStatusSuccess,
 		Message: fmt.Sprintf("login complete (uid=%s)", a.UID),
 		Auth: pluginapi.AuthData{
+			// v0.12.8: ID must equal the saved file name (single record).
 			Provider:    intlproviderName,
-			ID:          a.UID,
+			ID:          fmt.Sprintf("%s-%s.json", intlproviderName, a.UID),
 			FileName:    fmt.Sprintf("%s-%s.json", intlproviderName, a.UID),
 			Label:       intlnonEmpty(a.Nickname, "Trae Intl "+a.UID),
 			StorageJSON: storageJSON,
@@ -700,8 +703,9 @@ func intlhandleRefreshAuth(request []byte) ([]byte, error) {
 	}, "", "  ")
 	return okEnvelope(pluginapi.AuthRefreshResponse{
 		Auth: pluginapi.AuthData{
+			// v0.12.8: empty ID — host keeps the existing record's ID.
 			Provider:    intlproviderName,
-			ID:          a.UID,
+			ID:          "",
 			FileName:    fmt.Sprintf("%s-%s.json", intlproviderName, a.UID),
 			Label:       intlnonEmpty(a.Nickname, "Trae Intl "+a.UID),
 			StorageJSON: storageJSON,

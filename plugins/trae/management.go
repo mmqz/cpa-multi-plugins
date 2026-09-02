@@ -612,6 +612,10 @@ func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *auth.Auth) {
 	fileName := req.AuthID
 	if fileName == "" {
 		fileName = fmt.Sprintf("%s-%s.json", providerName, a.UID)
+	} else if !strings.HasSuffix(strings.ToLower(fileName), ".json") {
+		// v0.12.8: a uid-shaped AuthID would land as an extension-less
+		// file the watcher ignores, losing the refreshed token on restart.
+		fileName += ".json"
 	}
 	storageJSON, _ := json.MarshalIndent(map[string]any{
 		"type":     providerName,

@@ -129,7 +129,7 @@ const (
 )
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.12.6"
+var version = "0.12.7"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -652,8 +652,13 @@ func handleParseAuth(request []byte) ([]byte, error) {
 	return okEnvelope(pluginapi.AuthParseResponse{
 		Handled: true,
 		Auth: pluginapi.AuthData{
+			// v0.12.8: leave ID empty — the host derives the record ID from
+			// the file path, matching the import/login upsert key. Returning
+			// the uid here made import and watcher registrations diverge
+			// (duplicate records; deleting the file left a ghost that
+			// re-materialized on next use).
 			Provider: providerName,
-			ID:       a.UID,
+			ID:       "",
 			FileName: nonEmpty(req.FileName, authFileName),
 			Label:    nonEmpty(a.Nickname, variantLabel(a.Variant)+" "+a.UID),
 			// Return the DECODED storage object — returning the raw base64
@@ -1152,8 +1157,10 @@ func handlePollLogin(request []byte) ([]byte, error) {
 		Status:  pluginapi.AuthLoginStatusSuccess,
 		Message: fmt.Sprintf("login complete (uid=%s)", a.UID),
 		Auth: pluginapi.AuthData{
+			// v0.12.8: ID must equal the saved file name so the login upsert
+			// and the watcher claim of the new file share one record.
 			Provider:    providerName,
-			ID:          a.UID,
+			ID:          fmt.Sprintf("%s-%s.json", providerName, a.UID),
 			FileName:    fmt.Sprintf("%s-%s.json", providerName, a.UID),
 			Label:       nonEmpty(a.Nickname, variantLabel(a.Variant)+" "+a.UID),
 			StorageJSON: storageJSON,
@@ -1443,8 +1450,9 @@ func handleRefreshAuth(request []byte) ([]byte, error) {
 	}, "", "  ")
 	return okEnvelope(pluginapi.AuthRefreshResponse{
 		Auth: pluginapi.AuthData{
+			// v0.12.8: empty ID — the host keeps the existing record's ID.
 			Provider:    providerName,
-			ID:          a.UID,
+			ID:          "",
 			FileName:    fmt.Sprintf("%s-%s.json", providerName, a.UID),
 			Label:       nonEmpty(a.Nickname, variantLabel(a.Variant)+" "+a.UID),
 			StorageJSON: storageJSON,

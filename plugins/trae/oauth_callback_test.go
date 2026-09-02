@@ -124,8 +124,13 @@ func TestHandleParseAuthWireBase64(t *testing.T) {
 	if env.Error != nil {
 		t.Fatalf("parse error envelope: %+v", env.Error)
 	}
-	if !env.OK || !env.Result.Handled || env.Result.Auth.ID != "u-1" {
+	if !env.OK || !env.Result.Handled {
 		t.Fatalf("parse result: %+v", env)
+	}
+	// v0.12.8: parse must leave ID empty — the host derives the record ID
+	// from the file path so import and watcher registrations share one key.
+	if env.Result.Auth.ID != "" {
+		t.Fatalf("parse Auth.ID = %q, want empty (host derives from path)", env.Result.Auth.ID)
 	}
 	if env.Result.Auth.Label != "Nick" {
 		t.Fatalf("label = %q, want nickname", env.Result.Auth.Label)
