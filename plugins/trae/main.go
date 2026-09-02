@@ -129,7 +129,7 @@ const (
 )
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.12.5"
+var version = "0.12.6"
 
 var (
 	hostAPI *C.cliproxy_host_api

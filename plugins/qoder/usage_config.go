@@ -158,9 +158,6 @@ func resolveUsageReport(cfgURL, cfgKey string) {
 		strings.TrimSpace(os.Getenv("USAGE_REPORT_URL")),
 		strings.TrimSpace(os.Getenv("CPAMP_USAGE_IMPORT_URL")),
 	)
-	if url == "" {
-		url = probeUsageReportURL()
-	}
 	key := firstNonEmpty(
 		strings.TrimSpace(cfgKey),
 		strings.TrimSpace(os.Getenv("USAGE_REPORT_KEY")),
@@ -176,6 +173,15 @@ func resolveUsageReport(cfgURL, cfgKey string) {
 		readSecretFile("/CLIProxyAPI/secrets/cpamp-admin-key"),
 		readSecretFile("/CLIProxyAPI/secrets/cpamp_admin_key"),
 	)
+	// v0.12.7: without an admin key every report is a guaranteed 401, and even
+	// the unauthenticated reachability probe alone trips CPA's management
+	// anti-brute-force ban — locking the user out of their own management UI.
+	// Disable reporting entirely unless a key is configured.
+	if strings.TrimSpace(key) == "" {
+		url = ""
+	} else if url == "" {
+		url = probeUsageReportURL(key)
+	}
 	usageReportMu.Lock()
 	usageReportURL = url
 	usageReportKey = key
@@ -183,27 +189,39 @@ func resolveUsageReport(cfgURL, cfgKey string) {
 }
 
 // probeUsageReportURL tries localhost first (bare-metal + Docker host-network),
-// then Docker compose service name. Returns whichever responds; defaults to
-// localhost if both fail (better to try localhost than an unreachable hostname).
-func probeUsageReportURL() string {
+// then Docker compose service name. v0.12.7: the probe carries the admin key
+// and 401/403 responses disqualify a candidate — selecting an endpoint that
+// rejects us only feeds CPA's management brute-force ban. Returns "" when no
+// candidate accepts the key (reporting stays disabled; forwardUsageToCPAMP
+// already skips on empty URL).
+func probeUsageReportURL(key string) string {
 	for _, candidate := range []string{defaultUsageReportURL, fallbackUsageReportURL} {
-		if probeURL(candidate, 2*time.Second) {
+		if probeURL(candidate, 2*time.Second, key) {
 			return candidate
 		}
 	}
-	return defaultUsageReportURL
+	return ""
 }
 
-// probeURL does a quick HEAD/GET to check if the endpoint is reachable.
-func probeURL(target string, timeout time.Duration) bool {
+// probeURL does a quick authenticated GET to check if the endpoint accepts us.
+func probeURL(target string, timeout time.Duration, key string) bool {
 	client := &http.Client{Timeout: timeout}
-	resp, err := client.Get(target)
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return false
+	}
+	if strings.TrimSpace(key) != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
-	// Any HTTP response (even 401) means the endpoint is reachable;
-	// connection refused / DNS failure means not reachable.
+	// v0.12.7: 401/403 = reachable but hostile to our reports — unusable.
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return false
+	}
 	return resp.StatusCode > 0
 }
 

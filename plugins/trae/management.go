@@ -624,6 +624,9 @@ func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *auth.Auth) {
 			"apiHost":      a.APIHost,
 			"machineId":    a.MachineID,
 			"deviceId":     a.DeviceID,
+			// v0.12.6: keep the parsed variant — dropping it made a solo
+			// account degrade to cn on refresh/import.
+			"variant": a.Variant,
 		},
 		"account": map[string]any{
 			"uid":          a.UID,
@@ -672,6 +675,9 @@ func handleImportAuth(req pluginapi.ManagementRequest) map[string]any {
 			"apiHost":      a.APIHost,
 			"machineId":    a.MachineID,
 			"deviceId":     a.DeviceID,
+			// v0.12.6: keep the parsed variant — dropping it made a solo
+			// account degrade to cn on refresh/import.
+			"variant": a.Variant,
 		},
 		"account": map[string]any{
 			"uid":          a.UID,
