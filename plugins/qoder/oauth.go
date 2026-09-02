@@ -262,6 +262,14 @@ func makePKCE() (string, string) {
 // handleStartLogin implements AuthProvider.StartLogin: build the device
 // authorization URL and stash the PKCE verifier under the returned state.
 func handleStartLogin(raw []byte) ([]byte, error) {
+	return startLoginWithRegion(raw, loadedLoginRegion())
+}
+
+// startLoginWithRegion starts a device-flow login pinned to region. The host
+// RPC entry (handleStartLogin) passes the configured login_region; the
+// plugin-served per-region login pages pin their own region so CN/Intl
+// logins can run concurrently without touching the global config (v0.12.10).
+func startLoginWithRegion(raw []byte, region string) ([]byte, error) {
 	verifier, challenge := makePKCE()
 	nonce := uuid.NewString()
 	machineID := uuid.NewString()
@@ -271,7 +279,6 @@ func handleStartLogin(raw []byte) ([]byte, error) {
 	q.Set("challenge_method", "S256")
 	q.Set("nonce", nonce)
 	q.Set("machine_id", machineID)
-	region := loadedLoginRegion()
 	q.Set("client_id", qoderClientIDFor(region))
 	q.Set("redirect_uri", qoderRedirectURIFor(region))
 	authURL := qoderWebsiteFor(region) + "/device/selectAccounts?" + q.Encode()

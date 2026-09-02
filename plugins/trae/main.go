@@ -88,9 +88,12 @@ import (
 )
 
 const (
-	providerName  = "trae"
-	authFileName  = "trae.json"
-	pluginLogoURL = ""
+	providerName = "trae"
+	authFileName = "trae.json"
+	// Official Trae favicon (trae.com.cn CDN). The CPA management UI renders
+	// metadata.logo as the plugin icon (sidebar drawer + OAuth entry) — it
+	// was empty until v0.12.9, leaving Trae iconless next to qoder/workbuddy.
+	pluginLogoURL = "https://lf-cdn.trae.com.cn/obj/trae-com-cn/trae_website_prod_cn/favicon.png"
 
 	// OAuth login flow timeout (5 min).
 	loginTTL = 15 * time.Minute
@@ -129,7 +132,7 @@ const (
 )
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.12.8"
+var version = "0.12.9"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -736,6 +739,14 @@ func handleParseAuth(request []byte) ([]byte, error) {
 //  6. Persist login state (state = login_trace_id) and start callback server.
 //  7. Return AuthLoginStartResponse{URL: verificationURI, State: loginTraceID}.
 func handleStartLogin(request []byte) ([]byte, error) {
+	return startLoginWithVariant(request, loadedLoginVariant())
+}
+
+// startLoginWithVariant starts a CN/SOLO login flow pinned to lv. The host
+// RPC entry (handleStartLogin) passes the configured login_variant; the
+// plugin-served per-region login pages pin their own variant so CN/SOLO/Intl
+// logins can run concurrently without touching the global config (v0.12.9).
+func startLoginWithVariant(request []byte, lv string) ([]byte, error) {
 	// Step 0: host login context. When CPA supplies BaseURL (its own
 	// management oauth-callback endpoint) the callback targets the plugin
 	// resource route on the SAME origin the user is already browsing —
@@ -775,7 +786,6 @@ func handleStartLogin(request []byte) ([]byte, error) {
 	// Step 5: Build verification URI with PKCE challenge.
 	deviceID := newDeviceID()
 	machineID := newMachineID()
-	lv := loadedLoginVariant()
 	verificationURI := buildVerificationURI(loginHost, verificationURIParams{
 		AuthFrom:      oauthAuthFor(lv),
 		PluginVersion: oauthPluginVersion,

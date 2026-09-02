@@ -147,7 +147,12 @@ plugins:
 
 ### 4. 重启 CPA，登录账号
 
-通过 CPAMP 管理面板或 Management API 触发 OAuth 登录流程。
+两种登录入口（v0.12.10 起）：
+
+- **按区域登录页（推荐）**：管理 UI 侧边栏「插件页面」中，每个插件带区域登录入口（Trae: CN/SOLO/Intl 登录，WorkBuddy: CN/Intl 登录，Qoder: CN/Intl 登录）。每个页面发起**钉住该区域**的登录流程——多区域可以同时登录，互不干扰，也不需要改全局配置。
+- **传统单入口**：OAuth 登录菜单中的 Trae / WorkBuddy / Qoder 条目，按插件配置的 `login_variant` / `login_region` 发起登录（一次只能登一个区域，先改配置再点登录）。
+
+两种入口产生的凭证都落盘到 auth-dir 并被对应插件自动收养，效果完全一致。
 
 ## 构建
 

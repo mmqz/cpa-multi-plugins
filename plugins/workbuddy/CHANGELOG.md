@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.3
+
+### Per-region self-serve login pages (repo v0.12.10)
+
+- New `login_pages.go` — the management UI sidebar gains **CN 登录** /
+  **Intl 登录** pages (plugin-declared menus, rendered in an iframe). Each
+  page starts a region-PINNED login flow (`login_start?region=…`), opens the
+  upstream authorization URL in a new tab and polls `login_wait` until the
+  flow completes, then persists the credential via `host.auth.save`. CN and
+  Intl logins can now run concurrently without touching the global
+  `login_region` config — which previously allowed only one region at a
+  time and therefore only one OAuth menu entry per plugin.
+- `oauth.go` — `handleStartLogin` splits into a thin wrapper plus
+  `startLoginWithRegion(raw, region)`: the host RPC keeps using the global
+  `login_region`; the login pages pin their own realm. The poll handler is
+  reused verbatim by `login_wait` (no duplicated token logic).
+- Isolation: `login_wait` only consumes states it created itself
+  (`selfServeStates`), so it can never race the host-driven poller; terminal
+  results are cached per state and concurrent page retries are coalesced.
+- Panel menu renamed `WorkBuddy` → `Dashboard` (the UI groups multiple
+  plugin menus into a drawer, where the old label was redundant).
+- Global (workbuddy.ai) accounts unchanged: no OAuth flow exists upstream,
+  they keep entering via panel import (noted on the Intl login page).
+
 ## 0.9.2
 
 ### Foreign-credential defense (repo v0.12.9)

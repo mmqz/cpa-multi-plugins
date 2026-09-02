@@ -128,8 +128,17 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: base + "/claim-pro", Description: "Claim one-time Pro upgrade pack for one account (auth_index)."},
 			{Method: http.MethodGet, Path: base + "/keepalive/status", Description: "Last keepalive run summary + config."},
 		},
+		// Menu entries (v0.12.10): /panel plus one self-serve device-flow
+		// login page per region — each page pins its own region so CN/Intl
+		// can log in concurrently without touching the global login_region.
+		// Menu-less entries stay routable but hidden from the UI sidebar.
 		Resources: []resourceRoute{
-			{Path: "/panel", Menu: "Qoder", Description: "Qoder dashboard (CN + Intl): credits, check-in, plan, import."},
+			{Path: "/panel", Menu: "Dashboard", Description: "Qoder dashboard (CN + Intl): credits, check-in, plan, import."},
+			{Path: "/login_cn", Menu: "CN 登录", Description: "Qoder CN (qoder.com.cn) device-flow login page (pinned cn region)."},
+			{Path: "/login_intl", Menu: "Intl 登录", Description: "Qoder Intl (qoder.com) device-flow login page (pinned intl region)."},
+			// Menu-less: routable browser resources without UI entries.
+			{Path: "/login_start", Description: "Self-serve login start (region-pinned; used by the login pages)."},
+			{Path: "/login_wait", Description: "Self-serve login poll/completion (used by the login pages)."},
 		},
 	}
 }
@@ -145,6 +154,14 @@ func handleManagement(raw []byte) ([]byte, error) {
 	resPrefix := "/v0/resource/plugins/" + providerName
 	if req.Method == http.MethodGet && strings.HasPrefix(path, resPrefix) {
 		sub := strings.TrimPrefix(path, resPrefix)
+		switch sub {
+		case "/login_cn", "/login_intl":
+			return okEnvelope(mgmtHTMLResponse(handleLoginPage(sub)))
+		case "/login_start":
+			return okEnvelope(mgmtJSONResponse(http.StatusOK, handleLoginStart(req)))
+		case "/login_wait":
+			return okEnvelope(mgmtJSONResponse(http.StatusOK, handleLoginWait(req)))
+		}
 		return okEnvelope(mgmtHTMLResponse(servePanel(sub)))
 	}
 

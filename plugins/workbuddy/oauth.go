@@ -98,8 +98,15 @@ func authStateHeaders(region string) func(*http.Request) {
 }
 
 func handleStartLogin(raw []byte) ([]byte, error) {
+	return startLoginWithRegion(raw, loadedLoginRegion())
+}
+
+// startLoginWithRegion starts a login flow pinned to region. The host RPC
+// entry (handleStartLogin) passes the configured login_region; the
+// plugin-served per-region login pages pin their own realm so CN/Intl logins
+// can run concurrently without touching the global config (v0.12.10).
+func startLoginWithRegion(raw []byte, region string) ([]byte, error) {
 	client := newLoginClient()
-	region := loadedLoginRegion()
 	platform := currentLoginPlatform()
 	headers := authStateHeaders(region)
 	stateBase := endpointAuthStateBase
