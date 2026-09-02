@@ -340,7 +340,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.8.3"
+var version = "0.8.4"
 
 func wbRegistration() registration {
         return registration{
@@ -572,6 +572,36 @@ func applyCosyHeaders(req *http.Request, sa *storedAuth, encodedBody, rawURL, mo
 // Auth handlers
 // -----------------------------------------------------------------------------
 
+
+// isOurFamilyFileName reports whether a type-less auth file belongs to this
+// plugin by name: our canonical prefix, a pre-merge family prefix, or a
+// legacy single-file name. The filename is the only trustworthy discriminator
+// for files without an explicit type (see the ownership note in
+// handleParseAuth).
+func isOurFamilyFileName(name string) bool {
+        lower := strings.ToLower(strings.TrimSpace(name))
+        for _, p := range []string{providerName + "-", "qoder-cn-", "qoder-intl-"} {
+                if strings.HasPrefix(lower, p) {
+                        return true
+                }
+        }
+        switch lower {
+        case "qoder.json", "qoderwork.json", "qoder-cn.json", "qoder-intl.json":
+                return true
+        }
+        return false
+}
+
+// isOurDeclaredType reports whether an explicitly declared auth "type"
+// belongs to this plugin's family (current name plus pre-merge names).
+func isOurDeclaredType(t string) bool {
+        switch strings.ToLower(strings.TrimSpace(t)) {
+        case "qoder", "qoderwork", "qoder-cn", "qoder-intl":
+                return true
+        }
+        return false
+}
+
 func handleParseAuth(raw []byte) ([]byte, error) {
         var req pluginapi.AuthParseRequest
         if err := json.Unmarshal(raw, &req); err != nil {
@@ -589,16 +619,23 @@ func handleParseAuth(raw []byte) ([]byte, error) {
         }
         _ = json.Unmarshal(req.RawJSON, &probeType)
         declared := strings.ToLower(strings.TrimSpace(probeType.Type))
-        if declared != "" && declared != providerName {
+        if declared != "" && !isOurDeclaredType(declared) {
                 // Explicitly another provider's file — never claim it.
+                // Family-wide: pre-merge names (qoderwork/qoder-cn/qoder-intl)
+                // remain ours.
                 return okEnvelope(pluginapi.AuthParseResponse{Handled: false})
         }
         if declared == "" {
-                // No type declared: only claim when the host already routed this to us
-                // (req.Provider == qoderwork) or the filename carries our prefix.
-                routed := strings.EqualFold(strings.TrimSpace(req.Provider), providerName) || strings.EqualFold(strings.TrimSpace(req.Provider), "qoderwork") || strings.EqualFold(strings.TrimSpace(req.Provider), "qoder-cn") || strings.EqualFold(strings.TrimSpace(req.Provider), "qoder-intl") // 兼容旧名（qoder-cn/qoder-intl 为合并前插件名）
-                prefixed := strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.FileName)), providerName+"-")
-                if !routed && !prefixed {
+                // No type declared: claim ONLY when the filename carries our family.
+                // NOTE: req.Provider cannot prove ownership here — the host's
+                // callParseAuths rewrites an empty Provider to the POLLED plugin's
+                // own identifier, so EqualFold(req.Provider, "qoder") is always
+                // true while polling us regardless of the file's origin. Trusting
+                // it made this plugin (first in the poll order) claim every
+                // generic type-less credential on disk — e.g. legacy workbuddy
+                // accounts surfaced as provider "qoder" and then 401ed against
+                // the wrong upstream (APISIX HTML "parse failed" errors).
+                if !isOurFamilyFileName(req.FileName) {
                         return okEnvelope(pluginapi.AuthParseResponse{Handled: false})
                 }
         }

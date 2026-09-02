@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -26,6 +27,32 @@ func handleImportAuth(req pluginapi.ManagementRequest) map[string]any {
 	}
 	if len(raw) == 0 {
 		return map[string]any{"success": false, "error": "missing json/raw credential payload"}
+	}
+	// Foreign-credential guard: parseStored only requires an accessToken, so
+	// a qoder/trae auth file parses fine here and would be saved as a
+	// workbuddy account that can never authenticate (its token belongs to a
+	// different upstream realm — every call ends in the upstream's APISIX 401
+	// HTML page, surfaced as "parse failed: invalid character '<'"). Reject
+	// payloads that explicitly declare another plugin and tell the user where
+	// the credential belongs. Untyped flat exports (legacy CPA-Manager-Plus
+	// files) keep working — filename/type conventions did not always exist.
+	var typed struct {
+		Type     string `json:"type"`
+		Provider string `json:"provider"`
+	}
+	if json.Unmarshal(raw, &typed) == nil {
+		t := strings.ToLower(strings.TrimSpace(typed.Type))
+		if t == "" {
+			t = strings.ToLower(strings.TrimSpace(typed.Provider))
+		}
+		switch t {
+		case "", "workbuddy", "workbuddy-cn", "workbuddy-global", "workbuddy-intl",
+			"codebuddy", "codebuddy-cn", "codebuddy-intl":
+			// this plugin's own family (or untyped) — accept below
+		default:
+			return map[string]any{"success": false, "error": fmt.Sprintf(
+				"credential type %q belongs to another plugin — use that plugin's own login/import instead", t)}
+		}
 	}
 	sa, err := parseStored(raw)
 	if err != nil {

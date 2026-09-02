@@ -129,7 +129,7 @@ const (
 )
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.12.7"
+var version = "0.12.8"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -618,6 +618,33 @@ func parseStoredAuth(raw []byte) (*auth.Auth, error) {
 	return a, nil
 }
 
+// isOurFamilyFileName reports whether a type-less auth file belongs to this
+// plugin by name: our canonical prefix or a pre-merge family prefix/legacy
+// single-file name (trae-cn / trae-solo-cn / trae-intl).
+func isOurFamilyFileName(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	for _, p := range []string{"trae-", "trae-cn-", "trae-solo-cn-", "trae-intl-"} {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	switch lower {
+	case "trae.json", "trae-cn.json", "trae-solo-cn.json", "trae-intl.json":
+		return true
+	}
+	return false
+}
+
+// isOurDeclaredType reports whether an explicitly declared auth "type"
+// belongs to this plugin's family (current name plus pre-merge names).
+func isOurDeclaredType(t string) bool {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "trae", "trae-cn", "trae-solo-cn", "trae-intl":
+		return true
+	}
+	return false
+}
+
 func handleParseAuth(request []byte) ([]byte, error) {
 	// v0.12.4 fix: the host wire format is pluginapi.AuthParseRequest —
 	// {"Provider":...,"FileName":...,"RawJSON":"<base64>"} ([]byte fields
@@ -632,6 +659,32 @@ func handleParseAuth(request []byte) ([]byte, error) {
 	}
 	if err := json.Unmarshal(request, &req); err != nil {
 		return nil, err
+	}
+	// Ownership check (v0.12.9, symmetric with qoder/workbuddy): the host
+	// routes by the file's declared "type"; type-less files are polled across
+	// plugins — first Handled=true wins. And the host's callParseAuths
+	// rewrites an EMPTY req.Provider to the polled plugin's own identifier,
+	// so req.Provider can never prove ownership. Claim only files whose
+	// declared type is in our family, or whose filename carries our family
+	// name; otherwise every generic credential would be claimed by whichever
+	// plugin polls first (qoder) or by us, then 401 against the wrong upstream.
+	var probeOwner struct {
+		Type string `json:"type"`
+	}
+	probePayload, probeOK := extractAuthPayload(request)
+	if !probeOK {
+		probePayload, probeOK = req.StorageJSON, len(req.StorageJSON) > 0
+	}
+	if probeOK {
+		_ = json.Unmarshal(probePayload, &probeOwner)
+	}
+	declared := strings.ToLower(strings.TrimSpace(probeOwner.Type))
+	if declared != "" && !isOurDeclaredType(declared) {
+		// Explicitly another provider's file — never claim it.
+		return okEnvelope(pluginapi.AuthParseResponse{Handled: false})
+	}
+	if declared == "" && !isOurFamilyFileName(req.FileName) {
+		return okEnvelope(pluginapi.AuthParseResponse{Handled: false})
 	}
 	payload, ok := extractAuthPayload(request)
 	if !ok {

@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -55,14 +56,48 @@ func hostAuthList() ([]pluginapi.HostAuthFileEntry, error) {
 	prefixes := []string{providerName + "-", "codebuddy-cn-", "codebuddy-intl-"}
 	for _, f := range resp.Files {
 		lower := strings.ToLower(f.Name)
+		matched := false
 		for _, prefix := range prefixes {
 			if strings.HasPrefix(lower, prefix) {
-				out = append(out, f)
+				matched = true
 				break
 			}
 		}
+		if !matched {
+			continue
+		}
+		// Content guard: a file can carry our filename prefix while its body
+		// belongs to another plugin (e.g. a qoder auth saved under a
+		// workbuddy- name by a third-party tool). Running it through this
+		// plugin's endpoints 401s against the wrong upstream with a cryptic
+		// APISIX HTML page. Entries WITHOUT a type stay eligible — the
+		// filename prefix remains their only discriminator.
+		if foreign, owner := foreignAuthOwner(f.Type, f.Provider); foreign {
+			log.Printf("workbuddy: auth %s skipped — credential type %q belongs to the %s plugin, not workbuddy", f.Name, owner, owner)
+			continue
+		}
+		out = append(out, f)
 	}
 	return out, nil
+}
+
+// foreignAuthOwner reports whether the host-resolved type/provider of an
+// auth entry names a plugin outside this one's family. Returns (false, "")
+// when no type is declared (legacy files — the filename prefix is then the
+// only discriminator) or when the value belongs to the workbuddy/codebuddy
+// merged family.
+func foreignAuthOwner(entryType, entryProvider string) (bool, string) {
+	t := strings.ToLower(strings.TrimSpace(entryType))
+	if t == "" {
+		t = strings.ToLower(strings.TrimSpace(entryProvider))
+	}
+	switch t {
+	case "", "workbuddy", "workbuddy-cn", "workbuddy-global", "workbuddy-intl",
+		"codebuddy", "codebuddy-cn", "codebuddy-intl":
+		return false, ""
+	default:
+		return true, t
+	}
 }
 
 // hostAuthGet fetches the credential JSON for one auth index.

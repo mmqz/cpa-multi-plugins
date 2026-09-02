@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.9.2
+
+### Foreign-credential defense (repo v0.12.9)
+
+- `credits_handler.go` — `handleImportAuth` now rejects payloads whose
+  explicit `type`/`provider` names another plugin (e.g. a qoder or trae
+  auth file). parseStored only requires an accessToken, so foreign
+  credentials used to import cleanly and then 401 against the wrong
+  upstream forever (APISIX HTML page surfaced as 'parse failed: invalid
+  character <'). The rejection names the owning plugin. Untyped flat
+  exports (legacy CPA-Manager-Plus files) keep importing.
+- `host_auth.go` — `hostAuthList` gains a content guard: a file with our
+  filename prefix but an explicit foreign type in its body (e.g. a qoder
+  auth saved under a workbuddy- name by a third-party tool) is skipped
+  with a log line instead of being listed/executed by this plugin.
+  Entries without a type field stay eligible — the filename prefix
+  remains their only discriminator.
+- `main.go` — parse ownership guard hardened: the host rewrites an empty
+  req.Provider to the POLLED plugin's own identifier, so the old
+  EqualFold(req.Provider, ...) check was always true while being polled —
+  the first-polled plugin (qoder) claimed every type-less generic
+  credential on disk. Type-less files are now claimed only by filename
+  family; declared legacy types (codebuddy/codebuddy-cn/codebuddy-intl)
+  remain accepted. Symmetric fixes ship in qoder 0.8.4 (same hole) and
+  trae 0.12.8 (guard was missing entirely).
+
+
 ## 0.8.2
 
 ### Concurrency + lifecycle hardening

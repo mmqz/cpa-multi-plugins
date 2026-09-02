@@ -333,7 +333,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.1"
+var version = "0.9.2"
 
 func wbRegistration() registration {
 	return registration{
@@ -598,6 +598,36 @@ func backendHeaders(req *http.Request, sa *storedAuth) {
 // Auth handlers
 // -----------------------------------------------------------------------------
 
+// isOurFamilyFileName reports whether a type-less auth file belongs to this
+// plugin by name: our canonical prefix, a pre-merge family prefix, or a
+// legacy single-file name. The filename is the only trustworthy discriminator
+// for files without an explicit type (see the ownership note in
+// handleParseAuth).
+func isOurFamilyFileName(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	for _, p := range []string{providerName + "-", "codebuddy-cn-", "codebuddy-intl-"} {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	switch lower {
+	case "workbuddy.json", "codebuddy.json", "codebuddy-cn.json", "codebuddy-intl.json":
+		return true
+	}
+	return false
+}
+
+// isOurDeclaredType reports whether an explicitly declared auth "type"
+// belongs to this plugin's family (current name plus pre-merge names).
+func isOurDeclaredType(t string) bool {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "workbuddy", "workbuddy-cn", "workbuddy-global", "workbuddy-intl",
+		"codebuddy", "codebuddy-cn", "codebuddy-intl":
+		return true
+	}
+	return false
+}
+
 func handleParseAuth(raw []byte) ([]byte, error) {
 	var req pluginapi.AuthParseRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -614,14 +644,19 @@ func handleParseAuth(raw []byte) ([]byte, error) {
 	}
 	_ = json.Unmarshal(req.RawJSON, &probeType)
 	declared := strings.ToLower(strings.TrimSpace(probeType.Type))
-	if declared != "" && declared != providerName {
-		// Explicitly another provider's file — never claim it.
+	if declared != "" && !isOurDeclaredType(declared) {
+		// Explicitly another provider's file — never claim it. Family-wide:
+		// pre-merge names (codebuddy/codebuddy-cn/codebuddy-intl) remain ours.
 		return okEnvelope(pluginapi.AuthParseResponse{Handled: false})
 	}
 	if declared == "" {
-		routed := strings.EqualFold(strings.TrimSpace(req.Provider), providerName)
-		prefixed := strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.FileName)), providerName+"-")
-		if !routed && !prefixed {
+		// No type declared: claim ONLY when the filename carries our family.
+		// NOTE: req.Provider cannot prove ownership here — the host's
+		// callParseAuths rewrites an empty Provider to the POLLED plugin's own
+		// identifier, so EqualFold(req.Provider, "workbuddy") is always true
+		// while polling us regardless of the file's origin. Symmetric with the
+		// qoder plugin's fix (repo v0.12.9).
+		if !isOurFamilyFileName(req.FileName) {
 			return okEnvelope(pluginapi.AuthParseResponse{Handled: false})
 		}
 	}
