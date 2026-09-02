@@ -102,9 +102,9 @@ func handleStartLogin(raw []byte) ([]byte, error) {
 }
 
 // startLoginWithRegion starts a login flow pinned to region. The host RPC
-// entry (handleStartLogin) passes the configured login_region; the
-// plugin-served per-region login pages pin their own realm so CN/Intl logins
-// can run concurrently without touching the global config (v0.12.10).
+// entry (handleStartLogin) passes the configured login_region — the OAuth
+// entry point stays single per plugin; which realm it targets is chosen in
+// the plugin config (login_region dropdown) and is STICKY (v0.12.10).
 func startLoginWithRegion(raw []byte, region string) ([]byte, error) {
 	client := newLoginClient()
 	platform := currentLoginPlatform()

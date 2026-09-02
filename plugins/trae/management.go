@@ -96,20 +96,13 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodGet, Path: base + "/intl/status", Description: "Trae Intl: plugin status."},
 			{Method: http.MethodPost, Path: base + "/intl/import", Description: "Trae Intl: import credential JSON into host auth store."},
 		},
-		// Menu entries (v0.12.9): /panel plus one self-serve OAuth login
-		// page per region — each page pins its own variant so CN/SOLO/Intl
-		// can log in concurrently without touching the global login_variant.
-		// Menu-less entries stay routable but hidden from the UI sidebar.
+		// Single menu entry (v0.12.2): /panel covers CN + SOLO + Intl
+		// accounts. Legacy /intl_panel path serves the same panel.
 		Resources: []resourceRoute{
-			{Path: "/panel", Menu: "Dashboard", Description: "Trae dashboard: CN/SOLO credits, check-in, accounts + Intl accounts."},
-			{Path: "/login_cn", Menu: "CN 登录", Description: "Trae CN OAuth login page (pinned cn variant)."},
-			{Path: "/login_solo", Menu: "SOLO 登录", Description: "Trae SOLO OAuth login page (pinned solo variant)."},
-			{Path: "/login_intl", Menu: "Intl 登录", Description: "Trae Intl OAuth login page (pinned intl variant)."},
+			{Path: "/panel", Menu: "Trae", Description: "Trae dashboard: CN/SOLO credits, check-in, accounts + Intl accounts."},
 			// Menu-less: routable browser resources without UI entries.
 			{Path: "/intl_panel", Description: "Trae Intl dashboard (linked from the main panel)."},
 			{Path: "/oauth_callback", Description: "OAuth login callback redirect target."},
-			{Path: "/login_start", Description: "Self-serve login start (variant-pinned; used by the login pages)."},
-			{Path: "/login_wait", Description: "Self-serve login poll/completion (used by the login pages)."},
 		},
 	}
 }
@@ -140,14 +133,6 @@ func handleManagement(raw []byte) ([]byte, error) {
 	}
 	if req.Method == http.MethodGet && strings.HasPrefix(path, resPrefix) {
 		sub := strings.TrimPrefix(path, resPrefix)
-		switch sub {
-		case "/login_cn", "/login_solo", "/login_intl":
-			return okEnvelope(mgmtHTMLResponse(handleLoginPage(sub)))
-		case "/login_start":
-			return okEnvelope(mgmtJSONResponse(http.StatusOK, handleLoginStart(req)))
-		case "/login_wait":
-			return okEnvelope(mgmtJSONResponse(http.StatusOK, handleLoginWait(req)))
-		}
 		return okEnvelope(mgmtHTMLResponse(servePanel(sub)))
 	}
 

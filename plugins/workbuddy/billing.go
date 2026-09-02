@@ -107,9 +107,25 @@ func setBillingBaseGlobal(s string) func() {
 // billingBaseFor returns the billing API base URL for the given auth's domain.
 // CN accounts → https://www.codebuddy.cn; Global → https://www.workbuddy.ai.
 // Falls back to the test-overridable billingBase for CN/nil.
+// billingBaseIntl is the CodeBuddy Intl (www.codebuddy.ai) billing base.
+// v0.12.10 fix: Intl accounts were posting check-in / meter calls to the CN
+// gas station (www.codebuddy.cn) where their Bearer tokens are unknown — the
+// APISIX gateway answered with the 401 HTML page that surfaced as
+// "parse failed: invalid character '<'" right after a successful Intl login.
+var billingBaseIntl = "https://www.codebuddy.ai"
+
 func billingBaseFor(sa *storedAuth) string {
-	if sa != nil && isGlobalDomain(sa.Auth.Domain) {
-		return billingBaseGlobal
+	if sa != nil {
+		if isGlobalDomain(sa.Auth.Domain) {
+			return billingBaseGlobal
+		}
+		// v0.12.10 fix: Intl (codebuddy.ai) accounts must hit the Intl gas
+		// station, not the CN one — CN's APISIX gateway rejects Intl Bearer
+		// tokens with the 401 HTML page ("parse failed: invalid character
+		// '<'") immediately after a successful Intl login.
+		if isIntlDomain(sa.Auth.Domain) {
+			return billingBaseIntl
+		}
 	}
 	return billingBase
 }
@@ -131,6 +147,16 @@ func billingHeaders(req *http.Request, sa *storedAuth) {
 	}
 	if sa.Auth.Domain != "" {
 		req.Header.Set("X-Domain", sa.Auth.Domain)
+	}
+	// Intl realm parity (applyRealmHeaders): the codebuddy.ai gateway expects
+	// the IDE client header set and no X-Requested-With. Without these the
+	// request is treated as a browser call and bounced (401).
+	if isIntlDomain(sa.Auth.Domain) {
+		req.Header.Del("X-Requested-With")
+		req.Header.Set("X-IDE-Type", "IDE")
+		req.Header.Set("X-IDE-Name", "CodeBuddy")
+		req.Header.Set("X-IDE-Version", "1.100.0")
+		req.Header.Set("X-Product-Version", "1.100.0")
 	}
 }
 

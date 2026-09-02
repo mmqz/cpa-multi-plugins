@@ -147,12 +147,9 @@ plugins:
 
 ### 4. 重启 CPA，登录账号
 
-两种登录入口（v0.12.10 起）：
+每个插件保持**单一 OAuth 入口**（v0.12.10 起）：OAuth 登录菜单中的 Trae / WorkBuddy / Qoder 条目按插件配置的 `login_variant`（Trae: cn|solo|intl）/ `login_region`（WorkBuddy、Qoder: cn|intl）发起登录。要切换登录指向哪个区域，在管理 UI 的插件配置里改这个下拉并保存即可，下一次点 OAuth 登录就走新区域——入口只有一个，指向由配置决定。
 
-- **按区域登录页（推荐）**：管理 UI 侧边栏「插件页面」中，每个插件带区域登录入口（Trae: CN/SOLO/Intl 登录，WorkBuddy: CN/Intl 登录，Qoder: CN/Intl 登录）。每个页面发起**钉住该区域**的登录流程——多区域可以同时登录，互不干扰，也不需要改全局配置。
-- **传统单入口**：OAuth 登录菜单中的 Trae / WorkBuddy / Qoder 条目，按插件配置的 `login_variant` / `login_region` 发起登录（一次只能登一个区域，先改配置再点登录）。
-
-两种入口产生的凭证都落盘到 auth-dir 并被对应插件自动收养，效果完全一致。
+区域登录产生的凭证落盘到 auth-dir 并被对应插件自动收养；已有账号不受登录区域影响（登录变体不劫持现有账号的分发）。
 
 ## 构建
 

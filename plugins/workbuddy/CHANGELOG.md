@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.4
+
+### Intl billing gateway fix + single OAuth entry (repo v0.12.10)
+
+- **Intl 401 fix** (`billing.go`): a successful Intl (codebuddy.ai) login was
+  immediately followed by `parse failed: invalid character '<' (body: <html>
+  ... 401 Authorization Required ...)` in the panel. Root cause:
+  `billingBaseFor` routed check-in / meter calls for Intl accounts to the CN
+  gas station (`www.codebuddy.cn`), whose APISIX gateway rejects Intl Bearer
+  tokens with an HTML 401 page. Intl accounts now hit
+  `billingBaseIntl = https://www.codebuddy.ai` (verified: the meter endpoints
+  exist there and answer with business JSON for valid tokens), and
+  `billingHeaders` applies the Intl IDE client header set + drops
+  `X-Requested-With` (parity with `applyRealmHeaders`).
+- **Single OAuth entry restored**: the v0.12.10 per-region login-page menus
+  (CN 登录 / Intl 登录) are removed per user feedback — the plugin is back to
+  one OAuth entry whose realm follows the `login_region` config dropdown
+  (STICKY). `startLoginWithRegion` stays as the pinned-region helper.
+- Global (workbuddy.ai) accounts unchanged: panel import only (no upstream
+  OAuth flow).
+
 ## 0.9.3
 
 ### Per-region self-serve login pages (repo v0.12.10)

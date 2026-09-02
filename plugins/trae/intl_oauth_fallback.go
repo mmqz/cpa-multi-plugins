@@ -137,14 +137,24 @@ func intldedupKeepOrder(values []string) []string {
 // {loginTraceID, login_trace_id} to every platform endpoint until one returns
 // a parseable LoginHost. (CN additionally degrades to a default host; Intl
 // surfaces the aggregated error, matching cockpit-tools.)
-func intlrequestLoginGuidance(cn bool, loginTraceID string) (loginHost string, lastErr error) {
+// intlLoginGuidanceProbeTimeout bounds each GetLoginGuidance endpoint probe.
+// 5s per endpoint (parity with the CN flow, v0.12.9): guidance runs
+// SYNCHRONOUSLY inside the browser-facing auth-url request — at 15s the
+// 3-endpoint fallback blocked up to 45s when the upstream is unreachable, and
+// the management UI's axios call died with ERR_NETWORK ("网络错误") long
+// before any response. Total failure degrades to the default Intl login host,
+// so a short timeout costs nothing but latency (v0.12.10: the CN flow got
+// this fix but INTL was missed — that is why INTL logins kept failing).
+var intlLoginGuidanceProbeTimeout = 5 * time.Second
+
+func intlrequestLoginGuidance(cn bool, loginTraceID string) (loginHost string, lastErr error) { //nolint:revive // cn kept for signature parity with requestLoginGuidance; INTL always passes false
 	endpoints := intlLoginGuidanceURLs
 	var errs []string
 	body, _ := json.Marshal(map[string]any{
 		"loginTraceID":   loginTraceID,
 		"login_trace_id": loginTraceID,
 	})
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: intlLoginGuidanceProbeTimeout}
 	for _, endpoint := range endpoints {
 		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
@@ -170,12 +180,13 @@ func intlrequestLoginGuidance(cn bool, loginTraceID string) (loginHost string, l
 		}
 		errs = append(errs, fmt.Sprintf("%s => response missing LoginHost (body=%s)", endpoint, intltruncate(string(raw), 120)))
 	}
-	if cn {
-		log.Printf("[Trae OAuth] login guidance failed (%s) — falling back to default login host %s",
-			strings.Join(errs, " | "), oauthDefaultHost)
-		return oauthDefaultHost, nil
-	}
-	return "", fmt.Errorf("login guidance failed: %s", strings.Join(errs, " | "))
+	// Total failure degrades to the default Intl login host instead of
+	// erroring out (cockpit-tools parity: CN does the same with its default).
+	// The guidance call is best-effort — its only job is picking the login
+	// page domain; the actual login happens in the user's browser.
+	log.Printf("[Trae OAuth] intl login guidance failed (%s) — falling back to default login host %s",
+		strings.Join(errs, " | "), intlOAuthDefaultHost)
+	return intlOAuthDefaultHost, nil
 }
 
 // intlexchangeTokenCandidates tries each candidate URL in turn for the auth-code

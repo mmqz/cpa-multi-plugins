@@ -132,7 +132,7 @@ const (
 )
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.12.9"
+var version = "0.12.10"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -743,9 +743,10 @@ func handleStartLogin(request []byte) ([]byte, error) {
 }
 
 // startLoginWithVariant starts a CN/SOLO login flow pinned to lv. The host
-// RPC entry (handleStartLogin) passes the configured login_variant; the
-// plugin-served per-region login pages pin their own variant so CN/SOLO/Intl
-// logins can run concurrently without touching the global config (v0.12.9).
+// RPC entry (handleStartLogin) passes the configured login_variant — the
+// OAuth entry point stays single per plugin; which variant it targets is
+// chosen in the plugin config (login_variant dropdown) and is STICKY
+// (v0.12.10).
 func startLoginWithVariant(request []byte, lv string) ([]byte, error) {
 	// Step 0: host login context. When CPA supplies BaseURL (its own
 	// management oauth-callback endpoint) the callback targets the plugin
