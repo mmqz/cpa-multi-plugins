@@ -132,7 +132,7 @@ const (
 )
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.12.10"
+var version = "0.12.11"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -447,7 +447,7 @@ func buildRegistration() registrationPayload {
 				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 09:00 local time (default true)."},
 				{Name: "login_variant", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "solo", "intl"}, Description: "Variant for NEW logins: cn (Trae Code CN, default), solo (Trae SOLO CN) or intl (Trae Intl, marscode.com). Existing accounts keep the variant recorded at login/adoption time."},
 				{Name: "callback_bind", Type: pluginapi.ConfigFieldTypeString, Description: "Bind address for the OAuth callback listener (default 127.0.0.1). Set 0.0.0.0 when CPA runs in Docker or on a remote host so the port can be published."},
-				{Name: "callback_public_host", Type: pluginapi.ConfigFieldTypeString, Description: "Host advertised in the OAuth redirect URL (default 127.0.0.1). Set to the server IP/hostname when the browser runs on a different machine."},
+				{Name: "callback_public_host", Type: pluginapi.ConfigFieldTypeString, Description: "Legacy/unused: trae authorization pages only accept http://127.0.0.1:<port>/authorize callbacks (client-side hard validation), so the advertised host is always 127.0.0.1 regardless of this setting."},
 				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily access-token refresh at 03:00 to prevent session expiry (default true)."},
 				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled."},
 			},
@@ -748,31 +748,32 @@ func handleStartLogin(request []byte) ([]byte, error) {
 // chosen in the plugin config (login_variant dropdown) and is STICKY
 // (v0.12.10).
 func startLoginWithVariant(request []byte, lv string) ([]byte, error) {
-	// Step 0: host login context. When CPA supplies BaseURL (its own
-	// management oauth-callback endpoint) the callback targets the plugin
-	// resource route on the SAME origin the user is already browsing —
-	// zero-config and reachable from local/LAN/docker deployments. The
-	// configured local listener stays as the stand-alone fallback.
+	// Step 0: host login context (AuthDir for auth-file persistence).
+	// The CPA-supplied BaseURL is NOT used for the callback any more: the
+	// trae authorization pages reject every callback that is not
+	// http://127.0.0.1:<port>/authorize (see Step 2).
 	host := parseLoginHostContext(request)
 
 	// Step 1: PKCE + login_trace_id.
 	loginTraceID := newLoginTraceID()
 	codeVerifier, codeChallenge := generatePKCEPair()
 
-	// Step 2: Callback URL.
-	var ln netListener
-	cbURL := resourceCallbackURL(host.BaseURL)
-	if cbURL == "" {
-		var err error
-		ln, err = netListen("tcp", loadedCallbackBind()+":0")
-		if err != nil {
-			return nil, fmt.Errorf("allocate callback port: %w", err)
-		}
-		port := ln.Addr().(*netTCPAddr).Port
-		// callback_public_host lets Docker/remote deployments advertise a host
-		// the user's browser can actually reach (v0.12.2).
-		cbURL = fmt.Sprintf("http://%s:%d/authorize", loadedCallbackPublicHost(), port)
+	// Step 2: Callback URL. The trae authorization pages (www.trae.cn AND
+	// www.trae.ai) hard-validate auth_callback_url client-side against
+	// /^http:\/\/127\.0\.0\.1:(\d+)\/authorize$/ — any other host or path
+	// renders the generic "登录失败/网络错误" screen BEFORE the login UI
+	// (verified against both live pages 2026-09-02: resource-route and LAN-host
+	// callbacks → error screen; 127.0.0.1/authorize → login UI renders).
+	// The host resource route and callback_public_host can therefore never
+	// produce an accepted callback: always bind the in-process loopback
+	// listener and advertise http://127.0.0.1:<port>/authorize (the official
+	// IDE and cockpit-tools use the identical shape).
+	ln, err := netListen("tcp", loadedCallbackBind()+":0")
+	if err != nil {
+		return nil, fmt.Errorf("allocate callback port: %w", err)
 	}
+	port := ln.Addr().(*netTCPAddr).Port
+	cbURL := fmt.Sprintf("http://127.0.0.1:%d/authorize", port)
 
 	// Step 3: POST GetLoginGuidance with multi-endpoint fallback
 	// (cockpit-tools request_login_guidance). CN tries api.trae.cn →
@@ -803,6 +804,19 @@ func startLoginWithVariant(request []byte, lv string) ([]byte, error) {
 		AppType:       oauthAppType,
 		CodeChallenge: codeChallenge,
 		HideSaasLogin: oauthHideSaasLoginFor(lv),
+	})
+
+	// Supersede any previous pending login (single pending-login slot per
+	// flow map — mirrors cockpit-tools' single PENDING_OAUTH_STATE slot):
+	// close the old callback listener so retries never accumulate listeners
+	// for the 15-minute login TTL. A superseded tab's poll hits the tested
+	// "unknown state — please restart login" path.
+	loginStates.Range(func(key, value any) bool {
+		if prev, ok := value.(*loginCtx); ok {
+			closeListener(prev.listener)
+		}
+		loginStates.Delete(key)
+		return true
 	})
 
 	// Step 6: Persist login state (state = login_trace_id).

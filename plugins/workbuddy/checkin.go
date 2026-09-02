@@ -313,6 +313,19 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
 		out["message"] = "already checked in today"
 		return out
 	}
+	if ciErr == nil && ci != nil && !ci.Active {
+		// No check-in plan upstream (intl/trial accounts etc.). Calling
+		// daily-checkin anyway would surface the raw business error
+		// "没有签到计划" to the panel, which reads like a failure
+		// (2026-09-02 user report). Surface a clean skip instead — mirrors
+		// cockpit-tools' "签到活动未开启或不适用" handling.
+		mergeCheckinCache(f.ID, ci)
+		out["success"] = false
+		out["skipped"] = true
+		out["reason"] = "inactive"
+		out["message"] = "该账号暂无签到计划（签到活动未开启或不适用）"
+		return out
+	}
 
 	res, err := performCheckinCall(sa)
 	if err != nil {
@@ -330,6 +343,15 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
 			out["success"] = true
 			out["skipped"] = true
 			out["reason"] = "already"
+		}
+		if strings.Contains(msg, "签到计划") || strings.Contains(low, "no checkin plan") ||
+			strings.Contains(low, "no check-in plan") {
+			// Upstream explicitly says there is no check-in plan for this
+			// account (intl/trial) — same presentation as the Active gate
+			// above so the panel never shows a raw business error.
+			out["skipped"] = true
+			out["reason"] = "inactive"
+			out["message"] = "该账号暂无签到计划（签到活动未开启或不适用）"
 		}
 	}
 	if _, ok := out["success"]; !ok {

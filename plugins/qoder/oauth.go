@@ -272,16 +272,30 @@ func handleStartLogin(raw []byte) ([]byte, error) {
 // (v0.12.10).
 func startLoginWithRegion(raw []byte, region string) ([]byte, error) {
 	verifier, challenge := makePKCE()
+	// nonce: intl protocol (cockpit-tools v1.3.36, aligned 2026-09-02)
+	// uses 32-hex uuid-simple; CN (cpa-plugin qoderwork reference) keeps
+	// the dashed uuid.
 	nonce := uuid.NewString()
+	if region == regionIntl {
+		nonce = strings.ReplaceAll(nonce, "-", "")
+	}
 	machineID := uuid.NewString()
 
 	q := url.Values{}
 	q.Set("challenge", challenge)
 	q.Set("challenge_method", "S256")
 	q.Set("nonce", nonce)
-	q.Set("machine_id", machineID)
-	q.Set("client_id", qoderClientIDFor(region))
 	q.Set("redirect_uri", qoderRedirectURIFor(region))
+	if region != regionIntl {
+		// CN (qoder.com.cn, qoderwork protocol): client_id + machine_id stay.
+		q.Set("client_id", qoderClientIDFor(region))
+		// intl (qoder.com): cockpit-tools v1.3.36 dropped client_id and
+		// machine_id from the device-login URL — the grant API now rejects
+		// the legacy pair with "Parameter invalid" after the user
+		// authorizes. Only nonce/challenge/challenge_method/redirect_uri
+		// are sent. CN keeps the qoderwork protocol.
+		q.Set("machine_id", machineID)
+	}
 	authURL := qoderWebsiteFor(region) + "/device/selectAccounts?" + q.Encode()
 
 	now := time.Now()

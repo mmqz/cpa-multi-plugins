@@ -424,22 +424,20 @@ func intlhandleStartLogin(request []byte) ([]byte, error) {
 	loginTraceID := newLoginTraceID()
 	codeVerifier, codeChallenge := generatePKCEPair()
 
-	// Step 2: Allocate local callback port. callback_bind/callback_public_host
-	// let Docker/remote deployments pick a reachable address (v0.12.3 parity
-	// with the CN/SOLO flow in main.go).
+	// Step 2: Allocate local callback port. The trae.ai authorization page
+	// enforces the same client-side callback rule as www.trae.cn (verified
+	// 2026-09-02: a LAN-host callback renders "Login Failed/Something went
+	// wrong", only http://127.0.0.1:<port>/authorize reaches the login UI),
+	// so callback_public_host cannot satisfy the page — always advertise the
+	// in-process loopback listener (v0.12.12; parity with main.go).
 	host := parseLoginHostContext(request)
 
-	var ln net.Listener
-	cbURL := resourceCallbackURL(host.BaseURL)
-	if cbURL == "" {
-		var err error
-		ln, err = net.Listen("tcp", loadedCallbackBind()+":0")
-		if err != nil {
-			return nil, fmt.Errorf("allocate callback port: %w", err)
-		}
-		port := ln.Addr().(*net.TCPAddr).Port
-		cbURL = fmt.Sprintf("http://%s:%d/authorize", loadedCallbackPublicHost(), port)
+	ln, err := net.Listen("tcp", loadedCallbackBind()+":0")
+	if err != nil {
+		return nil, fmt.Errorf("allocate callback port: %w", err)
 	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	cbURL := fmt.Sprintf("http://127.0.0.1:%d/authorize", port)
 
 	// Step 3: POST GetLoginGuidance with multi-endpoint fallback
 	// (cockpit-tools request_login_guidance). Intl tries api.marscode.com →
@@ -470,6 +468,17 @@ func intlhandleStartLogin(request []byte) ([]byte, error) {
 		AppType:       intlOauthAppType,
 		CodeChallenge: codeChallenge,
 		HideSaasLogin: false, // Intl non-SOLO does not hide SaaS login
+	})
+
+	// Supersede any previous pending intl login (single pending-login slot,
+	// mirrors cockpit-tools): close the old callback listener so retries
+	// never accumulate listeners for the login TTL.
+	intlloginStates.Range(func(key, value any) bool {
+		if prev, ok := value.(*intlloginCtx); ok {
+			closeListener(prev.listener)
+		}
+		intlloginStates.Delete(key)
+		return true
 	})
 
 	// Step 6: Store login state.
