@@ -1,0 +1,496 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/mmqz/cpa-multi-plugins/plugins/trae/auth"
+	intlupstream "github.com/mmqz/cpa-multi-plugins/plugins/trae/intlupstream"
+	cnupstream "github.com/mmqz/cpa-multi-plugins/plugins/trae/upstream"
+)
+
+// -----------------------------------------------------------------------------
+// v0.12.17: disk-persisted pending login + completed-outcome cache.
+//
+// Why: every in-flight login lives ONLY in process memory (loginStates /
+// intlloginStates). A docker restart, host upgrade or any process bounce
+// between "click 登录" and "paste the redirect URL" wipes the state and the
+// paste box answers the generic "unknown or expired login state" — reported
+// by the user as 回调未完成登录 / 粘贴链接也不行. The pending record is
+// persisted to <AuthDir>/.trae-pending-login.json at start-login and
+// transparently restored on the callback / submit / poll paths, so a paste
+// completes even after a restart. The file name is dot-prefixed so the
+// auth-file claim logic (adopt.go matches prefixes "trae-cn-", "trae-solo-cn-",
+// "trae-intl-") never mistakes it for a credential.
+// -----------------------------------------------------------------------------
+
+const pendingLoginFileName = ".trae-pending-login.json"
+
+// pendingLoginRecord is the serializable subset of loginCtx / intlloginCtx
+// needed to resume a login after a process restart. No listener is carried:
+// resource flows (the paste path) never need one.
+type pendingLoginRecord struct {
+	Flow          string `json:"flow"` // "cn" (cn+solo) | "intl"
+	State         string `json:"state"`
+	Variant       string `json:"variant,omitempty"`
+	LoginHost     string `json:"login_host,omitempty"`
+	CbURL         string `json:"cb_url,omitempty"`
+	CodeVerifier  string `json:"code_verifier"`
+	CodeChallenge string `json:"code_challenge,omitempty"`
+	DeviceID      string `json:"device_id"`
+	MachineID     string `json:"machine_id"`
+	AuthDir       string `json:"auth_dir"`
+	CreatedAt     int64  `json:"created_at"`
+	ExpiresAt     int64  `json:"expires_at"`
+}
+
+// authDirCache remembers the last host-provided AuthDir. The resource routes
+// (oauth_callback / oauth_submit) carry NO Host context in ManagementRequest,
+// so restore uses the most recent dir seen on any RPC that has one
+// (start / poll / parse / refresh). After a restart the host parses existing
+// credentials at boot, which re-warms the cache before the user can paste.
+var authDirCache struct {
+	sync.Mutex
+	dir string
+}
+
+func rememberAuthDir(dir string) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return
+	}
+	authDirCache.Lock()
+	authDirCache.dir = dir
+	authDirCache.Unlock()
+}
+
+// cachedAuthDir returns the remembered AuthDir, falling back to <cwd>/auths
+// (the CLIProxyAPI default layout) as a read-only best effort.
+func cachedAuthDir() string {
+	authDirCache.Lock()
+	dir := authDirCache.dir
+	authDirCache.Unlock()
+	if dir != "" {
+		return dir
+	}
+	if wd, err := os.Getwd(); err == nil {
+		cand := filepath.Join(wd, "auths")
+		if st, statErr := os.Stat(cand); statErr == nil && st.IsDir() {
+			return cand
+		}
+	}
+	return ""
+}
+
+// captureAuthDir extracts Host.AuthDir from any pluginapi RPC payload that
+// carries a HostConfigSummary and remembers it for the resource-route restore
+// path (ManagementRequest itself has no Host context).
+func captureAuthDir(request []byte) {
+	if len(request) == 0 {
+		return
+	}
+	var probe struct {
+		Host struct {
+			AuthDir string `json:"AuthDir"`
+		} `json:"Host"`
+	}
+	if err := json.Unmarshal(request, &probe); err == nil {
+		rememberAuthDir(probe.Host.AuthDir)
+		// Opportunistic sweep: an expired pending record that nobody ever
+		// pasted would otherwise linger in the auth dir (listed by the host
+		// as a type-less entry). loadPendingLogin removes it on read.
+		if dir := cachedAuthDir(); dir != "" {
+			loadPendingLogin(dir)
+		}
+	}
+}
+
+func pendingLoginPath(authDir string) string {
+	return filepath.Join(authDir, pendingLoginFileName)
+}
+
+func persistPendingLogin(rec pendingLoginRecord) {
+	dir := strings.TrimSpace(rec.AuthDir)
+	if dir == "" || rec.State == "" {
+		return
+	}
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(pendingLoginPath(dir), raw, 0o600)
+}
+
+func loadPendingLogin(authDir string) (pendingLoginRecord, bool) {
+	if strings.TrimSpace(authDir) == "" {
+		return pendingLoginRecord{}, false
+	}
+	raw, err := os.ReadFile(pendingLoginPath(authDir))
+	if err != nil {
+		return pendingLoginRecord{}, false
+	}
+	var rec pendingLoginRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return pendingLoginRecord{}, false
+	}
+	if rec.State == "" || time.Now().After(time.Unix(rec.ExpiresAt, 0)) {
+		_ = os.Remove(pendingLoginPath(authDir))
+		return pendingLoginRecord{}, false
+	}
+	return rec, true
+}
+
+func clearPendingLogin(authDir string) {
+	if strings.TrimSpace(authDir) == "" {
+		return
+	}
+	_ = os.Remove(pendingLoginPath(authDir))
+}
+
+// stateIsLive reports whether state is a live key in either login map.
+func stateIsLive(state string) bool {
+	if state == "" {
+		return false
+	}
+	if _, ok := loginStates.Load(state); ok {
+		return true
+	}
+	_, ok := intlloginStates.Load(state)
+	return ok
+}
+
+// restorePendingLoginState re-materializes a disk-persisted pending login into
+// the right in-memory map and returns its state key ("" when nothing restorable).
+// With a non-empty state it must match the record's own state — the PKCE pair
+// belongs to that login only, so cross-completing a DIFFERENT live login with a
+// stale URL is refused (the upstream ExchangeToken would reject it anyway).
+// With an empty state (URL carries no state/loginTraceID) the record is adopted
+// as the single pending login.
+func restorePendingLoginState(state string) string {
+	dir := cachedAuthDir()
+	if dir == "" {
+		return ""
+	}
+	rec, ok := loadPendingLogin(dir)
+	if !ok {
+		return ""
+	}
+	if state != "" && rec.State != state {
+		return ""
+	}
+	if stateIsLive(rec.State) {
+		return rec.State // already live — nothing to restore
+	}
+	expires := time.Unix(rec.ExpiresAt, 0)
+	switch rec.Flow {
+	case "intl":
+		intlloginStates.Store(rec.State, &intlloginCtx{
+			listener: nil, state: rec.State, cbURL: rec.CbURL, expires: expires,
+			loginTraceID: rec.State, codeVerifier: rec.CodeVerifier,
+			codeChallenge: rec.CodeChallenge, deviceID: rec.DeviceID,
+			machineID: rec.MachineID, loginHost: rec.LoginHost, authDir: dir,
+			restored: true,
+		})
+		return rec.State
+	default: // "cn" — cn + solo share the flow map
+		loginStates.Store(rec.State, &loginCtx{
+			listener: nil, variant: rec.Variant, state: rec.State, cbURL: rec.CbURL,
+			expires: expires, loginTraceID: rec.State, codeVerifier: rec.CodeVerifier,
+			codeChallenge: rec.CodeChallenge, deviceID: rec.DeviceID,
+			machineID: rec.MachineID, authDir: dir,
+			restored: true,
+		})
+		return rec.State
+	}
+}
+
+// -----------------------------------------------------------------------------
+// completed-outcome cache: a paste arriving after the login already finished
+// (auto-callback succeeded, or the panel poll drained the state between two
+// pastes) used to get a confusing "unknown or expired login state". Recent
+// outcomes are remembered so a re-paste answers "already completed" (success)
+// or the original error instead.
+// -----------------------------------------------------------------------------
+
+const loginOutcomeTTL = 10 * time.Minute
+
+type loginOutcome struct {
+	ok  bool
+	msg string
+	at  time.Time
+}
+
+var outcomeCache struct {
+	sync.Mutex
+	m map[string]loginOutcome
+}
+
+func recordLoginOutcome(state string, ok bool, msg string) {
+	if state == "" {
+		return
+	}
+	outcomeCache.Lock()
+	if outcomeCache.m == nil {
+		outcomeCache.m = make(map[string]loginOutcome)
+	}
+	outcomeCache.m[state] = loginOutcome{ok: ok, msg: msg, at: time.Now()}
+	outcomeCache.Unlock()
+}
+
+func lookupLoginOutcome(state string) (loginOutcome, bool) {
+	if state == "" {
+		return loginOutcome{}, false
+	}
+	outcomeCache.Lock()
+	defer outcomeCache.Unlock()
+	o, ok := outcomeCache.m[state]
+	if !ok {
+		return loginOutcome{}, false
+	}
+	if time.Since(o.at) > loginOutcomeTTL {
+		delete(outcomeCache.m, state)
+		return loginOutcome{}, false
+	}
+	return o, true
+}
+
+// -----------------------------------------------------------------------------
+// v0.12.17: self-completion for RESTORED pending logins. After a host restart
+// the host's own oauth-session registry is empty, so get-auth-status answers
+// "unknown or expired state" and never reaches the plugin's PollLogin — the
+// paste would complete the callback but the credential would never be saved.
+// Restored logins therefore finish inside the plugin: ExchangeToken +
+// GetUserInfo, write the credential file straight into AuthDir (the host
+// watcher claims it, same as a manual import), register in the pool and clean
+// up. Non-restored logins keep the host-poll path (single completion point).
+// -----------------------------------------------------------------------------
+
+// selfCompleteRestoredCN finishes a restored cn/solo login in-process.
+func selfCompleteRestoredCN(lc *loginCtx) {
+	state := lc.state
+	fail := func(msg string) {
+		recordLoginOutcome(state, false, msg)
+		clearPendingLogin(lc.authDir)
+		loginStates.Delete(state)
+		log.Printf("trae self-complete (restored, %s) failed: %s", state, msg)
+	}
+	if lc.authCode == "" && lc.refreshToken == "" {
+		fail("no authCode/refreshToken after restore")
+		return
+	}
+	var accessToken, refreshToken string
+	var expiresAt int64
+	if lc.refreshToken != "" {
+		a := &auth.Auth{
+			RefreshToken: lc.refreshToken,
+			APIHost:      oauthDefaultHost,
+			Domain:       "trae.cn",
+			MachineID:    lc.machineID,
+			DeviceID:     lc.deviceID,
+		}
+		if err := upstreamClient.RefreshToken(a); err != nil {
+			accessToken, refreshToken = lc.refreshToken, lc.refreshToken
+		} else {
+			accessToken, refreshToken, expiresAt = a.AccessToken, a.RefreshToken, a.ExpiresAt
+		}
+	} else {
+		di := buildOfficialDeviceInfo(
+			lc.deviceID, lc.machineID, oauthPlatformCodeFor(lc.variant), oauthDeviceName,
+			oauthDeviceBrand, cnupstream.IdeVersion, oauthDeviceType, oauthOSVersion,
+		)
+		tokenBody := map[string]any{
+			"ClientID":     cnupstream.ClientIDFor(lc.variant),
+			"AuthCode":     lc.authCode,
+			"CodeVerifier": lc.codeVerifier,
+			"DeviceInfo":   di,
+			"IDEVersion":   cnupstream.IdeVersion,
+		}
+		bodyBytes, _ := json.Marshal(tokenBody)
+		tokenRaw, exErr := exchangeTokenCandidates(
+			buildAPIURLs(lc.loginHost, "/trae/api/v3/oauth/ExchangeToken", true), bodyBytes)
+		if exErr != nil {
+			fail(exErr.Error())
+			return
+		}
+		accessToken, refreshToken, expiresAt = parseExchangeTokenResponse(tokenRaw)
+		if accessToken == "" && refreshToken == "" {
+			fail("ExchangeToken: no token in response")
+			return
+		}
+		if accessToken == "" {
+			accessToken = refreshToken
+		}
+	}
+	a := &auth.Auth{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		ExpiresAt:    expiresAt,
+		APIHost:      oauthDefaultHost,
+		Domain:       "trae.cn",
+		MachineID:    lc.machineID,
+		DeviceID:     lc.deviceID,
+		Variant:      lc.variant,
+	}
+	uid, nickname, entID, err := upstreamClient.GetUserInfo(a)
+	if err != nil {
+		log.Printf("trae self-complete GetUserInfo: %v — proceeding", err)
+	}
+	if strings.TrimSpace(uid) == "" {
+		uid = lc.loginTraceID // avoid a nameless trae-.json credential file
+	}
+	a.UID = uid
+	a.Nickname = nickname
+	a.EnterpriseID = entID
+	storageJSON, _ := json.MarshalIndent(map[string]any{
+		"type":     providerName,
+		"provider": providerName,
+		"auth": map[string]any{
+			"accessToken":  a.AccessToken,
+			"refreshToken": a.RefreshToken,
+			"expiresAt":    a.ExpiresAt,
+			"domain":       a.Domain,
+			"apiHost":      a.APIHost,
+			"machineId":    a.MachineID,
+			"deviceId":     a.DeviceID,
+			"variant":      a.Variant,
+		},
+		"account": map[string]any{
+			"uid":          a.UID,
+			"enterpriseId": a.EnterpriseID,
+			"nickname":     a.Nickname,
+		},
+		"disabled": false,
+	}, "", "  ")
+	fileName := fmt.Sprintf("%s-%s.json", providerName, uid)
+	if lc.authDir == "" {
+		fail("no AuthDir to write the credential file")
+		return
+	}
+	if err := os.WriteFile(filepath.Join(lc.authDir, fileName), storageJSON, 0o600); err != nil {
+		fail("write credential file: " + err.Error())
+		return
+	}
+	accountPool.Add(a)
+	recordLoginOutcome(state, true, "")
+	clearPendingLogin(lc.authDir)
+	loginStates.Delete(state)
+	log.Printf("trae self-complete (restored): saved %s (uid=%s)", fileName, uid)
+}
+
+// selfCompleteRestoredIntl finishes a restored intl login in-process.
+func selfCompleteRestoredIntl(lc *intlloginCtx) {
+	state := lc.state
+	fail := func(msg string) {
+		recordLoginOutcome(state, false, msg)
+		clearPendingLogin(lc.authDir)
+		intlloginStates.Delete(state)
+		log.Printf("trae-intl self-complete (restored, %s) failed: %s", state, msg)
+	}
+	if lc.authCode == "" {
+		fail("no authCode after restore")
+		return
+	}
+	di := intlbuildOfficialDeviceInfo(
+		lc.deviceID, lc.machineID, oauthPlatformCode, intlOauthDeviceName,
+		intlOauthDeviceBrand, oauthAppVersion, intlOauthDeviceType, intlOauthOSVersion,
+	)
+	tokenBody := map[string]any{
+		"ClientID":     intlupstreamClient.ClientID,
+		"AuthCode":     lc.authCode,
+		"CodeVerifier": lc.codeVerifier,
+		"DeviceInfo":   di,
+		"IDEVersion":   oauthAppVersion,
+	}
+	tokenBytes, _ := json.Marshal(tokenBody)
+	tokenRaw, exErr := intlexchangeTokenCandidates(
+		intlbuildAPIURLs(lc.loginHost, "/trae/api/v3/oauth/ExchangeToken", false), tokenBytes)
+	if exErr != nil {
+		fail(exErr.Error())
+		return
+	}
+	var tokenEnv struct {
+		Result struct {
+			Token           string `json:"Token"`
+			AccessToken     string `json:"AccessToken"`
+			TokenExpireAt   int64  `json:"TokenExpireAt"`
+			RefreshToken    string `json:"RefreshToken"`
+			RefreshExpireAt int64  `json:"RefreshExpireAt"`
+		} `json:"Result"`
+	}
+	if err := json.Unmarshal(tokenRaw, &tokenEnv); err != nil {
+		fail(fmt.Sprintf("parse ExchangeToken: %v", err))
+		return
+	}
+	if tokenEnv.Result.AccessToken != "" && tokenEnv.Result.Token == "" {
+		tokenEnv.Result.Token = tokenEnv.Result.AccessToken
+	}
+	if tokenEnv.Result.Token == "" && tokenEnv.Result.RefreshToken == "" {
+		fail("ExchangeToken: no token in response")
+		return
+	}
+	a := &intlupstream.Auth{
+		AccessToken:  tokenEnv.Result.Token,
+		RefreshToken: tokenEnv.Result.RefreshToken,
+		ExpiresAt:    intlnormalizeExpiresAt(tokenEnv.Result.TokenExpireAt),
+		APIHost:      intlupstreamClient.OAuthHost,
+		Domain:       "trae.ai",
+		Region:       "US-East",
+		Scope:        "marscode-us",
+		Tenant:       "marscode",
+		UserIdentity: "Free",
+		AppLanguage:  "en",
+		AppVersion:   "1.0.0.1229",
+	}
+	uid, nickname, entID, err := intlupstreamClient.GetUserInfo(a)
+	if err != nil {
+		log.Printf("trae-intl self-complete GetUserInfo: %v — proceeding", err)
+	}
+	if strings.TrimSpace(uid) == "" {
+		uid = lc.loginTraceID
+	}
+	a.UID = uid
+	a.Nickname = nickname
+	a.EnterpriseID = entID
+	storageJSON, _ := json.MarshalIndent(map[string]any{
+		"type":     intlproviderName,
+		"provider": intlproviderName,
+		"auth": map[string]any{
+			"accessToken":  a.AccessToken,
+			"refreshToken": a.RefreshToken,
+			"expiresAt":    a.ExpiresAt,
+			"domain":       a.Domain,
+			"apiHost":      a.APIHost,
+			"variant":      "intl",
+			"region":       a.Region,
+			"scope":        a.Scope,
+			"tenant":       a.Tenant,
+			"appLanguage":  a.AppLanguage,
+			"appVersion":   a.AppVersion,
+		},
+		"account": map[string]any{
+			"uid":          a.UID,
+			"enterpriseId": a.EnterpriseID,
+			"nickname":     a.Nickname,
+		},
+		"disabled": false,
+	}, "", "  ")
+	fileName := fmt.Sprintf("%s-%s.json", intlproviderName, uid)
+	if lc.authDir == "" {
+		fail("no AuthDir to write the credential file")
+		return
+	}
+	if err := os.WriteFile(filepath.Join(lc.authDir, fileName), storageJSON, 0o600); err != nil {
+		fail("write credential file: " + err.Error())
+		return
+	}
+	recordLoginOutcome(state, true, "")
+	clearPendingLogin(lc.authDir)
+	intlloginStates.Delete(state)
+	log.Printf("trae-intl self-complete (restored): saved %s (uid=%s)", fileName, uid)
+}

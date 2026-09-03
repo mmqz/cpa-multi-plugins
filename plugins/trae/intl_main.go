@@ -501,6 +501,22 @@ func intlhandleStartLogin(request []byte) ([]byte, error) {
 		machineID:     machineID,
 	})
 
+	// v0.12.17: disk-persisted pending login — the paste box keeps working
+	// across host restarts / docker bounce (same contract as the cn flow).
+	persistPendingLogin(pendingLoginRecord{
+		Flow:          "intl",
+		State:         loginTraceID,
+		LoginHost:     loginHost,
+		CbURL:         cbURL,
+		CodeVerifier:  codeVerifier,
+		CodeChallenge: codeChallenge,
+		DeviceID:      deviceID,
+		MachineID:     machineID,
+		AuthDir:       host.AuthDir,
+		CreatedAt:     time.Now().Unix(),
+		ExpiresAt:     time.Now().Add(loginTTL).Unix(),
+	})
+
 	if ln != nil {
 		go intlacceptCallback(loginTraceID)
 	}
@@ -510,11 +526,12 @@ func intlhandleStartLogin(request []byte) ([]byte, error) {
 		URL:       verificationURI,
 		State:     loginTraceID,
 		ExpiresAt: time.Now().Add(loginTTL).UTC(),
-		Metadata:  map[string]any{"logo": pluginLogoURL, "callback_url": cbURL, "fallback_callback_path": resourceCallbackPath, "fallback_submit_path": resourceCallbackPath + "_submit"},
+		Metadata:  map[string]any{"logo": pluginLogoURL, "callback_url": cbURL, "fallback_callback_path": resourceCallbackPath, "fallback_submit_path": resourceSubmitPath},
 	})
 }
 
 func intlhandlePollLogin(request []byte) ([]byte, error) {
+	captureAuthDir(request) // v0.12.17: keep the restore-path AuthDir warm
 	var req pluginapi.AuthLoginPollRequest
 	if err := json.Unmarshal(request, &req); err != nil {
 		return nil, err
@@ -525,10 +542,19 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 	}
 	v, ok := intlloginStates.Load(state)
 	if !ok {
+		// v0.12.17: process bounced since start-login — re-materialize the
+		// disk-persisted pending login so the paste still completes.
+		if s := restorePendingLoginState(state); s != "" {
+			v, ok = intlloginStates.Load(s)
+		}
+	}
+	if !ok {
 		return nil, fmt.Errorf("poll: unknown state — please restart login")
 	}
 	lc := v.(*intlloginCtx)
 	if time.Now().After(lc.expires) {
+		recordLoginOutcome(state, false, "login expired (15 min timeout)")
+		clearPendingLogin(lc.authDir)
 		intlloginStates.Delete(state)
 		closeListener(lc.listener)
 		return nil, fmt.Errorf("poll: login expired (15 min timeout) — please re-initiate")
@@ -558,6 +584,8 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 		}
 	}
 	if lc.err != nil {
+		recordLoginOutcome(state, false, lc.err.Error())
+		clearPendingLogin(lc.authDir)
 		intlloginStates.Delete(state)
 		closeListener(lc.listener)
 		return okEnvelope(pluginapi.AuthLoginPollResponse{
@@ -566,6 +594,8 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 		})
 	}
 	if lc.authCode == "" {
+		recordLoginOutcome(state, false, "login completed but no authCode received")
+		clearPendingLogin(lc.authDir)
 		intlloginStates.Delete(state)
 		closeListener(lc.listener)
 		return okEnvelope(pluginapi.AuthLoginPollResponse{
@@ -594,6 +624,8 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 	tokenRaw, exErr := intlexchangeTokenCandidates(
 		intlbuildAPIURLs(lc.loginHost, "/trae/api/v3/oauth/ExchangeToken", false), tokenBytes)
 	if exErr != nil {
+		recordLoginOutcome(state, false, exErr.Error())
+		clearPendingLogin(lc.authDir)
 		intlloginStates.Delete(state)
 		closeListener(lc.listener)
 		return okEnvelope(pluginapi.AuthLoginPollResponse{
@@ -611,6 +643,8 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 		} `json:"Result"`
 	}
 	if err := json.Unmarshal(tokenRaw, &tokenEnv); err != nil {
+		recordLoginOutcome(state, false, fmt.Sprintf("parse ExchangeToken: %v", err))
+		clearPendingLogin(lc.authDir)
 		intlloginStates.Delete(state)
 		closeListener(lc.listener)
 		return okEnvelope(pluginapi.AuthLoginPollResponse{
@@ -664,6 +698,8 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 		},
 		"disabled": false,
 	}, "", "  ")
+	recordLoginOutcome(state, true, "")
+	clearPendingLogin(lc.authDir)
 	intlloginStates.Delete(state)
 	closeListener(lc.listener)
 	return okEnvelope(pluginapi.AuthLoginPollResponse{
@@ -962,6 +998,8 @@ type intlloginCtx struct {
 
 	// authDir: host auth dir for the .oauth callback-file fallback.
 	authDir string
+	// restored: re-materialized from the disk pending record (v0.12.17).
+	restored bool
 	// doneOnce guards done for the resource-callback completion path.
 	doneOnce sync.Once
 }

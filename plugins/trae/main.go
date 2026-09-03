@@ -649,6 +649,8 @@ func isOurDeclaredType(t string) bool {
 }
 
 func handleParseAuth(request []byte) ([]byte, error) {
+        captureAuthDir(request) // v0.12.17: restore-path AuthDir warm after restart
+
         // v0.12.4 fix: the host wire format is pluginapi.AuthParseRequest —
         // {"Provider":...,"FileName":...,"RawJSON":"<base64>"} ([]byte fields
         // are base64-encoded strings; encoding/json never equates StorageJSON
@@ -837,10 +839,30 @@ func startLoginWithVariant(request []byte, lv string) ([]byte, error) {
 
         // Step 7: accept loop only for the local-listener flow; resource
         // flows are completed by the CPA resource route / .oauth file.
+        // v0.12.17: survive restarts between click-登录 and paste — the
+        // pending login (PKCE pair + device ids) lands on disk next to the
+        // credentials; restorePendingLoginState re-materializes it after a
+        // process bounce. Dot-prefixed so the credential claim logic in
+        // adopt.go never mistakes it for a credential.
+        persistPendingLogin(pendingLoginRecord{
+                Flow:          "cn",
+                State:         state,
+                Variant:       lv,
+                LoginHost:     loginHost,
+                CbURL:         cbURL,
+                CodeVerifier:  codeVerifier,
+                CodeChallenge: codeChallenge,
+                DeviceID:      deviceID,
+                MachineID:     machineID,
+                AuthDir:       host.AuthDir,
+                CreatedAt:     time.Now().Unix(),
+                ExpiresAt:     time.Now().Add(loginTTL).Unix(),
+        })
+
         if ln != nil {
                 go acceptCallback(state)
         }
-        log.Printf("trae start-login (%s): callback=%s — if the browser cannot reach it (Docker without the port published / remote host), paste the full address-bar URL into the paste box on <panel>/v0/resource/plugins/trae/panel, or POST it as {\"url\":...} to <panel>%s_submit (state=%s)", lv, cbURL, resourceCallbackPath, state)
+        log.Printf("trae start-login (%s): callback=%s — if the browser cannot reach it (Docker without the port published / remote host), paste the full address-bar URL into the paste box on <panel>/v0/resource/plugins/trae/panel, or POST it as {\"url\":...} to <panel>%s (state=%s)", lv, cbURL, resourceSubmitPath, state)
 
         return okEnvelope(pluginapi.AuthLoginStartResponse{
                 Provider:  providerName,
@@ -874,6 +896,10 @@ type loginCtx struct {
         // authDir: host-provided auth dir (auth.login.start) enabling the
         // .oauth callback-file fallback for resource-callback flows.
         authDir string
+        // restored: the ctx was re-materialized from the disk pending record
+        // (v0.12.17) after a process bounce — the host poll channel is dead
+        // for it, so the callback completes the login in-process instead.
+        restored bool
         // doneOnce guards done for the resource-callback completion path.
         doneOnce sync.Once
 
@@ -1048,6 +1074,7 @@ func writeCallbackStatus(w io.Writer, status string) {
 //  7. Call GetUserInfo for UID/nickname/enterpriseID.
 //  8. Build storage JSON and return AuthLoginStatusSuccess.
 func handlePollLogin(request []byte) ([]byte, error) {
+        captureAuthDir(request) // v0.12.17: keep the restore-path AuthDir warm
         var req pluginapi.AuthLoginPollRequest
         if err := json.Unmarshal(request, &req); err != nil {
                 return nil, err
@@ -1058,10 +1085,19 @@ func handlePollLogin(request []byte) ([]byte, error) {
         }
         v, ok := loginStates.Load(state)
         if !ok {
+                // v0.12.17: process bounced since start-login — re-materialize
+                // the disk-persisted pending login so the paste still completes.
+                if s := restorePendingLoginState(state); s != "" {
+                        v, ok = loginStates.Load(s)
+                }
+        }
+        if !ok {
                 return nil, fmt.Errorf("poll: unknown state — please restart login")
         }
         lc := v.(*loginCtx)
         if time.Now().After(lc.expires) {
+                recordLoginOutcome(state, false, "login expired (15 min timeout)")
+                clearPendingLogin(lc.authDir)
                 loginStates.Delete(state)
                 closeListener(lc.listener)
                 return nil, fmt.Errorf("poll: login expired (15 min timeout) — please re-initiate")
@@ -1099,6 +1135,8 @@ func handlePollLogin(request []byte) ([]byte, error) {
 
         // fail is a helper that cleans up the login state and returns an error envelope.
         fail := func(msg string) ([]byte, error) {
+                recordLoginOutcome(state, false, msg)
+                clearPendingLogin(lc.authDir)
                 loginStates.Delete(state)
                 closeListener(lc.listener)
                 raw, _ := okEnvelope(pluginapi.AuthLoginPollResponse{
@@ -1229,7 +1267,9 @@ func handlePollLogin(request []byte) ([]byte, error) {
         // Register in pool.
         accountPool.Add(a)
 
-        // Cleanup login state.
+        // Cleanup login state (+ v0.12.17: outcome cache & pending-file clear).
+        recordLoginOutcome(state, true, "")
+        clearPendingLogin(lc.authDir)
         loginStates.Delete(state)
         closeListener(lc.listener)
 
@@ -1497,6 +1537,8 @@ func toInt64(v any) (int64, bool) {
 }
 
 func handleRefreshAuth(request []byte) ([]byte, error) {
+        captureAuthDir(request) // v0.12.17: restore-path AuthDir warm
+
         var req pluginapi.AuthRefreshRequest
         if err := json.Unmarshal(request, &req); err != nil {
                 return nil, err
