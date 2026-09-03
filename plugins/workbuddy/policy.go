@@ -141,10 +141,11 @@ func shouldReenableCN(disabled bool, cr *creditsSummary) bool {
 
 // displayNote builds a one-line note for CPAMP Auth cards.
 func displayNote(sa *storedAuth, cr *creditsSummary, disabled bool) string {
-	region := strings.ToUpper(accountRegion(sa))
-	if region == "CN" {
-		region = "CN"
-	} else {
+	region := "CN"
+	switch accountRegion(sa) {
+	case "intl":
+		region = "INTL"
+	case "global":
 		region = "Global"
 	}
 	parts := []string{region}
@@ -179,7 +180,10 @@ func labelForAuth(sa *storedAuth) string {
 		base = strings.TrimSpace(sa.Account.Nickname)
 	}
 	tag := "CN"
-	if accountRegion(sa) == "global" {
+	switch accountRegion(sa) {
+	case "intl":
+		tag = "Intl"
+	case "global":
 		tag = "Global"
 	}
 	return base + " [" + tag + "]"

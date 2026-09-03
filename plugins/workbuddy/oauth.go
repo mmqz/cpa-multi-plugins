@@ -223,6 +223,10 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 	if lc.region == regionIntl && strings.TrimSpace(sa.Auth.Domain) == "" {
 		sa.Auth.Domain = "codebuddy.ai"
 	}
+	// Pin the region explicitly (v0.12.15): credential-manager notes and
+	// labels resolve via accountRegion; domain sniffing is only a legacy
+	// fallback. Global accounts never go through login (panel import).
+	sa.Auth.Region = lc.region
 	loginStates.Delete(state)
 	return okEnvelope(pluginapi.AuthLoginPollResponse{
 		Status: pluginapi.AuthLoginStatusSuccess,

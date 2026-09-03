@@ -83,8 +83,27 @@ func applyRealmHeaders(req *http.Request, sa *storedAuth) {
 // accountRegion returns "cn" or "global" based on the auth's domain field.
 // Empty domain (legacy auth files) defaults to "cn" for backward compat.
 func accountRegion(sa *storedAuth) string {
-	if sa != nil && isGlobalDomain(sa.Auth.Domain) {
-		return "global"
+	if sa != nil {
+		// Explicit region wins (written by login + import adoption).
+		switch strings.ToLower(strings.TrimSpace(sa.Auth.Region)) {
+		case "intl":
+			return "intl"
+		case "global":
+			return "global"
+		case "cn":
+			return "cn"
+		}
+		// Legacy files: domain sniff. codebuddy.ai is the Intl IDE realm
+		// (merged codebuddy-intl plugin) — it is NOT workbuddy.ai Global
+		// and must not fall into the CN default (v0.12.15 fix: Intl
+		// credentials surfaced as "CN" in the credential manager).
+		d := strings.ToLower(strings.TrimSpace(sa.Auth.Domain))
+		if isGlobalDomain(d) {
+			return "global"
+		}
+		if d == "codebuddy.ai" || strings.HasSuffix(d, ".codebuddy.ai") {
+			return "intl"
+		}
 	}
 	return "cn"
 }

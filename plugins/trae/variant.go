@@ -57,6 +57,22 @@ func oauthHideSaasLoginFor(variant string) bool {
 	return variant == variantSolo
 }
 
+// authNote builds the one-line note surfaced on host credential cards
+// (workbuddy/qoder parity): the variant tag makes cn/solo/intl accounts
+// distinguishable in the credential manager without opening the file.
+// The INTL chain (intl_main.go) pins its note directly — its accounts are
+// intl by construction regardless of the parsed Variant field.
+func authNote(variant string) string {
+	switch strings.ToLower(strings.TrimSpace(variant)) {
+	case variantSolo:
+		return "SOLO"
+	case variantIntl:
+		return "INTL"
+	default:
+		return "CN"
+	}
+}
+
 // variantLabel returns a human label for auth card fallbacks.
 func variantLabel(variant string) string {
 	switch variant {

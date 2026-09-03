@@ -414,7 +414,7 @@ func intlhandleParseAuth(request []byte) ([]byte, error) {
 			FileName:    intlnonEmpty(req.FileName, intlauthFileName),
 			Label:       intlnonEmpty(a.Nickname, "Trae Intl "+a.UID),
 			StorageJSON: payload,
-			Metadata:    map[string]any{"type": intlproviderName, "uid": a.UID},
+			Metadata:    map[string]any{"type": intlproviderName, "uid": a.UID, "note": "INTL"},
 		},
 	})
 }
@@ -676,7 +676,7 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 			FileName:    fmt.Sprintf("%s-%s.json", intlproviderName, a.UID),
 			Label:       intlnonEmpty(a.Nickname, "Trae Intl "+a.UID),
 			StorageJSON: storageJSON,
-			Metadata:    map[string]any{"type": intlproviderName, "uid": a.UID, "nickname": a.Nickname},
+			Metadata:    map[string]any{"type": intlproviderName, "uid": a.UID, "nickname": a.Nickname, "note": "INTL"},
 		},
 	})
 }
@@ -724,7 +724,7 @@ func intlhandleRefreshAuth(request []byte) ([]byte, error) {
 			FileName:    fmt.Sprintf("%s-%s.json", intlproviderName, a.UID),
 			Label:       intlnonEmpty(a.Nickname, "Trae Intl "+a.UID),
 			StorageJSON: storageJSON,
-			Metadata:    map[string]any{"type": intlproviderName, "uid": a.UID},
+			Metadata:    map[string]any{"type": intlproviderName, "uid": a.UID, "note": "INTL"},
 		},
 		NextRefreshAfter: time.Now().Add(12 * time.Hour).UTC(),
 	})

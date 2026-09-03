@@ -429,6 +429,10 @@ type storedTokens struct {
 	// (workbuddy login) or "ide" (CodeBuddy IDE login). Empty means legacy
 	// CLI-style (no X-IDE-* headers), matching historical workbuddy files.
 	LoginPlatform string `json:"loginPlatform,omitempty"`
+	// Region records which realm produced the token: "cn" (copilot.tencent.com),
+	// "intl" (codebuddy.ai IDE client) or "global" (workbuddy.ai panel import).
+	// Empty = legacy file — accountRegion falls back to domain sniffing.
+	Region string `json:"region,omitempty"`
 }
 
 type storedAccount struct {
