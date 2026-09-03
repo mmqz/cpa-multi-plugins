@@ -1002,6 +1002,9 @@ type intlloginCtx struct {
 	restored bool
 	// doneOnce guards done for the resource-callback completion path.
 	doneOnce sync.Once
+	// selfOnce guards the v0.12.23 grace-based self-completion spawn:
+	// exactly one selfCompleteIntlAfterGrace goroutine per login.
+	selfOnce sync.Once
 }
 
 // intlacceptCallback accepts OAuth callback GET /authorize?... requests until

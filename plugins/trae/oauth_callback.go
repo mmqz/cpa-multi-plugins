@@ -303,10 +303,7 @@ func handleOAuthCallbackResource(req pluginapi.ManagementRequest) []byte {
                         }
                         return callbackResultHTML("Login failed", lc.err.Error())
                 }
-                if lc.restored {
-                        lc.restored = false // spawn once per restored login
-                        go selfCompleteRestoredCN(lc)
-                }
+                spawnSelfCompleteCN(lc) // v0.12.23: restored → immediate; live → self-complete after the grace window
                 return callbackResultHTML("Login successful", "You can close this window now.")
         }
         // Intl flow.
@@ -330,10 +327,7 @@ func handleOAuthCallbackResource(req pluginapi.ManagementRequest) []byte {
                         }
                         return callbackResultHTML("Login failed", lc.err.Error())
                 }
-                if lc.restored {
-                        lc.restored = false // spawn once per restored login
-                        go selfCompleteRestoredIntl(lc)
-                }
+                spawnSelfCompleteIntl(lc) // v0.12.23: restored → immediate; live → self-complete after the grace window
                 return callbackResultHTML("Login successful", "You can close this window now.")
         }
         // v0.12.17: the login already finished (panel poll drained the state, or

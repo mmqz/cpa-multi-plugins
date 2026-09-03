@@ -36,6 +36,71 @@ import (
 
 const pendingLoginFileName = ".trae-pending-login.json"
 
+// loginSelfCompleteGrace is the window a LIVE (non-restored) login gives the
+// host's auth.login.poll to consume the completed callback before the plugin
+// finishes the login itself (v0.12.23). Var (not const) so tests can shrink it.
+var loginSelfCompleteGrace = 15 * time.Second
+
+// spawnSelfCompleteCN arms the one-shot self-completion goroutine for a cn/solo
+// login whose callback was just accepted (paste box or browser redirect hit).
+// The grace window is snapshotted HERE, in the caller's goroutine, so the
+// spawned goroutine never re-reads the (test-mutable) global.
+func spawnSelfCompleteCN(lc *loginCtx) {
+	lc.selfOnce.Do(func() {
+		grace := loginSelfCompleteGrace
+		go selfCompleteCNAfterGrace(lc, grace)
+	})
+}
+
+// selfCompleteCNAfterGrace finishes a cn/solo login in-process. Restored
+// logins complete immediately: the host poll channel died with the old
+// process, so nobody else can drain the state (v0.12.17 behavior).
+//
+// Live logins (v0.12.23) first give the host poll a grace window — while the
+// CPA login dialog stays open its poll consumes the state within seconds and
+// saves the credential through the normal host path. But if the dialog was
+// closed / the page navigated away / the host poll loop ended, nobody would
+// ever drain the captured authCode: the login silently stalled at
+// "回调已收到，正在交换凭证" until the 15-minute TTL with no credential —
+// the reported "提交了链接仍然不生成凭证". After the grace, LoadAndDelete
+// claims exclusive ownership: a win means no poll consumed the state and the
+// plugin exchanges + writes the credential file itself; a loss means the host
+// path already finished the login and there is nothing to do.
+func selfCompleteCNAfterGrace(lc *loginCtx, grace time.Duration) {
+	if lc.restored {
+		lc.restored = false // spawn once per restored login
+		selfCompleteCN(lc, "restored")
+		return
+	}
+	time.Sleep(grace)
+	if _, owned := loginStates.LoadAndDelete(lc.state); !owned {
+		return // host poll consumed (or janitor reaped) the state first
+	}
+	selfCompleteCN(lc, "grace")
+}
+
+// spawnSelfCompleteIntl is the intl counterpart of spawnSelfCompleteCN.
+func spawnSelfCompleteIntl(lc *intlloginCtx) {
+	lc.selfOnce.Do(func() {
+		grace := loginSelfCompleteGrace
+		go selfCompleteIntlAfterGrace(lc, grace)
+	})
+}
+
+// selfCompleteIntlAfterGrace is the intl counterpart of selfCompleteCNAfterGrace.
+func selfCompleteIntlAfterGrace(lc *intlloginCtx, grace time.Duration) {
+	if lc.restored {
+		lc.restored = false // spawn once per restored login
+		selfCompleteIntl(lc, "restored")
+		return
+	}
+	time.Sleep(grace)
+	if _, owned := intlloginStates.LoadAndDelete(lc.state); !owned {
+		return // host poll consumed (or janitor reaped) the state first
+	}
+	selfCompleteIntl(lc, "grace")
+}
+
 // pendingLoginRecord is the serializable subset of loginCtx / intlloginCtx
 // needed to resume a login after a process restart. No listener is carried:
 // resource flows (the paste path) never need one.
@@ -275,14 +340,17 @@ func lookupLoginOutcome(state string) (loginOutcome, bool) {
 // up. Non-restored logins keep the host-poll path (single completion point).
 // -----------------------------------------------------------------------------
 
-// selfCompleteRestoredCN finishes a restored cn/solo login in-process.
-func selfCompleteRestoredCN(lc *loginCtx) {
+// selfCompleteCN finishes a cn/solo login in-process (exchange + GetUserInfo
+// + credential file write). source tags the trigger path in logs/outcomes:
+// "restored" (post-restart paste) or "grace" (live login the host poll never
+// claimed within loginSelfCompleteGrace — v0.12.23).
+func selfCompleteCN(lc *loginCtx, source string) {
 	state := lc.state
 	fail := func(msg string) {
 		recordLoginOutcome(state, false, msg)
 		clearPendingLogin(lc.authDir)
 		loginStates.Delete(state)
-		log.Printf("trae self-complete (restored, %s) failed: %s", state, msg)
+		log.Printf("trae self-complete (%s, %s) failed: %s", source, state, msg)
 	}
 	if lc.authCode == "" && lc.refreshToken == "" {
 		fail("no authCode/refreshToken after restore")
@@ -384,17 +452,19 @@ func selfCompleteRestoredCN(lc *loginCtx) {
 	recordLoginOutcome(state, true, "")
 	clearPendingLogin(lc.authDir)
 	loginStates.Delete(state)
-	log.Printf("trae self-complete (restored): saved %s (uid=%s)", fileName, uid)
+	log.Printf("trae self-complete (%s): saved %s (uid=%s)", source, fileName, uid)
 }
 
-// selfCompleteRestoredIntl finishes a restored intl login in-process.
-func selfCompleteRestoredIntl(lc *intlloginCtx) {
+// selfCompleteIntl finishes an intl login in-process; source mirrors
+// selfCompleteCN ("restored" post-restart paste, "grace" unclaimed live
+// login — v0.12.23).
+func selfCompleteIntl(lc *intlloginCtx, source string) {
 	state := lc.state
 	fail := func(msg string) {
 		recordLoginOutcome(state, false, msg)
 		clearPendingLogin(lc.authDir)
 		intlloginStates.Delete(state)
-		log.Printf("trae-intl self-complete (restored, %s) failed: %s", state, msg)
+		log.Printf("trae-intl self-complete (%s, %s) failed: %s", source, state, msg)
 	}
 	if lc.authCode == "" {
 		fail("no authCode after restore")
@@ -496,7 +566,7 @@ func selfCompleteRestoredIntl(lc *intlloginCtx) {
 	recordLoginOutcome(state, true, "")
 	clearPendingLogin(lc.authDir)
 	intlloginStates.Delete(state)
-	log.Printf("trae-intl self-complete (restored): saved %s (uid=%s)", fileName, uid)
+	log.Printf("trae-intl self-complete (%s): saved %s (uid=%s)", source, fileName, uid)
 }
 
 // -----------------------------------------------------------------------------

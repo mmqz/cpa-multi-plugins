@@ -483,7 +483,7 @@ async function refreshLoginStatus(){
       lines.push("\u26a0 监听器未在运行（服务重启过）——粘贴框仍可完成本次登录");
     }
     if(d.callback_received){
-      lines.push("\u21bb 回调已收到，正在交换凭证……若长时间停留在此，多为凭证无效，可重新发起登录");
+      lines.push("\u21bb 回调已收到，正在交换凭证（主面板登录窗口已关闭也没关系：约 15 秒后插件会自行完成交换并保存凭证；若失败，完成后此状态行会显示具体原因）");
     }
     lines.push(d.restored
       ? "该登录已从磁盘恢复：把浏览器地址栏的完整回调链接粘贴到下方即可。"

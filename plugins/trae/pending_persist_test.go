@@ -287,3 +287,138 @@ func TestCaptureAuthDirProbe(t *testing.T) {
 		t.Fatalf("nil payload clobbered cache: %q", got)
 	}
 }
+
+// -----------------------------------------------------------------------------
+// v0.12.23: grace-based self-completion for LIVE (non-restored) logins.
+// The reported failure "提交了回调链接仍然不生成凭证" traced to the live
+// login path: the paste only captured the authCode in memory and the
+// credential was generated exclusively by the host's auth.login.poll — which
+// never arrives once the CPA login dialog is closed. v0.12.23 arms a
+// one-shot self-completion for every accepted callback: restored logins
+// finish immediately (v0.12.17 behavior), live logins wait
+// loginSelfCompleteGrace for the host poll to claim the state first and
+// claim exclusive ownership via LoadAndDelete before finishing in-process.
+// -----------------------------------------------------------------------------
+
+func waitForGraceCompletion(t *testing.T, check func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if check() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("grace self-completion did not settle within 3s")
+}
+
+// Live login whose captured callback is never claimed by a host poll: after
+// the grace window the plugin must claim the state, run the self-completion
+// (which fails fast and cleanly on an empty token capture) and surface the
+// failure through the outcome cache instead of stalling silently.
+func TestLiveLoginSelfCompletesAfterGrace(t *testing.T) {
+	prevGrace := loginSelfCompleteGrace
+	loginSelfCompleteGrace = 80 * time.Millisecond
+	t.Cleanup(func() { loginSelfCompleteGrace = prevGrace })
+
+	dir := t.TempDir()
+	state := "grace-live-cn-1"
+	lc := &loginCtx{
+		variant: variantCN, state: state, loginTraceID: state,
+		expires: time.Now().Add(time.Minute), authDir: dir,
+	}
+	loginStates.Store(state, lc)
+	spawnSelfCompleteCN(lc)
+
+	waitForGraceCompletion(t, func() bool {
+		_, live := loginStates.Load(state)
+		return !live
+	})
+	o, ok := lookupLoginOutcome(state)
+	if !ok || o.ok {
+		t.Fatalf("outcome not recorded as failure: %+v (ok=%v)", o, ok)
+	}
+	if !strings.Contains(o.msg, "no authCode/refreshToken") {
+		t.Fatalf("unexpected outcome message: %q", o.msg)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 0 {
+		t.Fatalf("no credential file expected on the fail-fast path, found %d entries", len(entries))
+	}
+	t.Cleanup(func() {
+		outcomeCache.Lock()
+		delete(outcomeCache.m, state)
+		outcomeCache.Unlock()
+	})
+}
+
+// Live login consumed by the host poll DURING the grace window: the
+// self-completion goroutine must lose the LoadAndDelete claim, do nothing,
+// and leave the poll's outcome untouched.
+func TestLiveLoginGraceYieldsToHostPoll(t *testing.T) {
+	prevGrace := loginSelfCompleteGrace
+	loginSelfCompleteGrace = 250 * time.Millisecond
+	t.Cleanup(func() { loginSelfCompleteGrace = prevGrace })
+
+	state := "grace-yield-cn-1"
+	lc := &loginCtx{
+		variant: variantCN, state: state, loginTraceID: state,
+		expires: time.Now().Add(time.Minute),
+	}
+	loginStates.Store(state, lc)
+
+	body := handleOAuthSubmitResource(pluginapi.ManagementRequest{
+		Method: "POST",
+		Body:   []byte(`{"url":` + mustJSON(realFormRedirectURL(state)) + `}`),
+	})
+	if !strings.Contains(string(body), "Login successful") {
+		t.Fatalf("paste rejected: %s", body)
+	}
+	// Host poll drains the state before the grace elapses.
+	recordLoginOutcome(state, true, "")
+	clearPendingLogin("")
+	loginStates.Delete(state)
+	time.Sleep(loginSelfCompleteGrace + 200*time.Millisecond)
+
+	o, ok := lookupLoginOutcome(state)
+	if !ok || !o.ok {
+		t.Fatalf("poll outcome overwritten by self-completion: %+v (ok=%v)", o, ok)
+	}
+	if _, live := loginStates.Load(state); live {
+		t.Fatalf("state resurrected after poll completion")
+	}
+	t.Cleanup(func() {
+		outcomeCache.Lock()
+		delete(outcomeCache.m, state)
+		outcomeCache.Unlock()
+	})
+}
+
+// Intl mirror of the live grace test.
+func TestLiveLoginSelfCompletesAfterGraceIntl(t *testing.T) {
+	prevGrace := loginSelfCompleteGrace
+	loginSelfCompleteGrace = 80 * time.Millisecond
+	t.Cleanup(func() { loginSelfCompleteGrace = prevGrace })
+
+	state := "grace-live-intl-1"
+	lc := &intlloginCtx{
+		state: state, loginTraceID: state,
+		expires: time.Now().Add(time.Minute),
+	}
+	intlloginStates.Store(state, lc)
+	spawnSelfCompleteIntl(lc)
+
+	waitForGraceCompletion(t, func() bool {
+		_, live := intlloginStates.Load(state)
+		return !live
+	})
+	o, ok := lookupLoginOutcome(state)
+	if !ok || o.ok || !strings.Contains(o.msg, "no authCode") {
+		t.Fatalf("intl outcome wrong: %+v (ok=%v)", o, ok)
+	}
+	t.Cleanup(func() {
+		outcomeCache.Lock()
+		delete(outcomeCache.m, state)
+		outcomeCache.Unlock()
+	})
+}

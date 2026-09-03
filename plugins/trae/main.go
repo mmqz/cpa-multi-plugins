@@ -902,6 +902,10 @@ type loginCtx struct {
         restored bool
         // doneOnce guards done for the resource-callback completion path.
         doneOnce sync.Once
+        // selfOnce guards the v0.12.23 grace-based self-completion spawn:
+        // exactly one selfCompleteCNAfterGrace goroutine per login regardless
+        // of how many callback hits (re-pastes, redirect retries) arrive.
+        selfOnce sync.Once
 
         // Filled by acceptCallback when the user completes login.
         authCode     string
