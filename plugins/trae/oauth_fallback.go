@@ -54,10 +54,14 @@ var (
 	// Intl auth-code ExchangeToken uses the account API origins (cockpit-tools
 	// default_account_api_config, trae_oauth.rs:683-688): normal → grow-normal,
 	// sg → growsg-normal. api.marscode.com / api.trae.ai are kept as extra
-	// fallbacks for resilience.
+	// fallbacks for resilience. grow-normal.traeapi.us = cockpit-tools
+	// TRAE_ACCOUNT_API_ORIGIN_USTTP (upstream's newer US direct origin;
+	// live-verified 2026-09-03: api.* hosts 404 the ExchangeToken path at the
+	// TLB edge, so extra real origins only widen the fallback).
 	traeIntlDefaultOrigins = []string{
 		"https://grow-normal.trae.ai",
 		"https://growsg-normal.trae.ai",
+		"https://grow-normal.traeapi.us",
 		"https://api.marscode.com",
 		"https://api.trae.ai",
 	}

@@ -66,7 +66,7 @@ func TestCandidateAPIOoriginsRewrite(t *testing.T) {
 
 	intl := candidateAPIOorigins("www.trae.ai", false)
 	ij := strings.Join(intl, ",")
-	for _, want := range []string{"https://www.trae.ai", "https://api.trae.ai", "https://grow-normal.trae.ai"} {
+	for _, want := range []string{"https://www.trae.ai", "https://api.trae.ai", "https://grow-normal.trae.ai", "https://grow-normal.traeapi.us"} {
 		if !strings.Contains(ij, want) {
 			t.Errorf("Intl origins missing %s: %v", want, intl)
 		}

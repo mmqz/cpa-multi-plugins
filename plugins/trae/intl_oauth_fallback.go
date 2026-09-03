@@ -42,9 +42,14 @@ var intlLoginGuidanceURLs = []string{
 // Intl default API origins — cockpit-tools default_account_api_config
 // (trae_oauth.rs:683-688) + candidate_api_origins Intl branch (2015-2022):
 // account API normal/sg first, then the classic api hosts.
+// grow-normal.traeapi.us = cockpit-tools TRAE_ACCOUNT_API_ORIGIN_USTTP (the
+// upstream's newer US direct origin; live-verified 2026-09-03 that the
+// classic api.* hosts 404 /trae/api/v3/oauth/ExchangeToken at the TLB edge,
+// so every extra real origin widens the fallback without any downside).
 var intlDefaultOrigins = []string{
 	"https://grow-normal.trae.ai",
 	"https://growsg-normal.trae.ai",
+	"https://grow-normal.traeapi.us",
 	"https://api.marscode.com",
 	"https://api.trae.ai",
 }
