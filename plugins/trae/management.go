@@ -104,6 +104,7 @@ func managementRegistration() managementRegistrationResponse {
 			{Path: "/intl_panel", Description: "Trae Intl dashboard (linked from the main panel)."},
 			{Path: "/oauth_callback", Description: "OAuth login callback redirect target."},
 			{Path: "/oauth_submit", Description: "Paste-to-complete fallback: GET with cb_url=<url-encoded failed redirect URL> finishes the login remotely (host resource routes are GET-only)."},
+			{Path: "/login_status", Description: "Live login state for the panel status line: pending variant, callback endpoint, TTL remaining, last outcome (data only, no secrets)."},
 		},
 	}
 }
@@ -134,6 +135,9 @@ func handleManagement(raw []byte) ([]byte, error) {
 	}
 	if (req.Method == http.MethodGet || req.Method == http.MethodPost) && path == resPrefix+"/oauth_submit" {
 		return okEnvelope(mgmtHTMLResponse(handleOAuthSubmitResource(req)))
+	}
+	if req.Method == http.MethodGet && path == resPrefix+"/login_status" {
+		return okEnvelope(mgmtJSONResourceResponse(handleLoginStatusResource()))
 	}
 	if req.Method == http.MethodGet && strings.HasPrefix(path, resPrefix) {
 		sub := strings.TrimPrefix(path, resPrefix)

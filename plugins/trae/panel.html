@@ -158,6 +158,7 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     <span class="toggle" id="svtime"></span>
   </div>
   <div class="card" style="margin-bottom:16px">
+    <div id="loginStatus" style="margin-bottom:6px;padding:6px 8px;border:1px solid rgba(128,128,128,.35);border-radius:6px;color:var(--mut);font-size:12px;line-height:1.5">登录状态：加载中…</div>
     <div style="margin-bottom:6px;color:var(--mut)">远程登录兜底：授权完成后浏览器若停在「无法连接 127.0.0.1:&lt;端口&gt;」页面，复制地址栏完整链接粘贴到此处提交，即可完成登录（无需改写前缀）。注意：必须粘贴<b>本次登录</b>生成的链接，登录开始超过 15 分钟或服务重启过则请重新点「登录」后再复制新链接。</div>
     <div style="display:flex;gap:8px">
       <input id="cbPaste" type="text" placeholder="http://127.0.0.1:&lt;port&gt;/authorize?isRedirect=true&authCodeInfo=…" class="field-input" style="flex:1">
@@ -455,6 +456,47 @@ async function loadPoolStatus(){
     (d.accounts||[]).forEach(s=>{ if(s.uid) poolByUID[s.uid]=s; });
   }catch(_){ /* status is best-effort */ }
 }
+let loginStatusTimer=null;
+async function refreshLoginStatus(){
+  const el=document.getElementById('loginStatus');
+  if(!el)return;
+  try{
+    const r=await fetch("/v0/resource/plugins/"+providerName+"/login_status",{credentials:'omit'});
+    const d=await r.json();
+    if(!d.pending){
+      if(d.outcome){
+        const om=(d.outcome.message||"").replace(/\s+/g," ").trim();
+        el.textContent = d.outcome.ok ? "\u2713 最近一次登录已完成" : "\u2717 最近一次登录失败：" + (om.length>160 ? om.slice(0,160)+"…" : om);
+      }else{
+        el.textContent = "当前没有进行中的登录。在 CPA 主面板 OAuth 菜单发起登录后，这里会实时显示等待状态。";
+      }
+      el.style.color="var(--mut)";
+      return;
+    }
+    const age=d.age_seconds||0, ttl=d.ttl_seconds_remaining||0;
+    const lines=[];
+    lines.push("\u23f3 登录等待中（"+(d.variant||"cn")+"）· 已等待 "+Math.floor(age/60)+" 分 "+(age%60)+" 秒 · 剩余约 "+Math.ceil(ttl/60)+" 分钟");
+    if(d.callback_hostport){
+      lines.push("浏览器应回连 http://"+d.callback_hostport+"/authorize（服务器本机监听；远程/容器浏览器无法直连属正常现象）");
+    }
+    if(!d.listener_alive){
+      lines.push("\u26a0 监听器未在运行（服务重启过）——粘贴框仍可完成本次登录");
+    }
+    if(d.callback_received){
+      lines.push("\u21bb 回调已收到，正在交换凭证……若长时间停留在此，多为凭证无效，可重新发起登录");
+    }
+    lines.push(d.restored
+      ? "该登录已从磁盘恢复：把浏览器地址栏的完整回调链接粘贴到下方即可。"
+      : "若浏览器登录后停在「无法连接」或一直未跳转，复制地址栏完整链接粘贴到下方粘贴框即可完成登录。");
+    el.innerHTML=lines.map(function(x){return x.replace(/&/g,'&amp;').replace(/</g,'&lt;');}).join('<br>');
+    el.style.color = d.listener_alive ? "var(--mut)" : "#c0392b";
+  }catch(e){
+    el.textContent="登录状态：暂时不可用";
+  }
+}
+clearInterval(loginStatusTimer);
+loginStatusTimer=setInterval(refreshLoginStatus,5000);
+refreshLoginStatus();
 async function submitCallbackURL(btn){
   const raw=(document.getElementById("cbPaste").value||"").trim();
   if(!raw){toast("请先粘贴完整回调链接","warn");return}

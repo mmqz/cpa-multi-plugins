@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,8 @@ import (
 	"github.com/mmqz/cpa-multi-plugins/plugins/trae/auth"
 	intlupstream "github.com/mmqz/cpa-multi-plugins/plugins/trae/intlupstream"
 	cnupstream "github.com/mmqz/cpa-multi-plugins/plugins/trae/upstream"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // -----------------------------------------------------------------------------
@@ -493,4 +497,153 @@ func selfCompleteRestoredIntl(lc *intlloginCtx) {
 	clearPendingLogin(lc.authDir)
 	intlloginStates.Delete(state)
 	log.Printf("trae-intl self-complete (restored): saved %s (uid=%s)", fileName, uid)
+}
+
+// -----------------------------------------------------------------------------
+// v0.12.21: GET /v0/resource/plugins/trae/login_status - live login state for
+// the panel status line. The host's get-auth-status maps a plugin "pending"
+// poll to a bare {"status":"wait"} and drops the message, so manager UIs show
+// an unexplained waiting state for the whole 15-minute TTL when the browser
+// cannot reach the 127.0.0.1 callback listener (remote / docker deployments).
+// This endpoint lets the plugin's own panel explain what is being waited on
+// and what to do next. Data only - the panel renders the words. No secrets:
+// loopback callback host:port, variant, ages, and the outcome message (the
+// same text paste result pages already show unauthenticated).
+// -----------------------------------------------------------------------------
+
+type loginStatusOutcome struct {
+	OK      bool   `json:"ok"`
+	Message string `json:"message"`
+	AgeSec  int64  `json:"age_seconds"`
+}
+
+type loginStatusPayload struct {
+	Pending       bool   `json:"pending"`
+	Restored      bool   `json:"restored"`
+	Variant       string `json:"variant,omitempty"`
+	CallbackHP    string `json:"callback_hostport,omitempty"`
+	AgeSec        int64  `json:"age_seconds,omitempty"`
+	TTLRemaining  int64  `json:"ttl_seconds_remaining,omitempty"`
+	ListenerAlive bool   `json:"listener_alive"`
+	// CallbackReceived: the browser redirect already landed (or a paste was
+	// accepted) and the token exchange is pending the next poll drain.
+	CallbackReceived bool                `json:"callback_received,omitempty"`
+	Outcome          *loginStatusOutcome `json:"outcome,omitempty"`
+}
+
+func mgmtJSONResourceResponse(body []byte) pluginapi.ManagementResponse {
+	h := http.Header{}
+	h.Set("Content-Type", "application/json; charset=utf-8")
+	return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: h, Body: body}
+}
+
+// callbackHostPort reduces a callback URL to its host:port - the only part
+// the user needs to recognize the browser's "cannot connect" error page.
+func callbackHostPort(cbURL string) string {
+	cbURL = strings.TrimSpace(cbURL)
+	if cbURL == "" {
+		return ""
+	}
+	if u, err := url.Parse(cbURL); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return ""
+}
+
+// latestLoginOutcome returns the most recent recorded login outcome across
+// states (the cache is keyed by state; the status line is stateless).
+func latestLoginOutcome() (loginOutcome, bool) {
+	outcomeCache.Lock()
+	defer outcomeCache.Unlock()
+	var best loginOutcome
+	found := false
+	for _, o := range outcomeCache.m {
+		if !found || o.at.After(best.at) {
+			best, found = o, true
+		}
+	}
+	return best, found
+}
+
+// pendingSnapshot is the display-relevant slice of a live or restored login.
+type pendingSnapshot struct {
+	variant          string
+	cbURL            string
+	expires          time.Time
+	restored         bool
+	listenerAlive    bool
+	callbackReceived bool
+}
+
+// snapshotPending picks the pending login with the latest expiry across both
+// flow maps (cn/solo share loginStates; intl has its own). Expired entries
+// the janitor has not reaped yet are ignored.
+func snapshotPending() (pendingSnapshot, bool) {
+	now := time.Now()
+	var best pendingSnapshot
+	found := false
+	consider := func(variant, cbURL string, expires time.Time, restored, listenerAlive, cbRecv bool) {
+		if !now.Before(expires) {
+			return
+		}
+		if !found || expires.After(best.expires) {
+			best = pendingSnapshot{
+				variant: variant, cbURL: cbURL, expires: expires,
+				restored: restored, listenerAlive: listenerAlive, callbackReceived: cbRecv,
+			}
+			found = true
+		}
+	}
+	loginStates.Range(func(_, v any) bool {
+		if lc, ok := v.(*loginCtx); ok {
+			got := lc.authCode != "" || lc.refreshToken != "" || lc.err != nil
+			consider(lc.variant, lc.cbURL, lc.expires, lc.restored, lc.listener != nil, got)
+		}
+		return true
+	})
+	intlloginStates.Range(func(_, v any) bool {
+		if lc, ok := v.(*intlloginCtx); ok {
+			got := lc.authCode != "" || lc.err != nil
+			consider("intl", lc.cbURL, lc.expires, lc.restored, lc.listener != nil, got)
+		}
+		return true
+	})
+	return best, found
+}
+
+// handleLoginStatusResource answers the panel's status poll. Priority: the
+// in-memory pending login (live listener or restored-into-memory) wins; the
+// disk record is reported only when nothing is in memory (post-restart, the
+// paste can still complete it). The newest outcome is always attached.
+func handleLoginStatusResource() []byte {
+	now := time.Now()
+	payload := loginStatusPayload{}
+	if snap, ok := snapshotPending(); ok {
+		payload.Pending = true
+		payload.Restored = snap.restored
+		payload.Variant = snap.variant
+		payload.CallbackHP = callbackHostPort(snap.cbURL)
+		payload.AgeSec = int64((loginTTL - time.Until(snap.expires)).Seconds())
+		payload.TTLRemaining = int64(time.Until(snap.expires).Seconds())
+		payload.ListenerAlive = snap.listenerAlive
+		payload.CallbackReceived = snap.callbackReceived
+	} else if dir := cachedAuthDir(); dir != "" {
+		// loadPendingLogin also sweeps an expired record (cleanup side effect).
+		if rec, ok := loadPendingLogin(dir); ok {
+			payload.Pending = true
+			payload.Restored = true // not in memory -> only the disk record serves it
+			payload.Variant = rec.Variant
+			payload.CallbackHP = callbackHostPort(rec.CbURL)
+			payload.AgeSec = now.Unix() - rec.CreatedAt
+			payload.TTLRemaining = rec.ExpiresAt - now.Unix()
+		}
+	}
+	if o, ok := latestLoginOutcome(); ok {
+		payload.Outcome = &loginStatusOutcome{OK: o.ok, Message: o.msg, AgeSec: int64(time.Since(o.at).Seconds())}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return []byte(`{"pending":false}`)
+	}
+	return raw
 }
