@@ -157,6 +157,13 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     <button class="sec" onclick="checkinAll(this)">全部签到</button>
     <span class="toggle" id="svtime"></span>
   </div>
+  <div class="card" style="margin-bottom:16px">
+    <div style="margin-bottom:6px;color:var(--mut)">远程登录兜底：授权完成后浏览器若停在「无法连接 127.0.0.1:&lt;端口&gt;」页面，复制地址栏完整链接粘贴到此处提交，即可完成登录（无需改写前缀）。</div>
+    <div style="display:flex;gap:8px">
+      <input id="cbPaste" type="text" placeholder="http://127.0.0.1:&lt;port&gt;/authorize?isRedirect=true&authCodeInfo=…" class="field-input" style="flex:1">
+      <button onclick="submitCallbackURL(this)">完成登录</button>
+    </div>
+  </div>
   <div class="summary card" id="summaryBox" style="display:none"></div>
   <div id="grid" class="grid"><div class="loading">加载中…</div></div>
 </div>
@@ -447,6 +454,27 @@ async function loadPoolStatus(){
     poolByUID={};
     (d.accounts||[]).forEach(s=>{ if(s.uid) poolByUID[s.uid]=s; });
   }catch(_){ /* status is best-effort */ }
+}
+async function submitCallbackURL(btn){
+  const raw=(document.getElementById("cbPaste").value||"").trim();
+  if(!raw){toast("请先粘贴完整回调链接","warn");return}
+  busy(btn,true);
+  try{
+    /* Host resource routes are GET-only (ServeResourceHTTP rejects non-GET),
+       so the pasted URL rides as the encoded cb_url query param. */
+    const r=await fetch("/v0/resource/plugins/"+providerName+"/oauth_submit?cb_url="+encodeURIComponent(raw),{credentials:'omit'});
+    const text=await r.text();
+    if(/Login successful|成功/i.test(text)){
+      toast("回调已提交，登录完成中…","ok");
+      document.getElementById("cbPaste").value="";
+      await load(false);
+    }else{
+      toast("回调未完成登录","err",text.replace(/<[^>]*>/g," ").replace(/\s+/g," ").trim().slice(0,180));
+    }
+  }catch(e){
+    toast("提交失败","err",e.message);
+  }
+  busy(btn,false);
 }
 async function load(force, btn){
   const g=document.getElementById("grid");

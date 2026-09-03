@@ -103,6 +103,7 @@ func managementRegistration() managementRegistrationResponse {
 			// Menu-less: routable browser resources without UI entries.
 			{Path: "/intl_panel", Description: "Trae Intl dashboard (linked from the main panel)."},
 			{Path: "/oauth_callback", Description: "OAuth login callback redirect target."},
+			{Path: "/oauth_submit", Description: "Paste-to-complete fallback: GET with cb_url=<url-encoded failed redirect URL> finishes the login remotely (host resource routes are GET-only)."},
 		},
 	}
 }
@@ -130,6 +131,9 @@ func handleManagement(raw []byte) ([]byte, error) {
 	resPrefix := "/v0/resource/plugins/" + providerName
 	if req.Method == http.MethodGet && path == resPrefix+"/oauth_callback" {
 		return okEnvelope(mgmtHTMLResponse(handleOAuthCallbackResource(req)))
+	}
+	if (req.Method == http.MethodGet || req.Method == http.MethodPost) && path == resPrefix+"/oauth_submit" {
+		return okEnvelope(mgmtHTMLResponse(handleOAuthSubmitResource(req)))
 	}
 	if req.Method == http.MethodGet && strings.HasPrefix(path, resPrefix) {
 		sub := strings.TrimPrefix(path, resPrefix)

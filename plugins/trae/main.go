@@ -447,7 +447,7 @@ func buildRegistration() registrationPayload {
                                 {Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 09:00 local time (default true)."},
                                 {Name: "login_variant", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "solo", "intl"}, Description: "Variant for NEW logins: cn (Trae Code CN, default), solo (Trae SOLO CN) or intl (Trae Intl, marscode.com). Existing accounts keep the variant recorded at login/adoption time."},
                                 {Name: "callback_bind", Type: pluginapi.ConfigFieldTypeString, Description: "Bind address for the OAuth callback listener (default 127.0.0.1). Set 0.0.0.0 when CPA runs in Docker or on a remote host so the port can be published."},
-                                {Name: "callback_port", Type: pluginapi.ConfigFieldTypeString, Description: "Fixed port for the OAuth callback listener (default: random per login). Docker: set e.g. 41890 with callback_bind=0.0.0.0 and publish -p 127.0.0.1:41890:41890 so the redirect completes automatically. If the browser runs on another machine and cannot reach the host's 127.0.0.1, paste the failed callback URL to <panel>/v0/resource/plugins/trae/oauth_callback instead."},
+                                {Name: "callback_port", Type: pluginapi.ConfigFieldTypeString, Description: "Fixed port for the OAuth callback listener (default: random per login). Docker: set e.g. 41890 with callback_bind=0.0.0.0 and publish -p 127.0.0.1:41890:41890 so the redirect completes automatically. If the browser runs on another machine and cannot reach the host's 127.0.0.1, or paste the failed address-bar URL into the paste box on <panel>/v0/resource/plugins/trae/panel (it replays it to the plugin's oauth_submit endpoint)."},
                                 {Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily access-token refresh at 03:00 to prevent session expiry (default true)."},
                                 {Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled."},
                         },
@@ -840,7 +840,7 @@ func startLoginWithVariant(request []byte, lv string) ([]byte, error) {
         if ln != nil {
                 go acceptCallback(state)
         }
-        log.Printf("trae start-login (%s): callback=%s — if the browser cannot reach it (browser on another machine), paste the failed callback URL to <panel>%s?state=%s", lv, cbURL, resourceCallbackPath, state)
+        log.Printf("trae start-login (%s): callback=%s — if the browser cannot reach it (Docker without the port published / remote host), paste the full address-bar URL into the paste box on <panel>/v0/resource/plugins/trae/panel, or POST it as {\"url\":...} to <panel>%s_submit (state=%s)", lv, cbURL, resourceCallbackPath, state)
 
         return okEnvelope(pluginapi.AuthLoginStartResponse{
                 Provider:  providerName,

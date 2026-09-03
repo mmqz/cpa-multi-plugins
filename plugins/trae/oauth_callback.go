@@ -302,6 +302,40 @@ func handleOAuthCallbackResource(req pluginapi.ManagementRequest) []byte {
 	return callbackResultHTML("Login failed", "unknown or expired login state — please restart the login")
 }
 
+// handleOAuthSubmitResource serves GET/POST /v0/resource/plugins/trae/oauth_submit —
+// the paste-to-complete fallback (v0.12.16). When the browser cannot reach the
+// local listener (Docker without the port published, or the plugin runs on a
+// remote host), the redirect to http://127.0.0.1:<port>/authorize fails and the
+// FULL callback URL stays in the browser address bar. Pasting that URL here —
+// GET ?cb_url=<url-encoded> or POST {"url":"..."} — replays it through the
+// exact same resolution path as a real callback hit (resolveCallbackState +
+// authCodeInfo extraction), so the login completes without manual prefix
+// surgery. The host's own oauth-callback paste endpoint cannot serve plugins:
+// it demands a pre-registered session state that plugin logins never create.
+func handleOAuthSubmitResource(req pluginapi.ManagementRequest) []byte {
+	raw := strings.TrimSpace(req.Query.Get("cb_url"))
+	if raw == "" && len(req.Body) > 0 {
+		var payload struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(req.Body, &payload); err == nil {
+			raw = strings.TrimSpace(payload.URL)
+		}
+	}
+	if raw == "" {
+		return callbackResultHTML("Missing callback URL",
+			"Paste the full failed-redirect URL (the address-bar http://127.0.0.1:<port>/authorize?... link) — GET ?cb_url=<encoded> or POST {\"url\":\"...\"}.")
+	}
+	u, errParse := url.Parse(raw)
+	if errParse != nil || len(u.Query()) == 0 {
+		return callbackResultHTML("Invalid callback URL",
+			"The pasted text is not a parseable URL with query parameters. Copy the full address-bar URL shown after the authorization redirect fails.")
+	}
+	// Replay through the shared resolution path — cn/solo/intl states all
+	// resolve here (loginStates + intlloginStates via resolveCallbackState).
+	return handleOAuthCallbackResource(pluginapi.ManagementRequest{Query: u.Query()})
+}
+
 // callbackResultHTML renders the minimal browser-facing result page.
 func callbackResultHTML(title, msg string) []byte {
 	return []byte(fmt.Sprintf("<html><head><meta charset=\"utf-8\"><title>%s</title></head><body style=\"font-family:sans-serif;text-align:center;padding-top:60px\"><h2>%s</h2><p>%s</p></body></html>",
