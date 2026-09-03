@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -187,17 +188,77 @@ func parseCallbackParams(vals url.Values) callbackParams {
 	return p
 }
 
+// resolveCallbackState determines which in-flight login a callback request
+// belongs to (v0.12.12). The REAL Trae authorization-page redirect does NOT
+// echo a "state" parameter — the plugin never sends one. It echoes the login
+// session id the plugin DID send: login_trace_id (cockpit-tools parses
+// loginTraceID / loginTraceId / login_trace_id / trace_id out of the
+// callback payload — TraeCallbackPayload.login_trace_id, trae_oauth.rs:1671).
+// The old handler required "state" and rejected every real redirect with
+// "missing state parameter" — user-visible as "收不到回调链接". The test
+// suite masked this because its simulated callbacks always passed state.
+// Resolution order:
+//  1. "state" — the host-driven oauth-callback convention (kept for compat).
+//  2. login_trace_id variants — the real Trae redirect echo.
+//  3. exactly-one live login across both maps — mirrors cockpit-tools'
+//     port-scoped listener, where the callback port IS the login identity.
+func resolveCallbackState(vals url.Values) string {
+	if s := strings.TrimSpace(vals.Get("state")); s != "" {
+		return s
+	}
+	for _, k := range []string{"loginTraceID", "loginTraceId", "login_trace_id", "trace_id"} {
+		if v := strings.TrimSpace(vals.Get(k)); v != "" {
+			return v
+		}
+	}
+	return singleInflightLoginState()
+}
+
+// singleInflightLoginState returns the state key when exactly one live
+// login (cn/solo or intl) is in flight, and "" otherwise. Expired states
+// don't count — they can no longer complete.
+func singleInflightLoginState() string {
+	var live []string
+	now := time.Now()
+	loginStates.Range(func(k, v any) bool {
+		lc := v.(*loginCtx)
+		if now.Before(lc.expires) {
+			live = append(live, k.(string))
+		}
+		return true
+	})
+	intlloginStates.Range(func(k, v any) bool {
+		lc := v.(*intlloginCtx)
+		if now.Before(lc.expires) {
+			live = append(live, k.(string))
+		}
+		return true
+	})
+	if len(live) == 1 {
+		return live[0]
+	}
+	return ""
+}
+
 // handleOAuthCallbackResource serves GET /v0/resource/plugins/trae/oauth_callback —
 // the redirect target embedded in the Trae verification URI. The full
-// upstream query arrives in req.Query; the state token selects the in-flight
-// flow (cn/solo flows live in loginStates, intl flows in intlloginStates —
-// matching the poll dispatch's state-location routing).
+// upstream query arrives in req.Query; the login is selected via
+// resolveCallbackState (cn/solo flows live in loginStates, intl flows in
+// intlloginStates — matching the poll dispatch's state-location routing).
 func handleOAuthCallbackResource(req pluginapi.ManagementRequest) []byte {
 	vals := req.Query
 	if vals == nil {
 		vals = url.Values{}
 	}
-	state := strings.TrimSpace(vals.Get("state"))
+	// Bare hit with NO params at all (browser prefetch, user pasting the
+	// plain callback URL, favicon probes): answer pending and keep the
+	// in-flight login untouched — cockpit-tools keeps waiting on an empty
+	// query (trae_oauth.rs:1611-1624).
+	if len(vals) == 0 {
+		return callbackResultHTML("Waiting for authorization",
+			"This URL is the Trae OAuth redirect target. Complete the login in the authorization window.")
+	}
+	state := resolveCallbackState(vals)
 	if state == "" {
 		return callbackResultHTML("Login failed", "missing state parameter — please restart the login")
 	}
@@ -205,7 +266,9 @@ func handleOAuthCallbackResource(req pluginapi.ManagementRequest) []byte {
 	if v, ok := loginStates.Load(state); ok {
 		lc := v.(*loginCtx)
 		p := parseCallbackParams(vals)
-		lc.loginHost = p.loginHost
+		if p.loginHost != "" {
+			lc.loginHost = p.loginHost
+		} // else keep the start-login host (cockpit-tools fallback_login_host)
 		lc.refreshToken = p.refreshToken
 		lc.authCode = p.authCode
 		lc.err = p.err
@@ -222,7 +285,9 @@ func handleOAuthCallbackResource(req pluginapi.ManagementRequest) []byte {
 	if v, ok := intlloginStates.Load(state); ok {
 		lc := v.(*intlloginCtx)
 		p := parseCallbackParams(vals)
-		lc.loginHost = p.loginHost
+		if p.loginHost != "" {
+			lc.loginHost = p.loginHost
+		} // else keep the start-login host
 		lc.authCode = p.authCode
 		lc.err = p.err
 		if p.err == nil && p.authCode == "" {

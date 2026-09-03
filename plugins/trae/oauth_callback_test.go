@@ -210,11 +210,22 @@ func TestHandleOAuthCallbackResourceIntl(t *testing.T) {
 }
 
 func TestHandleOAuthCallbackResourceErrors(t *testing.T) {
+	// v0.12.12: a bare hit with NO query at all answers pending and keeps
+	// waiting (cockpit-tools keeps waiting on an empty query) — it must
+	// NOT fail the flow with "missing state" anymore.
 	body := string(handleOAuthCallbackResource(pluginapi.ManagementRequest{Method: "GET"}))
-	if !strings.Contains(body, "Login failed") || !strings.Contains(body, "missing state") {
-		t.Fatalf("missing-state body = %s", body)
+	if !strings.Contains(body, "Waiting for authorization") {
+		t.Fatalf("empty-query body = %s", body)
 	}
+	// Params present but no state / trace id and zero live logins →
+	// still a missing-state failure.
 	q := url.Values{}
+	q.Set("authCode", "ac-orphan")
+	body = string(handleOAuthCallbackResource(pluginapi.ManagementRequest{Method: "GET", Query: q}))
+	if !strings.Contains(body, "Login failed") || !strings.Contains(body, "missing state") {
+		t.Fatalf("param-only body = %s", body)
+	}
+	q = url.Values{}
 	q.Set("state", "no-such-state")
 	body = string(handleOAuthCallbackResource(pluginapi.ManagementRequest{Method: "GET", Query: q}))
 	if !strings.Contains(body, "unknown or expired") {
@@ -250,6 +261,206 @@ func TestCompleteLoginIdempotent(t *testing.T) {
 		t.Fatalf("done not closed")
 	}
 	closeListener(nil)
+}
+
+func TestResolveCallbackStatePriority(t *testing.T) {
+	// 1. state wins over any trace id.
+	q := url.Values{}
+	q.Set("state", "s-1")
+	q.Set("login_trace_id", "t-1")
+	if got := resolveCallbackState(q); got != "s-1" {
+		t.Fatalf("state priority: got %q", got)
+	}
+	// 2. trace id variants resolve.
+	for _, k := range []string{"loginTraceID", "loginTraceId", "login_trace_id", "trace_id"} {
+		q := url.Values{}
+		q.Set(k, "trace-x")
+		if got := resolveCallbackState(q); got != "trace-x" {
+			t.Fatalf("trace variant %s: got %q", k, got)
+		}
+	}
+	// 3. nothing to go on and no live logins → empty.
+	if got := resolveCallbackState(url.Values{}); got != "" {
+		t.Fatalf("no hints: got %q, want empty", got)
+	}
+}
+
+func TestHandleOAuthCallbackResourceLoginTraceIDEcho(t *testing.T) {
+	// Real Trae redirect shape (v0.12.12): NO "state" param — the plugin
+	// never sends one. The authorization page echoes login_trace_id plus
+	// its own params (isRedirect=true, authCode, loginHost).
+	state := newLoginTraceID()
+	lc := &loginCtx{variant: variantCN, state: state, loginHost: "www.trae.cn", expires: time.Now().Add(time.Minute)}
+	loginStates.Store(state, lc)
+	defer loginStates.Delete(state)
+
+	q := url.Values{}
+	q.Set("login_trace_id", state)
+	q.Set("isRedirect", "true")
+	q.Set("authCode", "ac-real")
+	q.Set("loginHost", "api.trae.cn")
+	body := handleOAuthCallbackResource(pluginapi.ManagementRequest{Method: "GET", Query: q})
+	if !strings.Contains(string(body), "Login successful") {
+		t.Fatalf("real-redirect callback body = %s", body)
+	}
+	if lc.authCode != "ac-real" {
+		t.Fatalf("authCode = %q", lc.authCode)
+	}
+	if lc.loginHost != "api.trae.cn" {
+		t.Fatalf("loginHost = %q, want callback value", lc.loginHost)
+	}
+	select {
+	case <-lc.done:
+	default:
+		t.Fatalf("lc.done not closed after real-redirect callback")
+	}
+}
+
+func TestHandleOAuthCallbackResourceKeepsFallbackLoginHost(t *testing.T) {
+	// Callback WITHOUT loginHost must keep the start-login host
+	// (cockpit-tools fallback_login_host), not blank it out.
+	state := newLoginTraceID()
+	lc := &loginCtx{variant: variantCN, state: state, loginHost: "www.trae.cn", expires: time.Now().Add(time.Minute)}
+	loginStates.Store(state, lc)
+	defer loginStates.Delete(state)
+	q := url.Values{}
+	q.Set("login_trace_id", state)
+	q.Set("authCode", "ac-nohost")
+	body := handleOAuthCallbackResource(pluginapi.ManagementRequest{Method: "GET", Query: q})
+	if !strings.Contains(string(body), "Login successful") {
+		t.Fatalf("body = %s", body)
+	}
+	if lc.loginHost != "www.trae.cn" {
+		t.Fatalf("loginHost overwritten to %q, want start-login value kept", lc.loginHost)
+	}
+}
+
+func TestHandleOAuthCallbackResourceSingleInflightFallback(t *testing.T) {
+	// No state, no trace id — exactly one live login resolves it
+	// (cockpit-tools port-scoped uniqueness semantics).
+	state := newLoginTraceID()
+	lc := &intlloginCtx{state: state, loginHost: "www.trae.ai", expires: time.Now().Add(time.Minute)}
+	intlloginStates.Store(state, lc)
+	defer intlloginStates.Delete(state)
+	q := url.Values{}
+	q.Set("authCode", "ac-single")
+	q.Set("loginHost", "www.trae.ai")
+	body := handleOAuthCallbackResource(pluginapi.ManagementRequest{Method: "GET", Query: q})
+	if !strings.Contains(string(body), "Login successful") {
+		t.Fatalf("single-inflight body = %s", body)
+	}
+	if lc.authCode != "ac-single" {
+		t.Fatalf("intl authCode = %q", lc.authCode)
+	}
+}
+
+func TestHandleOAuthCallbackResourceAmbiguousInflight(t *testing.T) {
+	// Two live logins and no identifying param → error page; NEITHER
+	// flow may complete.
+	s1, s2 := newLoginTraceID(), newLoginTraceID()
+	lc1 := &loginCtx{state: s1, expires: time.Now().Add(time.Minute)}
+	lc2 := &intlloginCtx{state: s2, expires: time.Now().Add(time.Minute)}
+	loginStates.Store(s1, lc1)
+	intlloginStates.Store(s2, lc2)
+	defer loginStates.Delete(s1)
+	defer intlloginStates.Delete(s2)
+	q := url.Values{}
+	q.Set("authCode", "ac-ambiguous")
+	body := string(handleOAuthCallbackResource(pluginapi.ManagementRequest{Method: "GET", Query: q}))
+	if !strings.Contains(body, "Login failed") {
+		t.Fatalf("ambiguous body = %s", body)
+	}
+	select {
+	case <-lc1.done:
+		t.Fatalf("cn flow completed on ambiguous callback")
+	default:
+	}
+	select {
+	case <-lc2.done:
+		t.Fatalf("intl flow completed on ambiguous callback")
+	default:
+	}
+}
+
+func TestHandleOAuthCallbackResourceEmptyQueryPending(t *testing.T) {
+	// Bare callback hit (no query at all — browser prefetch / manual
+	// paste): pending answer, in-flight login NOT failed.
+	state := newLoginTraceID()
+	lc := &loginCtx{state: state, expires: time.Now().Add(time.Minute)}
+	loginStates.Store(state, lc)
+	defer loginStates.Delete(state)
+	body := string(handleOAuthCallbackResource(pluginapi.ManagementRequest{Method: "GET", Query: nil}))
+	if !strings.Contains(body, "Waiting for authorization") {
+		t.Fatalf("empty-query body = %s", body)
+	}
+	if lc.err != nil {
+		t.Fatalf("empty query must not fail the login: %v", lc.err)
+	}
+	select {
+	case <-lc.done:
+		t.Fatalf("empty query must not complete the login")
+	default:
+	}
+}
+
+func TestHandleOAuthCallbackResourceExpiredStateExcluded(t *testing.T) {
+	// An EXPIRED login must not satisfy the single-inflight fallback.
+	state := newLoginTraceID()
+	lc := &loginCtx{state: state, expires: time.Now().Add(-time.Minute)}
+	loginStates.Store(state, lc)
+	defer loginStates.Delete(state)
+	q := url.Values{}
+	q.Set("authCode", "ac-expired")
+	body := string(handleOAuthCallbackResource(pluginapi.ManagementRequest{Method: "GET", Query: q}))
+	if !strings.Contains(body, "Login failed") || !strings.Contains(body, "missing state") {
+		t.Fatalf("expired-only fallback body = %s", body)
+	}
+}
+
+func TestNewDeviceIDShape(t *testing.T) {
+	// Upstream validates device ids as numeric strings of 8-24 digits
+	// (cockpit-tools is_numeric_id(8, 24)). The old randomHex(16) was
+	// 32 hex chars with letters — out of spec.
+	for i := 0; i < 200; i++ {
+		d := newDeviceID()
+		if n := len(d); n < 8 || n > 24 {
+			t.Fatalf("device id length %d out of 8..24: %q", n, d)
+		}
+		for _, r := range d {
+			if r < '0' || r > '9' {
+				t.Fatalf("device id contains non-digit %q: %q", r, d)
+			}
+		}
+	}
+}
+
+func TestNewMachineIDUUIDv4(t *testing.T) {
+	m := newMachineID()
+	if len(m) != 36 || m[8] != '-' || m[13] != '-' || m[18] != '-' || m[23] != '-' {
+		t.Fatalf("machine id not UUID-shaped: %q", m)
+	}
+	if m[14] != '4' {
+		t.Fatalf("machine id not version 4: %q", m)
+	}
+	// RFC 4122 variant: high bits of the 4th group are 10xx.
+	v := m[19]
+	if v != '8' && v != '9' && v != 'a' && v != 'b' {
+		t.Fatalf("machine id variant bits invalid: %q", m)
+	}
+	if m == newMachineID() {
+		t.Fatalf("machine id not random")
+	}
+}
+
+func TestNewDeviceIDUniqueness(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 100; i++ {
+		d := newDeviceID()
+		if seen[d] {
+			t.Fatalf("device id collision: %q", d)
+		}
+		seen[d] = true
+	}
 }
 
 func TestReadHostCallbackFile(t *testing.T) {

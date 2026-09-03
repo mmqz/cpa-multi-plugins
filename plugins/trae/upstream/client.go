@@ -242,7 +242,7 @@ func normalizeExpiresAt(v int64) int64 {
 // 非 2xx 时 rc 为 nil、body 为上游响应体（供调用方 Classify）、err 为 nil；
 // 只有传输层失败才返回 err。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
-			req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpChat, bytes.NewReader(PrepareBody(body, a.Variant)))
+	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpChat, bytes.NewReader(PrepareBody(body, a.Variant)))
 	if err != nil {
 		return nil, 0, nil, err
 	}

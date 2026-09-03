@@ -33,6 +33,31 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// randomDigits returns a random numeric string of n digits. Trae device ids
+// are numeric strings of 8-24 digits (cockpit-tools normalize_device_id →
+// is_numeric_id(8, 24); extract_device_id_from_logs matches [0-9]{8,24} and
+// TRAE_DEFAULT_DEVICE_ID is "0"). The previous randomHex(16) produced a
+// 32-char hex string containing letters — out of spec upstream.
+func randomDigits(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	for i := range b {
+		b[i] = '0' + b[i]%10
+	}
+	return string(b)
+}
+
+// newUUIDv4 returns a random RFC 4122 UUID v4 string. cockpit-tools uses
+// Uuid::new_v4() as the machine_id fallback (generate_service_machine_id,
+// trae_oauth.rs:183-185) when the real IDE telemetry.machineId is absent.
+func newUUIDv4() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 // urlEncode URL-encodes a string for use in a query parameter value.
 // Equivalent to Rust's urlencoding::encode (RFC 3986 unreserved set).
 // Go's url.QueryEscape produces RFC 3986-compatible output (space → +,
