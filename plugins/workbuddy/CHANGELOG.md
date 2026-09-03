@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.7
+
+### Discovery-first model output made explicit (repo v0.12.20)
+
+- **Config descriptions for `models_cn` / `models_global` / `models_intl`
+  rewritten**: "Leave empty (recommended)" now leads. An empty pin IS the
+  dynamic contract - each credential advertises exactly the model list its own
+  upstream token returns (per-realm discovery endpoint, 5-minute cache,
+  disabled models filtered), so upstream-unknown models are never advertised
+  and can never be routed there. Pins stay as a manual override for edge
+  cases; filling one with another realm's IDs is the one way to reintroduce
+  the 11102 wrong-routing class, and the config UI now warns about that.
+- No behavior change; model resolution is identical to 0.9.6 (repo v0.12.19).
+
 ## 0.9.6
 
 ### Per-realm static catalogs + user-pinnable credential model output (repo v0.12.19)
