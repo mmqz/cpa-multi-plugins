@@ -16,6 +16,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
+// wbModels is the CN realm static catalog (copilot.tencent.com), mirroring
+// Tencent's official CN built-in model table. v0.12.19: this list is NO
+// LONGER the fallback for Intl/Global credentials — see staticModelsForRealm.
+// Sharing it across realms is exactly what made Intl credentials advertise
+// deepseek-v4-flash and die with upstream 11102 "service info not found".
 func wbModels() []pluginapi.ModelInfo {
 	return []pluginapi.ModelInfo{
 		{ID: "glm-5.2", Name: "GLM-5.2", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
@@ -32,6 +37,147 @@ func wbModels() []pluginapi.ModelInfo {
 		{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 	}
+}
+
+// Realm static catalogs (v0.12.19). Policy: a static fallback entry must be
+// SUPPORTED by that realm's upstream. A false negative (model exists but is
+// not listed) heals via dynamic discovery or the models_cn/models_global/
+// models_intl config pins; a false positive (model listed but not registered
+// upstream) is a hard upstream 400 code 11102 "model [...] service info not
+// found". So the non-CN catalogs only carry models with direct upstream
+// evidence, and CN brand models (deepseek-v4-*, glm-*, kimi-*, minimax-*,
+// hy3*) stay out of them even though they dominate the CN catalog.
+//
+// Evidence for intl/global hy4-preview: Tencent's 2026-08-28 Hy4 Preview
+// launch covers WorkBuddy/CodeBuddy CN AND international editions (official
+// announcement; upstream API id "hy4-preview"). Community sessions on the
+// intl CLI additionally show claude/gpt/gemini families, but their exact
+// upstream IDs could not be verified without a live intl token — add them
+// via the models_intl / models_global config pins instead of guessing here.
+func staticModelsGlobal() []pluginapi.ModelInfo {
+	return []pluginapi.ModelInfo{
+		{ID: "hy4-preview", Name: "Hy4 Preview", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+	}
+}
+
+// staticModelsIntl is the codebuddy.ai (Intl) fallback catalog. See
+// staticModelsGlobal for the inclusion policy.
+func staticModelsIntl() []pluginapi.ModelInfo {
+	return staticModelsGlobal()
+}
+
+// staticModelsForRealm dispatches a realm key to its static catalog. The
+// legacy default stays the CN list for unknown realms.
+func staticModelsForRealm(realm string) []pluginapi.ModelInfo {
+	switch realm {
+	case "intl":
+		return staticModelsIntl()
+	case "global":
+		return staticModelsGlobal()
+	default:
+		return wbModels()
+	}
+}
+
+// pinnedModelsForRealm returns the ModelInfo list pinned via config_yaml
+// models_cn / models_global / models_intl for this realm, or nil. Pinned
+// lists are authoritative: they replace discovery for that realm entirely,
+// so the credential output is exactly the user-written "supported models"
+// list (the v0.12.19 formalization of writing supported models into the
+// credential output).
+func pinnedModelsForRealm(realm string) []pluginapi.ModelInfo {
+	ids := pinnedModelIDsForRealm(realm)
+	if len(ids) == 0 {
+		return nil
+	}
+	return buildModelInfos(ids)
+}
+
+// buildModelInfos maps raw upstream model IDs to ModelInfo, reusing the
+// static catalogs' metadata for known IDs and generic defaults otherwise —
+// an unknown ID still gets advertised because the user pinned it deliberately.
+func buildModelInfos(ids []string) []pluginapi.ModelInfo {
+	meta := map[string]pluginapi.ModelInfo{}
+	for _, m := range wbModels() {
+		meta[strings.ToLower(m.ID)] = m
+	}
+	for _, m := range staticModelsGlobal() {
+		meta[strings.ToLower(m.ID)] = m
+	}
+	out := make([]pluginapi.ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		if m, ok := meta[strings.ToLower(id)]; ok {
+			out = append(out, m)
+			continue
+		}
+		out = append(out, pluginapi.ModelInfo{ID: id, Name: id, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}})
+	}
+	return out
+}
+
+// parsePinnedModelList decodes a models_* config value: a comma-separated
+// upstream model ID list, optionally quoted or YAML flow-style ([a, b]).
+// Returns trimmed, de-duplicated (case-insensitive), non-empty IDs in order.
+func parsePinnedModelList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	raw = strings.Trim(raw, "\"'")
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		raw = raw[1 : len(raw)-1]
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		id := strings.TrimSpace(part)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+// discoverModelsFn is the seam for upstream realm discovery; tests swap it
+// out to stay off the network.
+var discoverModelsFn = func(accessToken, realm string) ([]pluginapi.ModelInfo, error) {
+	return callModelsAPI(accessToken, realm)
+}
+
+// fetchDynamicModelsFromStorage resolves ONE credential's advertised model
+// list, in priority order:
+//  1. the realm's pinned config (models_cn / models_global / models_intl) —
+//     the user-written "supported models" list, which also skips discovery;
+//  2. per-realm dynamic discovery, cached (v0.12.18);
+//  3. the realm's static catalog (v0.12.19: per-realm, no longer the shared
+//     CN-flavored list that made Intl credentials advertise
+//     deepseek-v4-flash and fail with upstream 11102).
+func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
+	accessToken := ""
+	if len(storageJSON) > 0 {
+		if tok, ok := extractAccessToken(storageJSON); ok {
+			accessToken = tok
+		}
+	}
+	realm := realmForStorage(storageJSON, accessToken)
+	if pinned := pinnedModelsForRealm(realm); len(pinned) > 0 {
+		return pinned
+	}
+	if accessToken == "" {
+		return staticModelsForRealm(realm)
+	}
+	if models, ok := cachedDynamicModels(realm); ok {
+		return models
+	}
+	if dyn, err := discoverModelsFn(accessToken, realm); err == nil && len(dyn) > 0 {
+		storeDynamicModels(realm, dyn)
+		return dyn
+	}
+	return staticModelsForRealm(realm)
 }
 
 // cachedDynamicModels returns the cached discovery result for ONE realm.
@@ -52,27 +198,6 @@ func storeDynamicModels(realm string, models []pluginapi.ModelInfo) {
 	dynamicModelsCache.Lock()
 	dynamicModelsCache.realms[realm] = realmModelsEntry{models: models, fetched: time.Now()}
 	dynamicModelsCache.Unlock()
-}
-
-func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
-	accessToken := ""
-	if len(storageJSON) > 0 {
-		if tok, ok := extractAccessToken(storageJSON); ok {
-			accessToken = tok
-		}
-	}
-	if accessToken == "" {
-		return wbModels()
-	}
-	realm := realmForStorage(storageJSON, accessToken)
-	if models, ok := cachedDynamicModels(realm); ok {
-		return models
-	}
-	if dyn, err := callModelsAPI(accessToken, realm); err == nil && len(dyn) > 0 {
-		storeDynamicModels(realm, dyn)
-		return dyn
-	}
-	return wbModels()
 }
 
 // realmForStorage classifies an auth storage blob into its upstream realm

@@ -17,18 +17,18 @@ package main
 #include <stdlib.h>
 
 typedef struct {
-	void* ptr;
-	size_t len;
+        void* ptr;
+        size_t len;
 } cliproxy_buffer;
 
 typedef int (*cliproxy_host_call_fn)(void*, const char*, const uint8_t*, size_t, cliproxy_buffer*);
 typedef void (*cliproxy_host_free_fn)(void*, size_t);
 
 typedef struct {
-	uint32_t abi_version;
-	void* host_ctx;
-	cliproxy_host_call_fn call;
-	cliproxy_host_free_fn free_buffer;
+        uint32_t abi_version;
+        void* host_ctx;
+        cliproxy_host_call_fn call;
+        cliproxy_host_free_fn free_buffer;
 } cliproxy_host_api;
 
 typedef int (*cliproxy_plugin_call_fn)(char*, uint8_t*, size_t, cliproxy_buffer*);
@@ -36,19 +36,19 @@ typedef void (*cliproxy_plugin_free_fn)(void*, size_t);
 typedef void (*cliproxy_plugin_shutdown_fn)(void);
 
 typedef struct {
-	uint32_t abi_version;
-	cliproxy_plugin_call_fn call;
-	cliproxy_plugin_free_fn free_buffer;
-	cliproxy_plugin_shutdown_fn shutdown;
+        uint32_t abi_version;
+        cliproxy_plugin_call_fn call;
+        cliproxy_plugin_free_fn free_buffer;
+        cliproxy_plugin_shutdown_fn shutdown;
 } cliproxy_plugin_api;
 
 // Wrappers so Go can invoke the host function-pointer table via cgo. The host
 // API captured at init is used to push streaming chunks back asynchronously.
 static int wb_call_host(cliproxy_host_api* api, const char* method, const uint8_t* request, size_t request_len, cliproxy_buffer* response) {
-	return api->call(api->host_ctx, method, request, request_len, response);
+        return api->call(api->host_ctx, method, request, request_len, response);
 }
 static void wb_free_host_buffer(cliproxy_host_api* api, void* ptr, size_t len) {
-	api->free_buffer(ptr, len);
+        api->free_buffer(ptr, len);
 }
 
 extern int cliproxyPluginCall(char*, uint8_t*, size_t, cliproxy_buffer*);
@@ -333,7 +333,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.5"
+var version = "0.9.6"
 
 func wbRegistration() registration {
 	return registration{
@@ -350,7 +350,10 @@ func wbRegistration() registration {
 				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily access-token refresh at 22:00 local time to prevent Keycloak offline-session expiry (default true)."},
 				{Name: "login_platform", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"CLI", "ide"}, Description: "Client variant used for NEW logins: CLI (WorkBuddy, default) or ide (CodeBuddy IDE). Existing accounts keep the platform recorded at login/import time."},
 				{Name: "login_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl"}, Description: "Realm for NEW logins: cn (copilot.tencent.com, default) or intl (codebuddy.ai, IDE client; merged codebuddy-intl plugin). Global (workbuddy.ai) accounts are added via panel credential import."},
-				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning."},
+				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning. NOTE: for realm-scoped pinning use models_cn / models_global / models_intl below."},
+				{Name: "models_cn", Type: pluginapi.ConfigFieldTypeString, Description: "Optional pinned model IDs (comma-separated upstream IDs) for CN accounts' model output; overrides dynamic discovery. Empty = discovery + CN static catalog."},
+				{Name: "models_global", Type: pluginapi.ConfigFieldTypeString, Description: "Optional pinned model IDs (comma-separated upstream IDs) for Global (workbuddy.ai) accounts' model output; overrides dynamic discovery. Empty = discovery + Global static catalog."},
+				{Name: "models_intl", Type: pluginapi.ConfigFieldTypeString, Description: "Optional pinned model IDs (comma-separated upstream IDs) for Intl (codebuddy.ai) accounts' model output; overrides dynamic discovery. Empty = discovery + Intl static catalog."},
 				{Name: "scheduler_mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{schedulerModeOff, schedulerModeCredits}, Description: "Multi-account selection: off (defer to built-in, default) or credits (pick highest remaining). WARNING: when off + lifecycle_auto=false, exhausted accounts may still be routed — enable lifecycle_auto or set scheduler_mode=credits."},
 				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional override of CPAMP usage import URL (default http://cpa-manager-plus:18317/v0/management/usage/import; also env USAGE_REPORT_URL)."},
 				{Name: "usage_report_key", Type: pluginapi.ConfigFieldTypeString, Description: "Optional CPAMP admin key override. Prefer auto-detect from env CPAMP_ADMIN_KEY / USAGE_REPORT_KEY or secret file /run/secrets/cpamp_admin_key."},

@@ -56,11 +56,12 @@ func realmDisplayName(realm string) string {
 }
 
 // modelHintForRealm renders the best-known model catalog for a realm.
-// Cached realm discovery (if fresh) is the truth; otherwise the static list
-// is shown but explicitly labeled as CN-flavored and possibly wrong for the
-// realm — honest fallback beats a silently wrong answer. Network calls are
-// deliberately NOT made here: the executor error path must stay fast, and a
-// doomed 15s discovery call during error handling would only add latency.
+// Cached realm discovery (if fresh) is the truth; otherwise the realm's
+// static catalog is shown (v0.12.19: per-realm — the CN list is no longer
+// shown for Intl/Global accounts, which used to advertise models their
+// gateway rejects with 11102). Network calls are deliberately NOT made here:
+// the executor error path must stay fast, and a doomed 15s discovery call
+// during error handling would only add latency.
 func modelHintForRealm(realm string) string {
 	ids := make([]string, 0, 16)
 	if ms, ok := cachedDynamicModels(realm); ok {
@@ -72,10 +73,15 @@ func modelHintForRealm(realm string) string {
 	}
 	label := "该区域缓存目录 / cached realm catalog"
 	if len(ids) == 0 {
-		for _, m := range wbModels() {
+		for _, m := range staticModelsForRealm(realm) {
 			ids = append(ids, m.ID)
 		}
-		label = "静态 CN 目录（可能与该区域不符，请以 /models 实际返回为准） / static CN catalog, may not match this realm"
+		realmTag := strings.ToUpper(strings.TrimSpace(realm))
+		if realmTag == "" {
+			realmTag = "CN"
+		}
+		label = fmt.Sprintf("静态 %s 目录（该区域已知支持；动态发现优先，也可用 models_%s 配置写死） / static %s catalog (known-good for this realm; dynamic discovery wins, or pin via models_%s)",
+			realmTag, strings.ToLower(realmTag), realmTag, strings.ToLower(realmTag))
 	}
 	if len(ids) > 20 {
 		ids = ids[:20]

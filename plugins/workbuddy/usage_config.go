@@ -54,7 +54,28 @@ var (
 	// plus per-IP token-bucket rate limiting on mutating endpoints.
 	managementAPIKey   = ""
 	managementAPIKeyMu sync.RWMutex
+
+	// pinnedModels: per-realm user-pinned model ID lists from config_yaml
+	// models_cn / models_global / models_intl (comma-separated upstream IDs).
+	// When set for a realm, the credential model output is exactly this list
+	// and dynamic discovery is skipped for it (v0.12.19) — the user-written
+	// "which models this credential supports" contract. Reconfigure with the
+	// key absent resets that realm to discovery + static fallback.
+	pinnedModels   = map[string][]string{}
+	pinnedModelsMu sync.RWMutex
 )
+
+// pinnedModelIDsForRealm snapshots the pinned ID list for a realm (nil when
+// the realm has no pins).
+func pinnedModelIDsForRealm(realm string) []string {
+	pinnedModelsMu.RLock()
+	defer pinnedModelsMu.RUnlock()
+	ids, ok := pinnedModels[realm]
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), ids...)
+}
 
 // Default URL tries localhost first (works for both bare-metal and Docker
 // host-network), falls back to Docker compose service name. The probe runs
@@ -77,6 +98,7 @@ func configure(raw []byte) {
 	nextLoginPlatform := "CLI"
 	nextLoginRegion := regionCN
 
+	nextPinned := map[string][]string{}
 	cfgURL, cfgKey := "", ""
 	if len(raw) > 0 {
 		var req struct {
@@ -132,6 +154,21 @@ func configure(raw []byte) {
 					v = strings.Trim(v, "\"'")
 					nextKeepaliveAuto = v == "true" || v == "1" || v == "yes" || v == "on"
 				}
+				if strings.HasPrefix(line, "models_cn:") {
+					if ids := parsePinnedModelList(strings.TrimPrefix(line, "models_cn:")); len(ids) > 0 {
+						nextPinned["cn"] = ids
+					}
+				}
+				if strings.HasPrefix(line, "models_global:") {
+					if ids := parsePinnedModelList(strings.TrimPrefix(line, "models_global:")); len(ids) > 0 {
+						nextPinned["global"] = ids
+					}
+				}
+				if strings.HasPrefix(line, "models_intl:") {
+					if ids := parsePinnedModelList(strings.TrimPrefix(line, "models_intl:")); len(ids) > 0 {
+						nextPinned["intl"] = ids
+					}
+				}
 			}
 		}
 	}
@@ -164,6 +201,10 @@ func configure(raw []byte) {
 	keepaliveAutoMu.Lock()
 	keepaliveAuto = nextKeepaliveAuto
 	keepaliveAutoMu.Unlock()
+
+	pinnedModelsMu.Lock()
+	pinnedModels = nextPinned
+	pinnedModelsMu.Unlock()
 
 	// management key: config_yaml > env > keep existing. Empty stays empty
 	// (plugin-layer auth disabled, host middleware still guards).

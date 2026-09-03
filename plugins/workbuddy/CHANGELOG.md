@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.9.6
+
+### Per-realm static catalogs + user-pinnable credential model output (repo v0.12.19)
+
+- **Per-realm static model catalogs** (`models.go`): the shared CN-flavored
+  fallback (`wbModels`) no longer answers `model.for_auth` for Intl/Global
+  credentials. A false negative (supported model missing from the fallback)
+  heals via dynamic discovery or the new pins; a false positive (advertised
+  but not registered upstream) is a hard `400 code 11102 "model [...]
+  service info not found"`, so `staticModelsIntl` / `staticModelsGlobal`
+  carry only models with direct upstream evidence (`hy4-preview` — Tencent's
+  2026-08-28 Hy4 Preview launch covers CN AND international editions), and
+  CN brand models (`deepseek-v4-*`, `glm-*`, `kimi-*`, `minimax-*`, `hy3*`)
+  stay out of them. Community-observed intl claude/gpt/gemini IDs are
+  deliberately NOT hardcoded: their exact upstream IDs could not be verified
+  without a live intl token.
+- **`models_cn` / `models_global` / `models_intl` config pins** (the
+  "把支持哪些模型写进凭证产出" contract): comma-separated upstream model IDs
+  per realm; when set, the credential's model output is exactly that list and
+  dynamic discovery is skipped for the realm (deterministic, no 15s discovery
+  latency). Missing key on reconfigure resets the realm to
+  discovery + static fallback. Known IDs reuse static-catalog metadata;
+  unknown IDs get generic metadata (the user pinned them deliberately).
+- **Fallback chain** for every credential is now
+  pinned config → per-realm discovery (realm-keyed cache, v0.12.18) →
+  per-realm static catalog.
+- **11102 error hint** (`chat_error.go`): the static-catalog branch of the
+  bilingual hint now renders the account's OWN realm catalog (labeled
+  "static INTL/GLOBAL/CN catalog (known-good for this realm …)") instead of
+  the old CN list with a "may not match this realm" disclaimer.
+- Tests (`models_realm_test.go`): realm catalogs may not contain CN-only
+  models; pinned-config parsing (quoting / YAML flow lists / dedup);
+  config_yaml envelope → realm pins end-to-end; pins win and skip discovery;
+  discovery failure falls back to the realm's own catalog; hint rendering
+  per realm.
+
 ## 0.9.5
 
 ### Realm-aware model discovery + 11102 actionable error (repo v0.12.18)
