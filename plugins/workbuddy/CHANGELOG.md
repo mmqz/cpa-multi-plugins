@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.9.5
+
+### Realm-aware model discovery + 11102 actionable error (repo v0.12.18)
+
+- **Intl chat 400 `code 11102 "model [...] service info not found"`** (user
+  report on the intl credential): chat routing itself was correct (Intl tokens
+  hit codebuddy.ai), but model DISCOVERY was not — `callModelsAPI` only
+  special-cased Global and sent Intl tokens to the CN endpoint
+  (copilot.tencent.com), whose answer (or the CN-flavored static fallback)
+  then advertised CN-only models such as `deepseek-v4-flash` to Intl accounts.
+  The Intl gateway rejects those with 11102.
+  - `modelsEndpointFor(realm)`: per-realm discovery URL + Origin/Referer —
+    cn → copilot.tencent.com, global → workbuddy.ai, intl → codebuddy.ai
+    (with the IDE header set, parity with `applyRealmHeaders`).
+  - `realmForStorage`: classifies the auth blob (nested/flat domain, region
+    field, JWT-iss fallback) into cn|global|intl.
+  - `dynamicModelsCache` re-keyed per realm — a single shared entry let one
+    realm's answer satisfy `model.for_auth` for accounts on another realm.
+- **11102 → bilingual actionable error** (`chat_error.go`): the executor
+  error paths (non-stream, sync stream, async pump) now detect the 11102
+  model-catalog rejection and rewrite it into a message naming the realm and
+  its best-known model catalog (cached realm discovery; the static fallback is
+  explicitly labeled as CN-flavored and possibly wrong). Non-11102 failures
+  keep the historical `upstream <status>: <payload>` shape.
+- Tests: `models_realm_test.go` (endpoint routing, storage classification,
+  per-realm cache isolation, hint rendering, 11102 rewrite + passthrough
+  guard). Verified live: 401 passthrough shape unchanged, `/v1/models`
+  unaffected, upstream probes (codebuddy.ai answers 401 auth-first with an
+  invalid token — the user's 400/11102 proves the request reached the model
+  catalog layer with a valid one).
+
 ## 0.9.4
 
 ### Intl billing gateway fix + single OAuth entry (repo v0.12.10)

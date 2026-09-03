@@ -34,26 +34,27 @@ func wbModels() []pluginapi.ModelInfo {
 	}
 }
 
-func cachedDynamicModels() ([]pluginapi.ModelInfo, bool) {
+// cachedDynamicModels returns the cached discovery result for ONE realm.
+// v0.12.18: the cache is keyed by realm (cn|global|intl) — a single shared
+// entry let a CN discovery answer satisfy model.for_auth for an Intl account
+// (and vice versa), advertising models the account's gateway never served.
+func cachedDynamicModels(realm string) ([]pluginapi.ModelInfo, bool) {
 	dynamicModelsCache.RLock()
 	defer dynamicModelsCache.RUnlock()
-	if len(dynamicModelsCache.models) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsCacheTTL {
-		return dynamicModelsCache.models, true
+	entry, ok := dynamicModelsCache.realms[realm]
+	if !ok || len(entry.models) == 0 || time.Since(entry.fetched) >= dynamicModelsCacheTTL {
+		return nil, false
 	}
-	return nil, false
+	return entry.models, true
 }
 
-func storeDynamicModels(models []pluginapi.ModelInfo) {
+func storeDynamicModels(realm string, models []pluginapi.ModelInfo) {
 	dynamicModelsCache.Lock()
-	dynamicModelsCache.models = models
-	dynamicModelsCache.fetched = time.Now()
+	dynamicModelsCache.realms[realm] = realmModelsEntry{models: models, fetched: time.Now()}
 	dynamicModelsCache.Unlock()
 }
 
 func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
-	if models, ok := cachedDynamicModels(); ok {
-		return models
-	}
 	accessToken := ""
 	if len(storageJSON) > 0 {
 		if tok, ok := extractAccessToken(storageJSON); ok {
@@ -63,11 +64,65 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 	if accessToken == "" {
 		return wbModels()
 	}
-	if dyn, err := callModelsAPI(accessToken); err == nil && len(dyn) > 0 {
-		storeDynamicModels(dyn)
+	realm := realmForStorage(storageJSON, accessToken)
+	if models, ok := cachedDynamicModels(realm); ok {
+		return models
+	}
+	if dyn, err := callModelsAPI(accessToken, realm); err == nil && len(dyn) > 0 {
+		storeDynamicModels(realm, dyn)
 		return dyn
 	}
 	return wbModels()
+}
+
+// realmForStorage classifies an auth storage blob into its upstream realm
+// ("cn" | "global" | "intl"). Model discovery and the 11102 error hint both
+// need the realm, but callers only have the raw storage JSON: plugin OAuth
+// files are the nested {auth:{domain,region,...}} shape, credentials imported
+// through the CPA manager UI may be flat {domain}/{region}, and legacy files
+// carry neither — for those the JWT iss decides (Global vs CN).
+func realmForStorage(raw []byte, accessToken string) string {
+	var probe struct {
+		Auth struct {
+			Domain string `json:"domain"`
+			Region string `json:"region"`
+		} `json:"auth"`
+		Domain string `json:"domain"`
+		Region string `json:"region"`
+	}
+	if err := json.Unmarshal(raw, &probe); err == nil {
+		if r := realmFromRegionDomain(probe.Auth.Region, probe.Auth.Domain); r != "" {
+			return r
+		}
+		if r := realmFromRegionDomain(probe.Region, probe.Domain); r != "" {
+			return r
+		}
+	}
+	if isGlobalToken(accessToken) {
+		return "global"
+	}
+	return "cn"
+}
+
+// realmFromRegionDomain maps one (region, domain) pair to a realm key, or ""
+// when neither field identifies a realm (empty/legacy files).
+func realmFromRegionDomain(region, domain string) string {
+	switch strings.ToLower(strings.TrimSpace(region)) {
+	case "intl":
+		return "intl"
+	case "global":
+		return "global"
+	case "cn":
+		return "cn"
+	}
+	d := strings.ToLower(strings.TrimSpace(domain))
+	if isGlobalDomain(d) {
+		return "global"
+	}
+	if isIntlDomain(d) {
+		return "intl"
+	}
+	return ""
 }
 
 // fetchDynamicModels calls the WorkBuddy API to get the latest model list.
@@ -115,21 +170,45 @@ func isGlobalToken(accessToken string) bool {
 	return strings.Contains(strings.ToLower(claims.ISS), "workbuddy.ai")
 }
 
+// modelsEndpointFor returns the per-realm model-discovery URL and the
+// Origin/Referer base for it. Realm keys: "cn" | "global" | "intl".
+func modelsEndpointFor(realm string) (modelsURL, origin string) {
+	switch realm {
+	case "global":
+		return upstreamBaseGlobal + "/console/enterprises/personal/models", originRefererGlobal
+	case "intl":
+		return upstreamBaseIntl + "/console/enterprises/personal/models", originRefererIntl
+	default:
+		return endpointModels, originReferer
+	}
+}
+
 // callModelsAPI GETs /console/enterprises/personal/models from the upstream.
 // Uses the shared client (connection pooling) with a per-request 15s budget;
 // the shared client's own 120s timeout stays as the outer bound.
-func callModelsAPI(accessToken string) ([]pluginapi.ModelInfo, error) {
+func callModelsAPI(accessToken string, realm ...string) ([]pluginapi.ModelInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	// Model discovery is per-realm: Global tokens must query workbuddy.ai,
-	// not copilot.tencent.com (which 500s for Global tokens). Decode JWT iss.
-	isGlobal := isGlobalToken(accessToken)
-	modelsURL := endpointModels
-	origin := originReferer
-	if isGlobal {
-		modelsURL = upstreamBaseGlobal + "/console/enterprises/personal/models"
-		origin = originRefererGlobal
+	// Model discovery is per-realm (v0.12.18): Global tokens query
+	// workbuddy.ai, Intl (codebuddy.ai) tokens query codebuddy.ai, and CN
+	// tokens query copilot.tencent.com. The old code only special-cased
+	// Global and sent Intl tokens to the CN endpoint, whose answer (or the
+	// static fallback) then advertised CN-only models like deepseek-v4-flash
+	// to Intl accounts — the Intl gateway rejected those with code 11102
+	// "model [...] service info not found". An empty realm keeps the legacy
+	// JWT-iss derivation (Global vs CN) for old callers.
+	r := ""
+	if len(realm) > 0 {
+		r = realm[0]
 	}
+	if r == "" {
+		if isGlobalToken(accessToken) {
+			r = "global"
+		} else {
+			r = "cn"
+		}
+	}
+	modelsURL, origin := modelsEndpointFor(r)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
 	if err != nil {
 		return nil, err
@@ -139,6 +218,14 @@ func callModelsAPI(accessToken string) ([]pluginapi.ModelInfo, error) {
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
 	req.Header.Set("User-Agent", clientUA)
+	if r == "intl" {
+		// The Intl gateway expects the IDE client header set (parity with
+		// applyRealmHeaders on the billing path).
+		req.Header.Set("X-IDE-Type", "IDE")
+		req.Header.Set("X-IDE-Name", "CodeBuddy")
+		req.Header.Set("X-IDE-Version", "1.100.0")
+		req.Header.Set("X-Product-Version", "1.100.0")
+	}
 	resp, err := hostHTTPDo(req)
 	if err != nil {
 		return nil, err

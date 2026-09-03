@@ -68,7 +68,7 @@ func streamHeaders() http.Header {
 // the outbound call and host transport policy applies. The host bridge emits
 // arbitrary 32KB chunks, so we adapt to io.Reader and keep the bufio.Scanner
 // SSE line framing unchanged.
-func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID string) {
+func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID string, sa *storedAuth) {
 	// Always close the host stream exactly once on every exit path.
 	closed := false
 	closeOnce := func() {
@@ -97,7 +97,7 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		if authUID != "" {
 			go reconcileByUID(authUID, statusCode, string(errPayload))
 		}
-		streamEmitError(streamID, fmt.Sprintf("upstream %d: %s", statusCode, truncateRedacted(string(errPayload), 200)))
+		streamEmitError(streamID, translateChatUpstreamError(statusCode, string(errPayload), sa).Error())
 		return
 	}
 	collector := &sseUsageCollector{}
@@ -155,7 +155,7 @@ func collectUpstreamStream(body []byte, sa *storedAuth, sseFramed bool, collecto
 		if sa != nil && sa.Account.UID != "" {
 			go reconcileByUID(sa.Account.UID, statusCode, string(errPayload))
 		}
-		return nil, statusCode, fmt.Errorf("upstream %d: %s", statusCode, truncateRedacted(string(errPayload), 200))
+		return nil, statusCode, translateChatUpstreamError(statusCode, string(errPayload), sa)
 	}
 	chunks, errAgg := aggregateSSEWithCollector(reader, sseFramed, collector)
 	if errAgg != nil {

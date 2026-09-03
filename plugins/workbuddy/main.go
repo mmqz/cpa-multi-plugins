@@ -377,11 +377,19 @@ func wbRegistration() registration {
 // upstream call per account.
 const dynamicModelsCacheTTL = 5 * time.Minute
 
-var dynamicModelsCache struct {
-	sync.RWMutex
+// realmModelsEntry is one realm's cached discovery result. v0.12.18: the
+// cache is keyed by realm (cn|global|intl) — a single shared entry let one
+// realm's answer (or CN-flavored static fallback) satisfy model.for_auth for
+// accounts on another realm, advertising models their gateway never served.
+type realmModelsEntry struct {
 	models  []pluginapi.ModelInfo
 	fetched time.Time
 }
+
+var dynamicModelsCache = struct {
+	sync.RWMutex
+	realms map[string]realmModelsEntry
+}{realms: map[string]realmModelsEntry{}}
 
 //
 // CPA applies oauth-model-alias to the models this plugin registers, so the
@@ -762,7 +770,9 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		payload, _ := io.ReadAll(reader)
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
 		reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
-		return nil, fmt.Errorf("upstream %d: %s", statusCode, truncateRedacted(string(payload), 200))
+		// v0.12.18: 11102 model-catalog rejections become a bilingual,
+		// realm-aware actionable error; other failures keep the raw shape.
+		return nil, translateChatUpstreamError(statusCode, string(payload), sa)
 	}
 	completion, err := aggregateCompletion(reader, req.Model)
 	if err != nil {
@@ -834,7 +844,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		return okEnvelope(streamResponse{Headers: headers})
 	}
 	backendHeaders(httpReq, sa)
-	go pumpUpstreamStream(httpReq, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID)
+	go pumpUpstreamStream(httpReq, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, sa)
 	return okEnvelope(streamResponse{Headers: headers})
 }
 
