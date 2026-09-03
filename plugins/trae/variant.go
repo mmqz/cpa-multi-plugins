@@ -7,6 +7,7 @@ package main
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -83,6 +84,8 @@ var (
 	callbackBindValue   = "127.0.0.1"
 	callbackPublicMu    sync.RWMutex
 	callbackPublicValue = "127.0.0.1"
+	callbackPortMu      sync.RWMutex
+	callbackPortValue   int // 0 = ephemeral port per login (default)
 )
 
 // loadedCallbackBind returns the local bind address for callback listeners.
@@ -105,6 +108,16 @@ func loadedCallbackPublicHost() string {
 	return callbackPublicValue
 }
 
+// loadedCallbackPort returns the fixed callback listener port (0 = ephemeral).
+// v0.12.14: a fixed port lets Docker/published-port deployments map the
+// callback listener once (e.g. -p 127.0.0.1:41890:41890); the browser
+// redirect from the Trae authorization page then completes automatically.
+func loadedCallbackPort() int {
+	callbackPortMu.RLock()
+	defer callbackPortMu.RUnlock()
+	return callbackPortValue
+}
+
 // configureCallback parses callback_bind / callback_public_host from the
 // plugin config block (same YAML line format as login_variant).
 func configureCallback(lines []string) {
@@ -123,6 +136,21 @@ func configureCallback(lines []string) {
 				callbackPublicMu.Lock()
 				callbackPublicValue = v
 				callbackPublicMu.Unlock()
+			}
+		}
+	}
+}
+
+// configureCallbackPort parses callback_port (v0.12.14).
+func configureCallbackPort(lines []string) {
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "callback_port:") {
+			v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "callback_port:")), "\"'")
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 65535 {
+				callbackPortMu.Lock()
+				callbackPortValue = n
+				callbackPortMu.Unlock()
 			}
 		}
 	}
@@ -150,6 +178,7 @@ func configureVariant(raw []byte) {
 				}
 			}
 			configureCallback(lines)
+			configureCallbackPort(lines)
 		}
 	}
 	if next == "" {

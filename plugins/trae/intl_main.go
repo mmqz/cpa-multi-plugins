@@ -432,9 +432,15 @@ func intlhandleStartLogin(request []byte) ([]byte, error) {
 	// in-process loopback listener (v0.12.12; parity with main.go).
 	host := parseLoginHostContext(request)
 
-	ln, err := net.Listen("tcp", loadedCallbackBind()+":0")
+	// LOCAL LISTENER ONLY (v0.12.12): the INTL authorization page
+	// (www.trae.ai/authorization, live-verified 2026-09-03) hard-validates
+	// auth_callback_url against /^http:\/\/127\.0\.0\.1:(\d+)\/authorize$/ —
+	// the host resource route (v0.12.4-0.12.11) failed client-side with
+	// "Login Failed / Something went wrong." before any API call. See the
+	// long comment in main.go startLoginWithVariant.
+	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", loadedCallbackBind(), loadedCallbackPort()))
 	if err != nil {
-		return nil, fmt.Errorf("allocate callback port: %w", err)
+		return nil, fmt.Errorf("allocate callback port (bind=%s port=%d): %w — with a fixed callback_port another process may be holding it", loadedCallbackBind(), loadedCallbackPort(), err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	cbURL := fmt.Sprintf("http://127.0.0.1:%d/authorize", port)
@@ -504,7 +510,7 @@ func intlhandleStartLogin(request []byte) ([]byte, error) {
 		URL:       verificationURI,
 		State:     loginTraceID,
 		ExpiresAt: time.Now().Add(loginTTL).UTC(),
-		Metadata:  map[string]any{"logo": pluginLogoURL, "callback_url": cbURL},
+		Metadata:  map[string]any{"logo": pluginLogoURL, "callback_url": cbURL, "fallback_callback_path": resourceCallbackPath},
 	})
 }
 
