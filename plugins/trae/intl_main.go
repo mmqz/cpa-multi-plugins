@@ -603,15 +603,33 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 			Message: "login completed but no authCode received — please retry",
 		})
 	}
-	// Exchange authCode for tokens via multi-origin fallback
-	// (cockpit-tools candidate_account_api_origins): derive origins from
-	// the callback loginHost (www.→api. rewrite) and append the Intl
-	// account-API defaults. The full DeviceInfo mirrors cockpit-tools
-	// build_official_device_info and reuses the SAME machine/device ids
-	// embedded in the login URL (previously random hex ids were sent).
+	// Exchange authCode for tokens via the official account-API origins
+	// (cockpit-tools candidate_account_api_origins, v0.12.24): the official
+	// client exchanges ONLY against grow-* origins (SG default; USTTP via
+	// the callback userTag) — the callback loginHost (api-sg-central.trae.ai
+	// etc.) is a business-API host and answers an auth code with HTTP 401
+	// business code 20405 (live-verified 2026-09-04). DeviceInfo mirrors
+	// build_official_device_info, reuses the SAME machine/device ids
+	// embedded in the login URL, and carries a fresh per-login EC P-256
+	// DevicePublicKey (an empty value 401s the same way — the official
+	// client uploads a bound public key on first exchange).
+	pubKeyPEM, privKeyPEM, keyErr := generateDeviceKeyPair()
+	if keyErr != nil {
+		// An exchange without the key pair would fail with 20405 anyway;
+		// fail here with the precise cause instead.
+		keyMsg := fmt.Sprintf("device key pair: %v", keyErr)
+		recordLoginOutcome(state, false, keyMsg)
+		clearPendingLogin(lc.authDir)
+		intlloginStates.Delete(state)
+		closeListener(lc.listener)
+		return okEnvelope(pluginapi.AuthLoginPollResponse{
+			Status:  pluginapi.AuthLoginStatusError,
+			Message: keyMsg,
+		})
+	}
 	di := intlbuildOfficialDeviceInfo(
 		lc.deviceID, lc.machineID, oauthPlatformCode, intlOauthDeviceName,
-		intlOauthDeviceBrand, oauthAppVersion, intlOauthDeviceType, intlOauthOSVersion,
+		intlOauthDeviceBrand, oauthAppVersion, intlOauthDeviceType, intlOauthOSVersion, pubKeyPEM,
 	)
 	tokenBody := map[string]any{
 		"ClientID":     intlupstreamClient.ClientID,
@@ -622,7 +640,7 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 	}
 	tokenBytes, _ := json.Marshal(tokenBody)
 	tokenRaw, exErr := intlexchangeTokenCandidates(
-		intlbuildAPIURLs(lc.loginHost, "/trae/api/v3/oauth/ExchangeToken", false), tokenBytes)
+		intlauthCodeExchangeURLs(lc.loginHost, lc.userTag), tokenBytes)
 	if exErr != nil {
 		recordLoginOutcome(state, false, exErr.Error())
 		clearPendingLogin(lc.authDir)
@@ -679,17 +697,19 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 		"type":     intlproviderName,
 		"provider": intlproviderName,
 		"auth": map[string]any{
-			"accessToken":  a.AccessToken,
-			"refreshToken": a.RefreshToken,
-			"expiresAt":    a.ExpiresAt,
-			"domain":       a.Domain,
-			"apiHost":      a.APIHost,
-			"variant":      "intl",
-			"region":       a.Region,
-			"scope":        a.Scope,
-			"tenant":       a.Tenant,
-			"appLanguage":  a.AppLanguage,
-			"appVersion":   a.AppVersion,
+			"accessToken":      a.AccessToken,
+			"refreshToken":     a.RefreshToken,
+			"expiresAt":        a.ExpiresAt,
+			"domain":           a.Domain,
+			"apiHost":          a.APIHost,
+			"variant":          "intl",
+			"region":           a.Region,
+			"scope":            a.Scope,
+			"tenant":           a.Tenant,
+			"appLanguage":      a.AppLanguage,
+			"appVersion":       a.AppVersion,
+			"devicePublicKey":  pubKeyPEM,
+			"devicePrivateKey": privKeyPEM,
 		},
 		"account": map[string]any{
 			"uid":          a.UID,
@@ -992,9 +1012,13 @@ type intlloginCtx struct {
 	deviceID      string
 	machineID     string
 	loginHost     string
-	authCode      string
-	err           error
-	done          chan struct{}
+	// userTag echoes the callback's userTag parameter (v0.12.24, cockpit-tools
+	// TraeCallbackPayload.user_tag): USTTP accounts exchange against the US
+	// origin (grow-normal.traeapi.us) instead of the SG default.
+	userTag  string
+	authCode string
+	err      error
+	done     chan struct{}
 
 	// authDir: host auth dir for the .oauth callback-file fallback.
 	authDir string
@@ -1095,6 +1119,16 @@ func intlHandleCallbackConn(conn net.Conn, lc *intlloginCtx) bool {
 	for _, k := range []string{"loginHost", "login_host", "LoginHost", "host", "consoleHost"} {
 		if v := vals.Get(k); v != "" {
 			lc.loginHost = v
+			break
+		}
+	}
+
+	// userTag (v0.12.24): USTTP accounts exchange against the US origin
+	// (grow-normal.traeapi.us) instead of the SG default (cockpit-tools
+	// TraeCallbackPayload.user_tag).
+	for _, k := range []string{"userTag", "user_tag", "UserTag"} {
+		if v := vals.Get(k); v != "" {
+			lc.userTag = v
 			break
 		}
 	}

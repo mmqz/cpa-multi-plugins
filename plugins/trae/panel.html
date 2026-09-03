@@ -158,7 +158,7 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     <span class="toggle" id="svtime"></span>
   </div>
   <div class="card" style="margin-bottom:16px">
-    <div id="loginStatus" style="margin-bottom:6px;padding:6px 8px;border:1px solid rgba(128,128,128,.35);border-radius:6px;color:var(--mut);font-size:12px;line-height:1.5">登录状态：加载中…</div>
+    <div id="loginStatus" style="margin-bottom:6px;padding:6px 8px;border:1px solid rgba(128,128,128,.35);border-radius:6px;color:var(--mut);font-size:12px;line-height:1.5;word-break:break-all;max-height:9em;overflow-y:auto">登录状态：加载中…</div>
     <div style="margin-bottom:6px;color:var(--mut)">远程登录兜底：授权完成后浏览器若停在「无法连接 127.0.0.1:&lt;端口&gt;」页面，复制地址栏完整链接粘贴到此处提交，即可完成登录（无需改写前缀）。注意：必须粘贴<b>本次登录</b>生成的链接，登录开始超过 15 分钟或服务重启过则请重新点「登录」后再复制新链接。</div>
     <div style="display:flex;gap:8px">
       <input id="cbPaste" type="text" placeholder="http://127.0.0.1:&lt;port&gt;/authorize?isRedirect=true&authCodeInfo=…" class="field-input" style="flex:1">
@@ -466,7 +466,11 @@ async function refreshLoginStatus(){
     if(!d.pending){
       if(d.outcome){
         const om=(d.outcome.message||"").replace(/\s+/g," ").trim();
-        el.textContent = d.outcome.ok ? "\u2713 最近一次登录已完成" : "\u2717 最近一次登录失败：" + (om.length>160 ? om.slice(0,160)+"…" : om);
+        // v0.12.24: show the FULL outcome message (the upstream code+reason
+        // extracted from ExchangeToken failures matters for diagnosis) with
+        // wrapping; the mouse-over title keeps a clean copy for copying.
+        el.textContent = d.outcome.ok ? "\u2713 最近一次登录已完成" : "\u2717 最近一次登录失败：" + om;
+        el.title = om;
       }else{
         el.textContent = "当前没有进行中的登录。在 CPA 主面板 OAuth 菜单发起登录后，这里会实时显示等待状态。";
       }

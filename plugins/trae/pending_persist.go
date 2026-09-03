@@ -358,6 +358,8 @@ func selfCompleteCN(lc *loginCtx, source string) {
 	}
 	var accessToken, refreshToken string
 	var expiresAt int64
+	// v0.12.24: device key pair for the auth-code exchange (device binding).
+	var cnDevicePublicKey, cnDevicePrivateKey string
 	if lc.refreshToken != "" {
 		a := &auth.Auth{
 			RefreshToken: lc.refreshToken,
@@ -372,9 +374,14 @@ func selfCompleteCN(lc *loginCtx, source string) {
 			accessToken, refreshToken, expiresAt = a.AccessToken, a.RefreshToken, a.ExpiresAt
 		}
 	} else {
+		pubKeyPEM, privKeyPEM, keyErr := generateDeviceKeyPair()
+		if keyErr != nil {
+			fail(fmt.Sprintf("device key pair: %v", keyErr))
+			return
+		}
 		di := buildOfficialDeviceInfo(
 			lc.deviceID, lc.machineID, oauthPlatformCodeFor(lc.variant), oauthDeviceName,
-			oauthDeviceBrand, cnupstream.IdeVersion, oauthDeviceType, oauthOSVersion,
+			oauthDeviceBrand, cnupstream.IdeVersion, oauthDeviceType, oauthOSVersion, pubKeyPEM,
 		)
 		tokenBody := map[string]any{
 			"ClientID":     cnupstream.ClientIDFor(lc.variant),
@@ -385,7 +392,7 @@ func selfCompleteCN(lc *loginCtx, source string) {
 		}
 		bodyBytes, _ := json.Marshal(tokenBody)
 		tokenRaw, exErr := exchangeTokenCandidates(
-			buildAPIURLs(lc.loginHost, "/trae/api/v3/oauth/ExchangeToken", true), bodyBytes)
+			authCodeExchangeURLsCN(lc.loginHost), bodyBytes)
 		if exErr != nil {
 			fail(exErr.Error())
 			return
@@ -398,6 +405,7 @@ func selfCompleteCN(lc *loginCtx, source string) {
 		if accessToken == "" {
 			accessToken = refreshToken
 		}
+		cnDevicePublicKey, cnDevicePrivateKey = pubKeyPEM, privKeyPEM
 	}
 	a := &auth.Auth{
 		AccessToken:  accessToken,
@@ -423,14 +431,16 @@ func selfCompleteCN(lc *loginCtx, source string) {
 		"type":     providerName,
 		"provider": providerName,
 		"auth": map[string]any{
-			"accessToken":  a.AccessToken,
-			"refreshToken": a.RefreshToken,
-			"expiresAt":    a.ExpiresAt,
-			"domain":       a.Domain,
-			"apiHost":      a.APIHost,
-			"machineId":    a.MachineID,
-			"deviceId":     a.DeviceID,
-			"variant":      a.Variant,
+			"accessToken":      a.AccessToken,
+			"refreshToken":     a.RefreshToken,
+			"expiresAt":        a.ExpiresAt,
+			"domain":           a.Domain,
+			"apiHost":          a.APIHost,
+			"machineId":        a.MachineID,
+			"deviceId":         a.DeviceID,
+			"variant":          a.Variant,
+			"devicePublicKey":  cnDevicePublicKey,
+			"devicePrivateKey": cnDevicePrivateKey,
 		},
 		"account": map[string]any{
 			"uid":          a.UID,
@@ -470,9 +480,14 @@ func selfCompleteIntl(lc *intlloginCtx, source string) {
 		fail("no authCode after restore")
 		return
 	}
+	pubKeyPEM, privKeyPEM, keyErr := generateDeviceKeyPair()
+	if keyErr != nil {
+		fail(fmt.Sprintf("device key pair: %v", keyErr))
+		return
+	}
 	di := intlbuildOfficialDeviceInfo(
 		lc.deviceID, lc.machineID, oauthPlatformCode, intlOauthDeviceName,
-		intlOauthDeviceBrand, oauthAppVersion, intlOauthDeviceType, intlOauthOSVersion,
+		intlOauthDeviceBrand, oauthAppVersion, intlOauthDeviceType, intlOauthOSVersion, pubKeyPEM,
 	)
 	tokenBody := map[string]any{
 		"ClientID":     intlupstreamClient.ClientID,
@@ -483,7 +498,7 @@ func selfCompleteIntl(lc *intlloginCtx, source string) {
 	}
 	tokenBytes, _ := json.Marshal(tokenBody)
 	tokenRaw, exErr := intlexchangeTokenCandidates(
-		intlbuildAPIURLs(lc.loginHost, "/trae/api/v3/oauth/ExchangeToken", false), tokenBytes)
+		intlauthCodeExchangeURLs(lc.loginHost, lc.userTag), tokenBytes)
 	if exErr != nil {
 		fail(exErr.Error())
 		return
@@ -535,17 +550,19 @@ func selfCompleteIntl(lc *intlloginCtx, source string) {
 		"type":     intlproviderName,
 		"provider": intlproviderName,
 		"auth": map[string]any{
-			"accessToken":  a.AccessToken,
-			"refreshToken": a.RefreshToken,
-			"expiresAt":    a.ExpiresAt,
-			"domain":       a.Domain,
-			"apiHost":      a.APIHost,
-			"variant":      "intl",
-			"region":       a.Region,
-			"scope":        a.Scope,
-			"tenant":       a.Tenant,
-			"appLanguage":  a.AppLanguage,
-			"appVersion":   a.AppVersion,
+			"accessToken":      a.AccessToken,
+			"refreshToken":     a.RefreshToken,
+			"expiresAt":        a.ExpiresAt,
+			"domain":           a.Domain,
+			"apiHost":          a.APIHost,
+			"variant":          "intl",
+			"region":           a.Region,
+			"scope":            a.Scope,
+			"tenant":           a.Tenant,
+			"appLanguage":      a.AppLanguage,
+			"appVersion":       a.AppVersion,
+			"devicePublicKey":  pubKeyPEM,
+			"devicePrivateKey": privKeyPEM,
 		},
 		"account": map[string]any{
 			"uid":          a.UID,

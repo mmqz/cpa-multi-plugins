@@ -312,6 +312,22 @@ func waitForGraceCompletion(t *testing.T, check func() bool) {
 	t.Fatalf("grace self-completion did not settle within 3s")
 }
 
+// waitForOutcome polls the outcome cache until the given state has a record
+// or the deadline passes. The self-completion goroutine records the outcome
+// AFTER its LoadAndDelete claim — a caller that only waits for the state to
+// disappear can race ahead of the record itself.
+func waitForOutcome(t *testing.T, state string) (loginOutcome, bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if o, ok := lookupLoginOutcome(state); ok {
+			return o, ok
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return loginOutcome{}, false
+}
+
 // Live login whose captured callback is never claimed by a host poll: after
 // the grace window the plugin must claim the state, run the self-completion
 // (which fails fast and cleanly on an empty token capture) and surface the
@@ -334,7 +350,7 @@ func TestLiveLoginSelfCompletesAfterGrace(t *testing.T) {
 		_, live := loginStates.Load(state)
 		return !live
 	})
-	o, ok := lookupLoginOutcome(state)
+	o, ok := waitForOutcome(t, state)
 	if !ok || o.ok {
 		t.Fatalf("outcome not recorded as failure: %+v (ok=%v)", o, ok)
 	}
@@ -412,7 +428,7 @@ func TestLiveLoginSelfCompletesAfterGraceIntl(t *testing.T) {
 		_, live := intlloginStates.Load(state)
 		return !live
 	})
-	o, ok := lookupLoginOutcome(state)
+	o, ok := waitForOutcome(t, state)
 	if !ok || o.ok || !strings.Contains(o.msg, "no authCode") {
 		t.Fatalf("intl outcome wrong: %+v (ok=%v)", o, ok)
 	}

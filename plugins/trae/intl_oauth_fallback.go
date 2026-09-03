@@ -194,6 +194,26 @@ func intlrequestLoginGuidance(cn bool, loginTraceID string) (loginHost string, l
 	return intlOAuthDefaultHost, nil
 }
 
+// intlsurfaceUpstreamError extracts the Volcengine-style
+// ResponseMetadata.Error {Code, Message} from an error body so the recorded
+// failure shows the actual upstream reason (v0.12.24). Non-JSON bodies fall
+// back to the truncated raw text.
+func intlsurfaceUpstreamError(data []byte) string {
+	var env struct {
+		ResponseMetadata struct {
+			Error struct {
+				Code    string `json:"Code"`
+				Message string `json:"Message"`
+			} `json:"Error"`
+		} `json:"ResponseMetadata"`
+	}
+	if err := json.Unmarshal(data, &env); err == nil && (env.ResponseMetadata.Error.Code != "" || env.ResponseMetadata.Error.Message != "") {
+		msg := strings.TrimSpace(env.ResponseMetadata.Error.Message)
+		return fmt.Sprintf("upstream code=%s (%s)", env.ResponseMetadata.Error.Code, intltruncate(msg, 160))
+	}
+	return "(body=" + intltruncate(string(data), 120) + ")"
+}
+
 // intlexchangeTokenCandidates tries each candidate URL in turn for the auth-code
 // ExchangeToken call and returns the first 2xx JSON body that carries an
 // access token (any of the field names cockpit-tools accepts). Every failure
@@ -220,7 +240,11 @@ func intlexchangeTokenCandidates(urls []string, body []byte) (raw []byte, err er
 		resp.Body.Close()
 		if resp.StatusCode >= 400 {
 			// 404 page not found and friends: try the next candidate.
-			errs = append(errs, fmt.Sprintf("%s => HTTP %d (body=%s)", u, resp.StatusCode, intltruncate(string(data), 120)))
+			// v0.12.24: surface the Volcengine-style
+			// ResponseMetadata.Error code+message (e.g. 20405 +
+			// its reason) instead of a truncated JSON prefix that
+			// hides the actual cause.
+			errs = append(errs, fmt.Sprintf("%s => HTTP %d %s", u, resp.StatusCode, intlsurfaceUpstreamError(data)))
 			continue
 		}
 		// www.* hosts return an HTML page with 200 — treat a JSON parse
@@ -275,9 +299,13 @@ func intljsonString(v any) string {
 // cockpit-tools build_official_device_info (trae_oauth.rs:2087-2118). The
 // previous implementation sent a bare {DeviceId, MachineId} map with RANDOM
 // hex ids — mismatching the machine/device ids embedded in the login URL and
-// breaking the device-binding expectations upstream. DevicePublicKey stays
-// empty (no device key pair), matching traework2api's behavior.
-func intlbuildOfficialDeviceInfo(deviceID, machineID, platformCode, deviceName, deviceBrand, appVersion, deviceType, osVersion string) map[string]any {
+// breaking the device-binding expectations upstream.
+// v0.12.24: DevicePublicKey now carries a fresh per-login EC P-256 SPKI PEM
+// (generateDeviceKeyPair) — the official client uploads a bound public key on
+// first exchange; an empty value surfaces as HTTP 401 / code 20405.
+// DeviceBrand maps the OS to the vendor brand (deviceBrandForContext) while
+// DeviceModel keeps the raw x_device_brand, exactly like the upstream client.
+func intlbuildOfficialDeviceInfo(deviceID, machineID, platformCode, deviceName, deviceBrand, appVersion, deviceType, osVersion, devicePublicKey string) map[string]any {
 	return map[string]any{
 		"DeviceID":        deviceID,
 		"MachineID":       machineID,
@@ -286,10 +314,55 @@ func intlbuildOfficialDeviceInfo(deviceID, machineID, platformCode, deviceName, 
 		"DeviceName":      deviceName,
 		"DeviceModel":     deviceBrand,
 		"ClientVersion":   appVersion,
-		"DevicePublicKey": "",
-		"DeviceBrand":     deviceBrand,
+		"DevicePublicKey": devicePublicKey,
+		"DeviceBrand":     deviceBrandForContext(deviceType),
 		"DeviceCPU":       "",
 		"OSInfo":          deviceType,
 		"OSVersion":       osVersion,
 	}
+}
+
+// intlIsUsttpUserTag mirrors cockpit-tools is_usttp_user_tag
+// (trae_oauth.rs:717-725): the callback's userTag parameter routes USTTP
+// (US direct-connect) accounts to the grow-normal.traeapi.us origin.
+func intlIsUsttpUserTag(userTag string) bool {
+	switch strings.ToLower(strings.TrimSpace(userTag)) {
+	case "usttp", "us_ttp", "us-ttp":
+		return true
+	}
+	return false
+}
+
+// intlauthCodeExchangeURLs builds the AuthCode ExchangeToken candidate list,
+// mirroring cockpit-tools candidate_account_api_origins
+// (trae_oauth.rs:2039-2049): the official client exchanges the auth code
+// EXCLUSIVELY against the account-API origins — sg (default for i18n row
+// users, growsg-normal.trae.ai), us (also growsg-normal), usttp
+// (grow-normal.traeapi.us for US-direct accounts) — and NEVER against the
+// callback loginHost (api-sg-central.trae.ai etc. are business-API hosts;
+// posting the auth code there returns HTTP 401 code 20405, live-verified
+// 2026-09-04). loginHost-derived candidates are still appended LAST as a
+// connectivity fallback, after every official origin has had its turn, so a
+// regional outage degrades gracefully instead of hard-failing the login.
+func intlauthCodeExchangeURLs(loginHost, userTag string) []string {
+	var urls []string
+	add := func(origin string) {
+		urls = append(urls, strings.TrimRight(origin, "/")+"/trae/api/v3/oauth/ExchangeToken")
+	}
+	usttp := intlIsUsttpUserTag(userTag)
+	if usttp {
+		add("https://grow-normal.traeapi.us")
+	}
+	// sg and us both map to growsg-normal.trae.ai upstream
+	// (TRAE_ACCOUNT_API_ORIGIN_SG/_US); normal is grow-normal.trae.ai.
+	add("https://growsg-normal.trae.ai")
+	add("https://grow-normal.trae.ai")
+	if !usttp {
+		add("https://grow-normal.traeapi.us")
+	}
+	// Legacy/fallback origins last: loginHost derivation + the old defaults.
+	// These are business/HTML hosts in the common case; they only matter if
+	// every official account origin is unreachable.
+	urls = append(urls, intlbuildAPIURLs(loginHost, "/trae/api/v3/oauth/ExchangeToken", false)...)
+	return intldedupKeepOrder(urls)
 }

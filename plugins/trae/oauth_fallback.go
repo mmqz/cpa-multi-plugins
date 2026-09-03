@@ -232,7 +232,10 @@ func exchangeTokenCandidates(urls []string, body []byte) (raw []byte, err error)
 		resp.Body.Close()
 		if resp.StatusCode >= 400 {
 			// 404 page not found and friends: try the next candidate.
-			errs = append(errs, fmt.Sprintf("%s => HTTP %d (body=%s)", u, resp.StatusCode, truncate(string(data), 120)))
+			// v0.12.24: surface the Volcengine-style
+			// ResponseMetadata.Error code+message instead of a
+			// truncated JSON prefix that hides the actual cause.
+			errs = append(errs, fmt.Sprintf("%s => HTTP %d %s", u, resp.StatusCode, surfaceUpstreamError(data)))
 			continue
 		}
 		// www.* hosts return an HTML page with 200 — treat a JSON parse
@@ -243,6 +246,26 @@ func exchangeTokenCandidates(urls []string, body []byte) (raw []byte, err error)
 		errs = append(errs, fmt.Sprintf("%s => no access token (body=%s)", u, truncate(string(data), 120)))
 	}
 	return nil, fmt.Errorf("ExchangeToken failed: %s", strings.Join(errs, " | "))
+}
+
+// surfaceUpstreamError extracts the Volcengine-style ResponseMetadata.Error
+// {Code, Message} from an error body so the recorded failure shows the actual
+// upstream reason (v0.12.24, intl parity). Non-JSON bodies fall back to the
+// truncated raw text.
+func surfaceUpstreamError(data []byte) string {
+	var env struct {
+		ResponseMetadata struct {
+			Error struct {
+				Code    string `json:"Code"`
+				Message string `json:"Message"`
+			} `json:"Error"`
+		} `json:"ResponseMetadata"`
+	}
+	if err := json.Unmarshal(data, &env); err == nil && (env.ResponseMetadata.Error.Code != "" || env.ResponseMetadata.Error.Message != "") {
+		msg := strings.TrimSpace(env.ResponseMetadata.Error.Message)
+		return fmt.Sprintf("upstream code=%s (%s)", env.ResponseMetadata.Error.Code, truncate(msg, 160))
+	}
+	return "(body=" + truncate(string(data), 120) + ")"
 }
 
 // extractExchangeAccessToken mirrors cockpit-tools extract_exchange_access_token:
@@ -273,4 +296,20 @@ func extractExchangeAccessToken(raw []byte) string {
 		}
 	}
 	return ""
+}
+
+// authCodeExchangeURLsCN builds the CN AuthCode ExchangeToken candidate list,
+// mirroring cockpit-tools candidate_account_api_origins for the CN platform
+// (trae_oauth.rs:2039-2049 + 2011-2012): the official client exchanges the
+// auth code against the CN account-API origins (api.trae.cn first, then
+// api.trae.com.cn) and only falls back to the callback loginHost derivation
+// (www.trae.cn HTML host etc.) after every official origin had its turn —
+// v0.12.24, parity with the intl flow (intlauthCodeExchangeURLs).
+func authCodeExchangeURLsCN(loginHost string) []string {
+	var urls []string
+	for _, origin := range []string{"https://api.trae.cn", "https://api.trae.com.cn"} {
+		urls = append(urls, strings.TrimRight(origin, "/")+"/trae/api/v3/oauth/ExchangeToken")
+	}
+	urls = append(urls, buildAPIURLs(loginHost, "/trae/api/v3/oauth/ExchangeToken", true)...)
+	return dedupKeepOrder(urls)
 }
