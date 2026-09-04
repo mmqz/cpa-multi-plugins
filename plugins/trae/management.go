@@ -220,13 +220,23 @@ type traeAccount struct {
 }
 
 type traeCredits struct {
-	// TotalRemain is the SUBSCRIPTION pack quota (UserEntUsage pack
-	// credits_limit). nil = never fetched — NOT the same as 0 (a
-	// checkin-only free account has a 0 pack but a non-zero wallet).
-	// v0.12.25: the check-in WALLET lives in checkin.credits (traeCheckin).
+	// TotalRemain is the SUBSCRIPTION pack quota. nil = never fetched — NOT
+	// the same as 0 (a checkin-only free account has a 0 pack but a non-zero
+	// wallet). v0.12.25: the check-in WALLET lives in checkin.credits
+	// (traeCheckin).
+	// v0.12.28: TotalRemain 改为上游用量模型值（fast 可用次数 / basic 剩余），
+	// 且 RemainKnown=false 时为 nil —— 未知剩余不再渲染成 0（对齐 cockpit-tools
+	// "无可靠剩余时不猜测"：Free 显示 "免费剩余：--"）。
 	TotalRemain *int64 `json:"total_remain"`
 	Plan        string `json:"plan"`
 	FetchedAt   string `json:"fetched_at,omitempty"`
+	// v0.12.28 用量模型扩展（对齐 trae.ts TraeUsage）。
+	UsageModel  string `json:"usage_model,omitempty"` // fast|basic|unknown
+	RemainKnown bool   `json:"remain_known"`
+	Used        *int64 `json:"used,omitempty"`  // basic: 已用
+	Total       *int64 `json:"total,omitempty"` // basic: 额度池
+	FastLimit   *int64 `json:"fast_limit,omitempty"`
+	FastUsed    *int64 `json:"fast_used,omitempty"`
 }
 
 type traeCheckin struct {
@@ -279,12 +289,8 @@ func buildDashboard() map[string]any {
 		// v0.12.25: credits < 0 = pack quota never fetched — leave the
 		// object off so the panel lazy-loads it via /credits.
 		if v, ok := accountCache.Load(f.AuthIndex); ok {
-			if e, ok2 := v.(*accountCacheEntry); ok2 && e.credits >= 0 {
-				remain := e.credits
-				acct.Credits = &traeCredits{
-					TotalRemain: &remain,
-					FetchedAt:   e.fetched.Format(time.RFC3339),
-				}
+			if e, ok2 := v.(*accountCacheEntry); ok2 && (e.credits >= 0 || e.usageFilled) {
+				acct.Credits = creditsFromCache(e)
 			}
 			if e, ok2 := v.(*accountCacheEntry); ok2 && e.checkin != nil {
 				acct.Checkin = &traeCheckin{
@@ -435,11 +441,51 @@ func hostAuthAsUpstream(sa *storedAuth) *auth.Auth {
 // Manual management endpoints
 // -----------------------------------------------------------------------------
 
+// creditsFromCache projects the cache entry onto the dashboard's traeCredits.
+// v0.12.28: usageFilled entries carry the upstream usage model; legacy
+// cache entries (pre-upgrade) keep the old pack-only number.
+func creditsFromCache(e *accountCacheEntry) *traeCredits {
+	if e.usageFilled {
+		c := &traeCredits{
+			Plan:        e.usagePlan(),
+			FetchedAt:   e.fetched.Format(time.RFC3339),
+			UsageModel:  e.usage.UsageModel,
+			RemainKnown: e.usage.RemainKnown,
+		}
+		if e.usage.RemainKnown {
+			r := e.usage.Remain
+			c.TotalRemain = &r
+		}
+		if e.usage.UsageModel == "basic" {
+			u, t := e.usage.Used, e.usage.Total
+			c.Used, c.Total = &u, &t
+		}
+		if e.usage.UsageModel == "fast" {
+			fl, fu := e.usage.FastLimit, e.usage.FastUsed
+			c.FastLimit, c.FastUsed = &fl, &fu
+		}
+		return c
+	}
+	if e.credits < 0 {
+		return nil
+	}
+	remain := e.credits
+	return &traeCredits{TotalRemain: &remain, FetchedAt: e.fetched.Format(time.RFC3339), RemainKnown: true, UsageModel: "legacy"}
+}
+
+// usagePlan returns the plan label stored alongside the usage snapshot
+// (empty until handleCreditsQuery fills it).
+func (e *accountCacheEntry) usagePlan() string { return e.plan }
+
 // handleManualCheckin triggers checkin for one (auth_index) or all accounts.
-// Body: {"auth_index":"<idx>"} — empty / omitted triggers all.
+// Body: {"auth_index":"<idx>","uid":"<uid>"} — empty / omitted triggers all.
+// v0.12.28: uid 兼底匹配。凭证文件被 migrate/heal/adopt 改名或宿主管理器
+// 重建后 auth_index 会变化，面板仍持旧 index 点击签到会匹配 0 个文件；
+// 此时改按 uid 匹配（uid 稳定），并把实际使用的 auth_index 回传给面板。
 func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 	var body struct {
 		AuthIndex string `json:"auth_index"`
+		UID       string `json:"uid"`
 	}
 	if len(req.Body) > 0 {
 		_ = json.Unmarshal(req.Body, &body)
@@ -450,16 +496,50 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
+	// v0.12.28: auth_index 失效检测。面板传了 index 却匹配不到任何文件
+	// （凭证被 migrate/heal/adopt 改名或宿主重建过），改按 uid 匹配；
+	// 两者都匹配不到时返回明确的 stale_index 错误而不是空 results
+	// （空 results 曾被面板渲染成"签到完成"假成功）。
+	targets := make([]pluginapi.HostAuthFileEntry, 0, len(files))
+	indexMatched := false
 	for _, f := range files {
-		if body.AuthIndex != "" && f.AuthIndex != body.AuthIndex {
+		if body.AuthIndex != "" && f.AuthIndex == body.AuthIndex {
+			indexMatched = true
+		}
+	}
+	fallbackByUID := !indexMatched && body.AuthIndex != "" && body.UID != ""
+	for _, f := range files {
+		if body.AuthIndex == "" {
+			// all accounts
+		} else if indexMatched {
+			if f.AuthIndex != body.AuthIndex {
+				continue
+			}
+		} else if fallbackByUID {
+			// stale auth_index → uid 兜底
+		} else {
 			continue
 		}
+		targets = append(targets, f)
+	}
+	if body.AuthIndex != "" && len(targets) == 0 {
+		return map[string]any{
+			"provider":    providerName,
+			"results":     results,
+			"error":       "stale_index: auth_index 不存在（凭证可能已被重命名/重注册），请刷新列表后重试",
+			"stale_index": true,
+		}
+	}
+	for _, f := range targets {
 		entry := map[string]any{"auth_index": f.AuthIndex, "uid": "", "nickname": ""}
 		sa, err := hostAuthGet(f.AuthIndex)
 		if err != nil {
 			entry["error"] = "load auth: " + err.Error()
 			results = append(results, entry)
 			continue
+		}
+		if fallbackByUID && strings.TrimSpace(sa.Account.UID) != strings.TrimSpace(body.UID) {
+			continue // uid 兜底时只处理同 uid 账号
 		}
 		entry["uid"] = sa.Account.UID
 		entry["nickname"] = sa.Account.Nickname
@@ -482,37 +562,51 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 			}
 		}
 		// Refresh cached checkin / credits.
-		// v0.12.25 semantics: e.credits = SUBSCRIPTION pack quota
-		// (UserEntUsage); e.checkin.Credits = the CHECK-IN WALLET
-		// (checkin_credits/status) — two different upstream wallets.
-		// Storing the wallet into e.credits here made the card read
-		// 150 right after check-in, then drop to the pack's 0 on the
-		// next /credits refresh ("签到 150 积分一刷新就归零").
-		packCredits := int64(-1) // -1 = unknown, keep previous
+		// v0.12.25 semantics: e.credits = SUBSCRIPTION pack quota;
+		// e.checkin.Credits = the CHECK-IN WALLET — two different wallets.
+		// Storing the wallet into e.credits here made the card read 150 right
+		// after check-in, then drop to the pack's 0 on the next /credits
+		// refresh ("签到 150 积分一刷新就归零").
+		prevCredits := int64(-1) // -1 = unknown, keep previous
+		prevUsageFilled := false
 		if v, ok := accountCache.Load(f.AuthIndex); ok {
 			if e, ok2 := v.(*accountCacheEntry); ok2 {
-				packCredits = e.credits
+				prevCredits = e.credits
+				prevUsageFilled = e.usageFilled
 			}
 		}
-		accountCache.Store(f.AuthIndex, &accountCacheEntry{
-			credits: packCredits,
+		newEntry := &accountCacheEntry{
+			credits: prevCredits,
 			checkin: &checkinStatus{
 				CheckedIn: status.CheckedIn,
 				Credits:   status.Credits,
 				Enable:    status.Enable,
 			},
-			fetched: time.Now(),
-		})
+			fetched:     time.Now(),
+			usageFilled: prevUsageFilled,
+		}
+		if prevUsageFilled {
+			newEntry.usage = cacheUsage(f.AuthIndex)
+			newEntry.plan = cachePlan(f.AuthIndex)
+		}
+		accountCache.Store(f.AuthIndex, newEntry)
 		// Re-enable account in pool if checkin restored credits.
-		// v0.12.25: pool score = pack + wallet so a checkin-only
-		// account (pack 0, wallet 150) is neither starved nor shown
+		// v0.12.28: pool score prefers the usage-model remain when known
+		// (fast/basic); falls back to pack + wallet so a checkin-only
+		// account (pack unknown, wallet 150) is neither starved nor shown
 		// as exhausted.
 		if accountPool != nil {
-			if packCredits > 0 {
-				accountPool.ReenableIfCredits(sa.Account.UID, packCredits+status.Credits)
-			} else {
-				accountPool.ReenableIfCredits(sa.Account.UID, status.Credits)
+			score := status.Credits
+			if prevUsageFilled && newEntry.usage.RemainKnown && newEntry.usage.Remain > 0 {
+				r := newEntry.usage.Remain
+				if r < 0 { // unlimited fast requests
+					r = 1 << 30
+				}
+				score = r + status.Credits
+			} else if prevCredits > 0 {
+				score = prevCredits + status.Credits
 			}
+			accountPool.ReenableIfCredits(sa.Account.UID, score)
 		}
 		results = append(results, entry)
 	}
@@ -521,6 +615,24 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 		"results":     results,
 		"server_time": time.Now().Format("2006-01-02 15:04:05"),
 	}
+}
+
+// cacheUsage/cachePlan read the current usage snapshot without mutating cache.
+func cacheUsage(authIndex string) (u upstream.UsageSummary) {
+	if v, ok := accountCache.Load(authIndex); ok {
+		if e, ok2 := v.(*accountCacheEntry); ok2 {
+			return e.usage
+		}
+	}
+	return
+}
+func cachePlan(authIndex string) (p string) {
+	if v, ok := accountCache.Load(authIndex); ok {
+		if e, ok2 := v.(*accountCacheEntry); ok2 {
+			return e.plan
+		}
+	}
+	return
 }
 
 // handleCreditsQuery fetches live credits from upstream for one (auth_index)
@@ -566,12 +678,37 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 			results = append(results, entry)
 			continue
 		}
+		// v0.12.28: 套餐剩余对齐 cockpit-tools 的用量模型（trae.ts）：
+		//   fast  → 速通可用次数（-1 无限）
+		//   basic → 选中包 basic_usage_limit - basic_usage_amount（含 bonus）
+		//   unknown → 剩余不可知（面板显示 "--"；旧代码读不存在的
+		//             credits_limit 字段把这里渲染成"剩余 0 积分 · 00%"）。
+		sum := upstream.SummarizeUsage(usage.UserEntitlementPackList, true)
 		selected := upstream.SelectActivePack(usage.UserEntitlementPackList, true)
-		var remain int64
 		plan := "Unknown"
 		if selected != nil {
-			remain = selected.EntitlementBaseInfo.Quota.CreditsLimit
-			plan = upstream.ProductTypeIdentity(selected.EntitlementBaseInfo.ProductType, true)
+			// 上游 identityStr 优先取选中包 display_desc，回退 product_type 映射。
+			if d := strings.TrimSpace(selected.DisplayDesc); d != "" {
+				plan = d
+			} else {
+				plan = upstream.ProductTypeIdentity(selected.EntitlementBaseInfo.ProductType, true)
+			}
+		}
+		entry["usage_model"] = sum.UsageModel
+		entry["remain_known"] = sum.RemainKnown
+		if sum.RemainKnown {
+			entry["total_remain"] = sum.Remain
+		} else {
+			entry["total_remain"] = 0 // 向后兼容；remain_known=false 时面板显示 "--"
+		}
+		entry["plan"] = plan
+		if sum.UsageModel == "basic" {
+			entry["used"] = sum.Used
+			entry["total"] = sum.Total
+		}
+		if sum.UsageModel == "fast" {
+			entry["fast_limit"] = sum.FastLimit
+			entry["fast_used"] = sum.FastUsed
 		}
 		// v0.12.25: also fetch the CHECK-IN WALLET (a separate upstream
 		// wallet from the subscription pack). The old code stored the
@@ -585,26 +722,30 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 		} else {
 			entry["checkin_status_error"] = stErr.Error()
 		}
-		entry["total_remain"] = remain
-		entry["plan"] = plan
 		if wallet >= 0 {
 			entry["checkin_credits"] = wallet
 			entry["checked_in"] = checkedIn
 		}
-		// Update cache + pool. e.credits stays pack-only; the wallet
-		// lives in e.checkin.Credits. Pool score = pack + wallet so a
-		// checkin-only account is not treated as exhausted.
+		// Update cache + pool. e.credits stays pack-only (legacy field); the
+		// wallet lives in e.checkin.Credits. Pool score = usage remain (when
+		// known) + wallet so a checkin-only account is not treated as exhausted.
+		scoreRemain := int64(0)
+		if sum.RemainKnown {
+			scoreRemain = sum.Remain
+			if scoreRemain < 0 { // unlimited
+				scoreRemain = 1 << 30
+			}
+		}
 		accountCache.Store(f.AuthIndex, &accountCacheEntry{
-			credits: remain,
-			checkin: &checkinStatus{
-				CheckedIn: checkedIn,
-				Credits:   wallet,
-				Enable:    enable,
-			},
-			fetched: time.Now(),
+			credits:     scoreRemain,
+			checkin:     &checkinStatus{CheckedIn: checkedIn, Credits: wallet, Enable: enable},
+			fetched:     time.Now(),
+			usage:       sum,
+			usageFilled: true,
+			plan:        plan,
 		})
 		if accountPool != nil {
-			accountPool.SetCredits(sa.Account.UID, remain+wallet)
+			accountPool.SetCredits(sa.Account.UID, scoreRemain+max64(wallet, 0))
 		}
 		results = append(results, entry)
 	}
@@ -613,6 +754,13 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 		"results":     results,
 		"server_time": time.Now().Format("2006-01-02 15:04:05"),
 	}
+}
+
+func max64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // handleRefresh forces an ExchangeToken refresh on every account whose token

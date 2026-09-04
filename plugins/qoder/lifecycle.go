@@ -343,6 +343,13 @@ func reconcileOneAccount(authIndex, authID string, force bool) (action lifecycle
         act := lifecycleActionFor(region, cr)
         switch act {
         case lifecycleDisable:
+                // v0.8.8: 签到宽限期 —— 签到成功后的 checkinGraceWindow 内不做
+                // disable。签到发放的积分在 quota/usage 上有刷新延迟，此窗口内
+                // 的 remain=0 快照不可信；把刚签到的 CN 账号写入 disabled:true
+                // 曾让用户视角出现“点签到，账号消失且刷新不回来”。
+                if checkinGraceActive(authID) {
+                        return lifecycleNone, nil
+                }
                 return lifecycleDisable, disableAuth(authIndex, authID, sa, cr, "耗尽")
         default:
                 // healthy: keep note fresh (throttled)

@@ -99,18 +99,25 @@ func (s *Scheduler) RunCheckinNow() {
 		}
 		// 签到（status → 未签到则 claim）
 		// 对齐 cockpit-tools workbuddy_auto_checkin.rs 指数退避策略。
+		// v0.12.28: CheckinStatus/CheckinClaim 现在在上游业务码非零时返回
+		// *upstream.Error（9074 限流 → BizCode=9074，其余 → 会话失效），
+		// 与上游 trae_account_token_injection.rs 的 code!=0 报错语义一致；
+		// 未签到状态不再被静默吞掉。
 		status, err := s.cfg.Upstream.CheckinStatus(a)
 		if err != nil {
-			log.Printf("checkin status %s: %v", st.UID, err)
-		} else if upstream.IsRateLimit9074(status.Code) {
-			// 9074 限流：跳过本轮，下一轮重试（外层调度器有 30s/5min/10min/... 退避）
-			log.Printf("checkin %s: rate-limited (9074), will retry next cycle", st.UID)
+			if isBizRateLimit(err) {
+				log.Printf("checkin %s: rate-limited (9074), will retry next cycle", st.UID)
+			} else {
+				log.Printf("checkin status %s: %v", st.UID, err)
+			}
+			status = nil
 		} else if !status.CheckedIn && status.Enable {
-			claim, err := s.cfg.Upstream.CheckinClaim(a)
-			if err != nil {
-				log.Printf("checkin claim %s: %v", st.UID, err)
-			} else if upstream.IsRateLimit9074(claim.Code) {
-				log.Printf("checkin %s: claim rate-limited (9074), will retry", st.UID)
+			if _, err := s.cfg.Upstream.CheckinClaim(a); err != nil {
+				if isBizRateLimit(err) {
+					log.Printf("checkin %s: claim rate-limited (9074), will retry", st.UID)
+				} else {
+					log.Printf("checkin claim %s: %v", st.UID, err)
+				}
 			} else {
 				log.Printf("checkin %s: ok (credits=%d)", st.UID, status.Credits)
 			}
@@ -118,28 +125,33 @@ func (s *Scheduler) RunCheckinNow() {
 			log.Printf("checkin %s: already checked in (credits=%d)", st.UID, status.Credits)
 		}
 		// 查积分 + 解冻
-		// 对齐 cockpit-tools apply_usage_response：按 pack 优先级选最高 pack，
-		// 用选中 pack 的 credits_limit 作为套餐额度（而非 sum 全部 pack）。
-		// v0.12.25：池子积分 = 套餐额度 + 签到钱包（checkin_credits/status
-		// 的 credits）——签到赠送的积分不在订阅 pack 里，只算 pack 会把
-		// 纯签到账号打成 0 分（排序垫底 + 面板"耗尽"徽标）。
+		// 对齐 cockpit-tools apply_usage_response：按 pack 优先级选最高 pack。
+		// v0.12.28: 套餐剩余改为上游用量模型（basic_usage_limit-amount /
+		// fast-request 可用次数），credits_limit 字段在 v2 API 中不存在，
+		// 读它永远是 0（"签到 150 积分一刷新就归零"的显示层根因）。
+		// 池子积分 = 套餐剩余（未知则 0）+ 签到钱包。
 		usage, err := s.cfg.Upstream.UserEntUsage(a)
 		if err != nil {
 			log.Printf("ent-usage %s: %v", st.UID, err)
 			continue
 		}
 		// SOLO CN 永远是 CN
-		selected := upstream.SelectActivePack(usage.UserEntitlementPackList, true)
-		var remain int64
-		if selected != nil {
-			remain = selected.EntitlementBaseInfo.Quota.CreditsLimit
-		}
+		remain, _ := upstream.PackListRemain(usage.UserEntitlementPackList, true)
 		wallet := int64(0)
 		if status != nil {
 			wallet = status.Credits
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain+wallet)
 	}
+}
+
+// isBizRateLimit 报告 err 是否为上游 9074 业务限流（签到重试语义）。
+func isBizRateLimit(err error) bool {
+	var ue *upstream.Error
+	if errors.As(err, &ue) {
+		return upstream.IsRateLimit9074(ue.BizCode)
+	}
+	return false
 }
 
 // RunRefreshNow 立即对所有账号刷新 token；session 失效的自动禁用。

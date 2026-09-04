@@ -134,7 +134,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.27"
+var version = "0.12.28"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -163,6 +163,12 @@ type accountCacheEntry struct {
 	credits int64
 	checkin *checkinStatus
 	fetched time.Time
+	// v0.12.28: 用量模型快照（对齐 cockpit-tools trae.ts）。
+	// usageModel: fast|basic|unknown；remainKnown=false 时面板显示 "--"
+	// 而不是把未知渲染成 0（"剩余 00%" 的显示根因）。
+	usage       upstream.UsageSummary
+	usageFilled bool
+	plan        string // 选中包的 plan 标签（与 usage 快照同批填充）
 }
 
 type checkinStatus struct {

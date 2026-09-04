@@ -235,10 +235,12 @@ func TestUserEntUsageAggregation(t *testing.T) {
 		if r.Header.Get("Authorization") != "Cloud-IDE-JWT at" {
 			return nil, errors.New("missing auth header")
 		}
+		// v0.12.28: quota 走真实字段 basic_usage_limit（credits_limit 在
+		// v2 API 中不存在，上游 cockpit-tools 从不读取它）。
 		return jsonResp(200, `{"is_credits_billing":true,"user_entitlement_pack_list":[
-			{"entitlement_base_info":{"quota":{"credits_limit":2000}}},
-			{"entitlement_base_info":{"quota":{"credits_limit":500}}}
-		]}`), nil
+                        {"entitlement_base_info":{"product_type":6,"quota":{"basic_usage_limit":2000}},"usage":{"basic_usage_amount":300}},
+                        {"entitlement_base_info":{"product_type":0,"quota":{"basic_usage_limit":500}}}
+                ]}`), nil
 	})
 	res, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
 	if err != nil {
@@ -251,40 +253,85 @@ func TestUserEntUsageAggregation(t *testing.T) {
 	if pack == nil {
 		t.Fatal("no active pack selected")
 	}
-	if pack.EntitlementBaseInfo.Quota.CreditsLimit != 2000 {
-		t.Errorf("active pack credits=%d want 2000", pack.EntitlementBaseInfo.Quota.CreditsLimit)
+	remain, ok := pack.PackRemain()
+	if !ok || remain != 1700 {
+		t.Errorf("active pack remain=%d ok=%v want 1700", remain, ok)
+	}
+	sum := SummarizeUsage(res.UserEntitlementPackList, true)
+	if sum.UsageModel != "basic" || !sum.RemainKnown || sum.Remain != 1700 {
+		t.Errorf("summary: model=%s known=%v remain=%d want basic/true/1700", sum.UsageModel, sum.RemainKnown, sum.Remain)
 	}
 }
 
-func TestSelectActivePackPriority(t *testing.T) {
+func TestSummarizeUsageFastRequest(t *testing.T) {
+	// 速通证据存在 → fast 模型，available = sum(limit)-sum(used)。
 	body := `[` +
-		`{"entitlement_base_info":{"product_type":1,"quota":{"credits_limit":300}}},` +
-		`{"entitlement_base_info":{"product_type":6,"quota":{"credits_limit":1500}}},` +
-		`{"entitlement_base_info":{"product_type":0,"quota":{"credits_limit":100}}}` +
+		`{"entitlement_base_info":{"product_type":6,"quota":{"premium_model_fast_request_limit":50}},"usage":{"premium_model_fast_amount":20}},` +
+		`{"entitlement_base_info":{"product_type":0,"quota":{"basic_usage_limit":500}}}` +
 		`]`
 	var packs []EntitlementPack
 	if err := json.Unmarshal([]byte(body), &packs); err != nil {
 		t.Fatal(err)
 	}
-	if p := SelectActivePack(packs, true); p == nil || p.EntitlementBaseInfo.Quota.CreditsLimit != 1500 {
-		t.Errorf("CN should pick Ultra(6)=1500, got %+v", p)
+	sum := SummarizeUsage(packs, true)
+	if sum.UsageModel != "fast" || !sum.RemainKnown || sum.Remain != 30 {
+		t.Errorf("fast summary: model=%s known=%v remain=%d want fast/true/30", sum.UsageModel, sum.RemainKnown, sum.Remain)
 	}
-	if p := SelectActivePack(packs, false); p == nil || p.EntitlementBaseInfo.Quota.CreditsLimit != 1500 {
-		t.Errorf("Intl should pick Ultra(6)=1500, got %+v", p)
-	}
-
-	// 隐藏 (is_hide) 与已取消 (status=3) 的 pack 必须被过滤
+	// 无任何 fast/basic 证据（Free 包无 quota）→ unknown，不猜测。
 	body2 := `[` +
-		`{"entitlement_base_info":{"product_type":100,"quota":{"credits_limit":9000},"is_hide":true}},` +
-		`{"entitlement_base_info":{"product_type":5,"quota":{"credits_limit":800},"status":3}},` +
-		`{"entitlement_base_info":{"product_type":1,"quota":{"credits_limit":300}}}` +
+		`{"entitlement_base_info":{"product_type":0}}` +
 		`]`
 	var packs2 []EntitlementPack
 	if err := json.Unmarshal([]byte(body2), &packs2); err != nil {
 		t.Fatal(err)
 	}
-	if p := SelectActivePack(packs2, true); p == nil || p.EntitlementBaseInfo.Quota.CreditsLimit != 300 {
-		t.Errorf("hidden/cancelled must be skipped, want Pro(1)=300, got %+v", p)
+	sum2 := SummarizeUsage(packs2, true)
+	if sum2.UsageModel != "unknown" || sum2.RemainKnown {
+		t.Errorf("unknown summary: model=%s known=%v want unknown/false", sum2.UsageModel, sum2.RemainKnown)
+	}
+	// 无限速通（limit=-1）→ available=-1。
+	body3 := `[` +
+		`{"entitlement_base_info":{"product_type":6,"quota":{"premium_model_fast_request_limit":-1}},"usage":{"premium_model_fast_amount":7}}` +
+		`]`
+	var packs3 []EntitlementPack
+	if err := json.Unmarshal([]byte(body3), &packs3); err != nil {
+		t.Fatal(err)
+	}
+	sum3 := SummarizeUsage(packs3, true)
+	if sum3.UsageModel != "fast" || sum3.Remain != -1 {
+		t.Errorf("unlimited summary: model=%s remain=%d want fast/-1", sum3.UsageModel, sum3.Remain)
+	}
+}
+
+func TestSelectActivePackPriority(t *testing.T) {
+	body := `[` +
+		`{"entitlement_base_info":{"product_type":1,"quota":{"basic_usage_limit":300}}},` +
+		`{"entitlement_base_info":{"product_type":6,"quota":{"basic_usage_limit":1500}}},` +
+		`{"entitlement_base_info":{"product_type":0,"quota":{"basic_usage_limit":100}}}` +
+		`]`
+	var packs []EntitlementPack
+	if err := json.Unmarshal([]byte(body), &packs); err != nil {
+		t.Fatal(err)
+	}
+	if p := SelectActivePack(packs, true); p == nil || p.EntitlementBaseInfo.ProductType != 6 {
+		t.Errorf("CN should pick Ultra(6), got %+v", p)
+	}
+	if p := SelectActivePack(packs, false); p == nil || p.EntitlementBaseInfo.ProductType != 6 {
+		t.Errorf("Intl should pick Ultra(6), got %+v", p)
+	}
+
+	// 隐藏 (is_hide) 与已取消 (status=3) 的 pack 必须被过滤
+	body2 := `[` +
+		`{"entitlement_base_info":{"product_type":100,"quota":{"basic_usage_limit":9000},"is_hide":true}},` +
+		`{"entitlement_base_info":{"product_type":5,"quota":{"basic_usage_limit":800},"status":3}},` +
+		`{"entitlement_base_info":{"product_type":1,"quota":{"basic_usage_limit":300}}}` +
+		`]`
+	var packs2 []EntitlementPack
+	if err := json.Unmarshal([]byte(body2), &packs2); err != nil {
+		t.Fatal(err)
+	}
+	if p := SelectActivePack(packs2, true); p == nil || p.EntitlementBaseInfo.ProductType != 1 {
+		t.Errorf("hidden/cancelled must be skipped, want Pro(1), got %+v", p)
 	}
 }
 
@@ -306,5 +353,30 @@ func TestCheckinStatusAndClaim(t *testing.T) {
 	}
 	if path != EpCheckinStatus {
 		t.Errorf("path=%s", path)
+	}
+}
+
+func TestCheckinBizCodeNonZero(t *testing.T) {
+	// 对齐上游 code!=0 → 错误（Token 已过期）语义；绝不能当成“未签到”通过。
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":1001,"checked_in":false,"credits":0,"enable":false}`), nil
+	})
+	if _, err := c.CheckinStatus(&auth.Auth{AccessToken: "bad"}); err == nil {
+		t.Fatal("code=1001 should error")
+	}
+	if _, err := c.CheckinClaim(&auth.Auth{AccessToken: "bad"}); err == nil {
+		t.Fatal("claim code=1001 should error")
+	}
+	// 9074 限流 → BizCode 可识别，重试语义保留。
+	c2 := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":9074,"message":"当前参与用户太多"}`), nil
+	})
+	_, err := c2.CheckinStatus(&auth.Auth{AccessToken: "at"})
+	if err == nil {
+		t.Fatal("code=9074 should error")
+	}
+	var ue *Error
+	if !errors.As(err, &ue) || !IsRateLimit9074(ue.BizCode) {
+		t.Errorf("9074 should surface as biz rate limit, got %v", err)
 	}
 }

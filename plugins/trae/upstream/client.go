@@ -52,10 +52,33 @@ type Error struct {
 	Kind   ErrKind
 	Status int
 	Msg    string
+	// BizCode 携带上游业务码（如签到 9074 限流、非零 code=token 失效），
+	// 与 HTTP Status 互不影响。0 = 非 HTTP 类错误。
+	BizCode int32
 }
 
 func (e *Error) Error() string {
+	if e.BizCode != 0 {
+		return fmt.Sprintf("upstream biz_code=%d: %s", e.BizCode, e.Msg)
+	}
 	return fmt.Sprintf("upstream %s (http %d): %s", e.Kind, e.Status, e.Msg)
+}
+
+// bizError 构造业务码错误（对齐 cockpit-tools 签到接口 code!=0 的报错语义：
+// "获取签到状态失败 (code=N): Token 已过期，请重新登录"）。9074 归类软限流，
+// 其余非零码按会话失效处理（pool 据此禁用，与上游提示一致）。
+func bizError(code int32, prefix string) *Error {
+	msg := fmt.Sprintf("%s (code=%d): %s", prefix, code, func() string {
+		if code == 9074 {
+			return "当前参与用户太多，请稍后再试"
+		}
+		return "Token 已过期，请重新登录"
+	}())
+	kind := ErrSessionDead
+	if code == 9074 {
+		kind = ErrSoftRate
+	}
+	return &Error{Kind: kind, Msg: msg, BizCode: code}
 }
 
 var sessionDeadMarkers = []string{"login", "token 失效", "token invalid", "session", "unauthorized", "401"}
@@ -331,6 +354,9 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 // 对齐 cockpit-tools trae_account_token_injection.rs:2761 用 GET + did query param
 // （cockpit-tools 用 GET；traework2api 原版用 POST body={}，两种都被接受）。
 // 返回完整字段：CheckedIn / Credits / Enable + 业务码 Code（用于 9074 限流识别）。
+// 对齐上游 code!=0 语义（trae_account_token_injection.rs:2786-2791）：
+// 非零业务码 → 返回错误（Token 过期/限流等），绝不能当成 "未签到" 静默通过。
+// 9074（参与用户太多）作为 *Error{BizCode:9074} 返回，调用方可识别重试。
 type CheckinStatusResult struct {
 	CheckedIn bool   `json:"checked_in"`
 	Credits   int64  `json:"credits"`
@@ -357,10 +383,15 @@ func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, fmt.Errorf("checkin status parse: %w", err)
 	}
+	if resp.Code != 0 {
+		return nil, bizError(resp.Code, "获取签到状态失败")
+	}
 	return &resp, nil
 }
 
 // CheckinClaim 执行签到。返回业务码 Code 用于 9074 限流识别。
+// 对齐上游 claim_trae_checkin（trae_account_token_injection.rs:2884-2889）：
+// code!=0 → 错误（领取成功后上游还会重新查一次状态，这里由调用方负责）。
 type CheckinClaimResult struct {
 	Code    int32  `json:"code"`
 	Message string `json:"message"`
@@ -380,25 +411,97 @@ func (c *Client) CheckinClaim(a *auth.Auth) (*CheckinClaimResult, error) {
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, fmt.Errorf("checkin claim parse: %w", err)
 	}
+	if resp.Code != 0 {
+		return nil, bizError(resp.Code, "签到领取失败")
+	}
 	return &resp, nil
 }
 
 // EntitlementPack represents one entry in user_entitlement_pack_list.
-// 对齐 cockpit-tools trae_account_token_injection.rs apply_usage_response 的解析。
+// 对齐 cockpit-tools src/types/trae.ts 的用量模型：quota 字段位于
+// entitlement_base_info.quota 或 product_extra.{subscription_extra,package_extra}.quota
+// 三层中的任意一层（getPackQuota 的多路径探测）；usage 位于 pack.usage。
+// 注意：上游从不读取 "credits_limit"——v2 API 的 quota 字段是
+// basic_usage_limit / bonus_usage_limit / premium_model_fast_request_limit。
 type EntitlementPack struct {
 	EntitlementBaseInfo struct {
-		ProductType int   `json:"product_type"` // 0=Free, 1=Pro, 4=Pro+, 5=Pro+CN, 6=Ultra, 8=Lite, 9=Trial, 100=CNExpress
-		EndTime     int64 `json:"end_time"`
-		IsHide      bool  `json:"is_hide"`
-		Status      *int  `json:"status"` // nil 或 1=active，3=cancelled
-		Quota       struct {
-			CreditsLimit                 int64 `json:"credits_limit"`
-			PremiumModelFastRequestLimit int64 `json:"premium_model_fast_request_limit"` // -1=unlimited
-		} `json:"quota"`
+		ProductType  int       `json:"product_type"` // 0=Free, 1=Pro, 4=Pro+, 5=Pro+CN, 6=Ultra, 8=Lite, 9=Trial, 100=CNExpress
+		EndTime      int64     `json:"end_time"`
+		IsHide       bool      `json:"is_hide"`
+		Status       *int      `json:"status"` // nil 或 1=active，3=cancelled
+		Quota        PackQuota `json:"quota"`
+		ProductExtra struct {
+			SubscriptionExtra struct {
+				Quota PackQuota `json:"quota"`
+			} `json:"subscription_extra"`
+			PackageExtra struct {
+				Quota PackQuota `json:"quota"`
+			} `json:"package_extra"`
+		} `json:"product_extra"`
 	} `json:"entitlement_base_info"`
-	Usage struct {
-		PremiumModelFastAmount int64 `json:"premium_model_fast_amount"`
-	} `json:"usage"`
+	Usage       PackUsage `json:"usage"`
+	DisplayDesc string    `json:"display_desc"` // 上游 identityStr 优先取 display_desc（CN 选中包）
+}
+
+// PackQuota 是 quota 层的全部已知数值字段。指针区分"字段缺失"与 0。
+type PackQuota struct {
+	BasicUsageLimit              *int64 `json:"basic_usage_limit"`
+	BonusUsageLimit              *int64 `json:"bonus_usage_limit"`
+	PremiumModelFastRequestLimit *int64 `json:"premium_model_fast_request_limit"` // -1=unlimited
+}
+
+// PackUsage 是 pack.usage 的已知数值字段。
+type PackUsage struct {
+	BasicUsageAmount       *int64 `json:"basic_usage_amount"`
+	BonusUsageAmount       *int64 `json:"bonus_usage_amount"`
+	PremiumModelFastAmount *int64 `json:"premium_model_fast_amount"`
+	IsFlashConsuming       bool   `json:"is_flash_consuming"`
+}
+
+// EffectiveQuota 返回三层 quota 中第一层带任何已知字段的值（对齐上游
+// getPackQuota: entitlement_base_info.quota ?? subscription_extra.quota ?? package_extra.quota）。
+func (p *EntitlementPack) EffectiveQuota() PackQuota {
+	base := p.EntitlementBaseInfo.Quota
+	if base.hasAny() {
+		return base
+	}
+	sub := p.EntitlementBaseInfo.ProductExtra.SubscriptionExtra.Quota
+	if sub.hasAny() {
+		return sub
+	}
+	return p.EntitlementBaseInfo.ProductExtra.PackageExtra.Quota
+}
+
+func (q PackQuota) hasAny() bool {
+	return q.BasicUsageLimit != nil || q.BonusUsageLimit != nil || q.PremiumModelFastRequestLimit != nil
+}
+
+// PackRemain 返回该 pack 的剩余额度（basic_quota - basic_usage，考虑 bonus）。
+// quota 缺失时 ok=false（"剩余未知"——上游对 Free/未知包显示 "--"，不猜测 0）。
+func (p *EntitlementPack) PackRemain() (remain int64, ok bool) {
+	q := p.EffectiveQuota()
+	if q.BasicUsageLimit == nil {
+		return 0, false
+	}
+	used := int64(0)
+	if p.Usage.BasicUsageAmount != nil {
+		used = *p.Usage.BasicUsageAmount
+	}
+	left := *q.BasicUsageLimit - used
+	// bonus 仅对可见 pack 计入（上游 isPackExhausted 的 bonus 语义）。
+	if q.BonusUsageLimit != nil {
+		bonusUsed := int64(0)
+		if p.Usage.BonusUsageAmount != nil {
+			bonusUsed = *p.Usage.BonusUsageAmount
+		}
+		if bonusLeft := *q.BonusUsageLimit - bonusUsed; bonusLeft > 0 {
+			left += bonusLeft
+		}
+	}
+	if left < 0 {
+		left = 0
+	}
+	return left, true
 }
 
 // EntUsageResult is the parsed v2 credit API response.
@@ -429,6 +532,126 @@ func (c *Client) UserEntUsage(a *auth.Auth) (*EntUsageResult, error) {
 		return nil, fmt.Errorf("ent usage parse: %w", err)
 	}
 	return &resp, nil
+}
+
+// FastRequestUsage 对齐 cockpit-tools src/types/trae.ts getFastRequestUsage：
+// 对可见 active pack 求 premium_model_fast_request_limit 总和与
+// premium_model_fast_amount 总和；available = limit - used（limit 含 -1 → 全局无限）。
+// hasEvidence=false 表示 pack 里完全没有 fast-request 字段（不能当作 0 次）。
+// dashboardPayload=true 时（user_current_entitlement_list 源）即使全 0 也算有证据。
+func FastRequestUsage(packs []EntitlementPack, dashboardPayload bool) (available, limit, used int64, hasEvidence bool) {
+	var filtered []EntitlementPack
+	for _, p := range packs {
+		if p.EntitlementBaseInfo.ProductType == 3 {
+			continue
+		}
+		if p.EntitlementBaseInfo.IsHide {
+			continue
+		}
+		if p.EntitlementBaseInfo.Status != nil && *p.EntitlementBaseInfo.Status == 3 {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	if len(filtered) == 0 {
+		return 0, 0, 0, false
+	}
+	hasEvidence = dashboardPayload
+	unlimited := false
+	for _, p := range filtered {
+		q := p.EffectiveQuota()
+		if q.PremiumModelFastRequestLimit != nil {
+			hasEvidence = true
+			if *q.PremiumModelFastRequestLimit == -1 {
+				unlimited = true
+			} else {
+				limit += *q.PremiumModelFastRequestLimit
+			}
+		}
+		if p.Usage.PremiumModelFastAmount != nil {
+			hasEvidence = true
+			used += *p.Usage.PremiumModelFastAmount
+		}
+	}
+	if !hasEvidence {
+		return 0, 0, 0, false
+	}
+	if unlimited {
+		return -1, -1, used, true
+	}
+	available = limit - used
+	if available < 0 {
+		available = 0
+	}
+	return available, limit, used, true
+}
+
+// UsageSummary 汇总一次 UserEntUsage 的展示/评分所需数值。
+// 展示语义对齐 cockpit-tools TraeAccountsPage.tsx 的 CN 规则：
+//   - 速通证据存在 → UsageModel="fast"，Remain=fast 可用次数（-1=无限）
+//   - 选中包 quota 可解析 → UsageModel="basic"，Remain=quota-usage（含 bonus）
+//   - 两者都无 → UsageModel="unknown"，RemainKnown=false（面板显示 "--"，绝不猜测 0）
+type UsageSummary struct {
+	UsageModel  string // "fast" | "basic" | "unknown"
+	Remain      int64  // fast: 可用次数(-1 无限)；basic: 套餐剩余
+	RemainKnown bool
+	FastLimit   int64
+	FastUsed    int64
+	Used        int64 // basic 模型的已用量（展示"已用"）
+	Total       int64 // basic 模型的额度池（展示"额度池"）
+}
+
+// SummarizeUsage computes the UsageSummary for a pack list.
+func SummarizeUsage(packs []EntitlementPack, isCN bool) UsageSummary {
+	fastAvail, fastLimit, fastUsed, hasFast := FastRequestUsage(packs, false)
+	if isCN && hasFast {
+		return UsageSummary{
+			UsageModel:  "fast",
+			Remain:      fastAvail,
+			RemainKnown: true,
+			FastLimit:   fastLimit,
+			FastUsed:    fastUsed,
+		}
+	}
+	selected := SelectActivePack(packs, isCN)
+	if selected != nil {
+		if remain, ok := selected.PackRemain(); ok {
+			q := selected.EffectiveQuota()
+			var used, total int64
+			if q.BasicUsageLimit != nil {
+				total = *q.BasicUsageLimit
+			}
+			if selected.Usage.BasicUsageAmount != nil {
+				used = *selected.Usage.BasicUsageAmount
+			}
+			return UsageSummary{
+				UsageModel:  "basic",
+				Remain:      remain,
+				RemainKnown: true,
+				Used:        used,
+				Total:       total,
+			}
+		}
+	}
+	if !isCN && hasFast {
+		// Intl 无速通展示语义，但保留数值兜底（不丢弃证据）。
+		return UsageSummary{UsageModel: "fast", Remain: fastAvail, RemainKnown: true, FastLimit: fastLimit, FastUsed: fastUsed}
+	}
+	return UsageSummary{UsageModel: "unknown"}
+}
+
+// PackListRemain returns the pool-scoring remain (0 when unknown) plus whether
+// the remain was actually known. Score semantics: fast -1 (unlimited) scores
+// as a large constant so unlimited accounts are picked first.
+func PackListRemain(packs []EntitlementPack, isCN bool) (score int64, known bool) {
+	sum := SummarizeUsage(packs, isCN)
+	if !sum.RemainKnown {
+		return 0, false
+	}
+	if sum.Remain < 0 { // unlimited fast requests
+		return 1 << 30, true
+	}
+	return sum.Remain, true
 }
 
 // SelectActivePack applies cockpit-tools apply_usage_response logic:

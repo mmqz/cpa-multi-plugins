@@ -266,24 +266,47 @@ function markCheckinDone(btn){
 function esc(s){return (s==null?"":String(s)).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 function escAttr(s){return esc(s)}
 
-/* Plan-name → reference quota (rough, for progress-bar visualization only).
-   The actual remaining number is always shown next to the bar. */
-const PLAN_REF = {
-  cnexpress:20000, ultra:10000, "pro+":5000, pro:2000, lite:500, free:200, trial:2000
-};
 function progressHTML(cr){
-  // trae credits object: { total_remain, plan, fetched_at } — no used/size.
-  // We render "remaining" (not "consumed") since upstream only exposes remain.
+  // trae credits object: { total_remain, plan, fetched_at, usage_model,
+  // remain_known, used, total, fast_limit, fast_used }.
+  // v0.12.28: 对齐 cockpit-tools TraeAccountsPage.tsx 的 CN 展示规则——
+  //   fast 证据 → "速通可用 X 次/无限次"
+  //   basic（付费包 quota 可解析） → 剩余/额度池
+  //   unknown（Free 等） → "免费剩余：--"，进度条不猜测（旧代码把未知渲染成
+  //   "剩余 0 积分 · 00%"，即用户截图中的显示异常）。
   if(!cr || (cr.total_remain==null && !cr.plan)){
     return '<div class="pb"><div class="pb-label"><span>剩余积分</span><span class="spin"></span>加载中…</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
   }
-  const remain=Number(cr.total_remain)||0;
   const plan=String(cr.plan||"").toLowerCase();
-  const ref=PLAN_REF[plan]||1000;
-  const pct=Math.max(0,Math.min(100,Math.round(remain/ref*100)));
-  let color='var(--ok)'; if(pct<30)color='var(--warn)'; if(pct<10||remain===0)color='var(--err)';
   const when=cr.fetched_at?` · 快照 ${esc(String(cr.fetched_at).replace('T',' ').replace('Z',' UTC'))}`:'';
-  return `<div class="pb"><div class="pb-label"><span>剩余 ${remain}</span><span>${pct}%</span></div><div class="pb-track"><div class="pb-bar" style="width:${pct}%;background:${color}"></div></div><div class="pb-meta">剩余 ${remain} 积分 · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
+  const model=cr.usage_model||"legacy";
+  if(model==="fast" && cr.remain_known){
+    const avail=Number(cr.total_remain)||0;
+    const isUnl=avail<0;
+    const fl=(cr.fast_limit!=null)?Number(cr.fast_limit):null;
+    const fu=(cr.fast_used!=null)?Number(cr.fast_used):0;
+    const pct=(fl!=null&&fl>0&&!isUnl)?Math.max(0,Math.min(100,Math.round((fu/fl)*100))):(isUnl?0:null);
+    const bar=pct==null?'':`<div class="pb-track"><div class="pb-bar" style="width:${pct}%;background:${pct>85?'var(--err)':(pct>60?'var(--warn)':'var(--ok)')}"></div></div>`;
+    const meta=(fl!=null&&!isUnl)?`速通已用 ${fu} / ${fl} 次${when}`:(isUnl?`速通无限次 · 已用 ${fu}${when}`:'');
+    return `<div class="pb"><div class="pb-label"><span>速通可用 ${isUnl?"无限次":avail+" 次"}</span><span>${pct==null?"":pct+"%"}</span></div>${bar}<div class="pb-meta">${meta}</div></div>`;
+  }
+  if(model==="basic" && cr.remain_known){
+    const remain=Number(cr.total_remain)||0;
+    const used=(cr.used!=null)?Number(cr.used):0;
+    const total=(cr.total!=null)?Number(cr.total):(remain+used);
+    const pct=total>0?Math.max(0,Math.min(100,Math.round(used/total*100))):0;
+    let color='var(--ok)'; if(pct>60)color='var(--warn)'; if(pct>85||remain===0)color='var(--err)';
+    return `<div class="pb"><div class="pb-label"><span>剩余 ${remain}</span><span>${pct}%</span></div><div class="pb-track"><div class="pb-bar" style="width:${pct}%;background:${color}"></div></div><div class="pb-meta">剩余 ${remain} · 已用 ${used} · 额度池 ${total} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
+  }
+  if(cr.remain_known===false || (model==="unknown")){
+    // 对齐上游：无可靠剩余时不猜测（社区 #1281）。
+    const isFree=plan.includes("free");
+    return `<div class="pb"><div class="pb-label"><span>${isFree?"免费剩余":"剩余"}</span><span>--</span></div><div class="pb-track"><div class="pb-bar" style="width:0%;background:var(--mut)"></div></div><div class="pb-meta">${isFree?"免费剩余：--":"剩余次数：--"} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
+  }
+  // legacy（升级前缓存）：老字段直显，不再按 PLAN_REF 估算百分比。
+  const remain=Number(cr.total_remain)||0;
+  let color='var(--ok)'; if(remain===0)color='var(--err)';
+  return `<div class="pb"><div class="pb-label"><span>剩余 ${remain}</span><span></span></div><div class="pb-track"><div class="pb-bar" style="width:${remain>0?100:0}%;background:${color}"></div></div><div class="pb-meta">剩余 ${remain} 积分 · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
 }
 
 let lastAccounts=[];
@@ -298,7 +321,8 @@ function bindCardActions(root){
     btn.addEventListener("click", ev=>{
       const act=ev.currentTarget.dataset.action;
       const idx=ev.currentTarget.dataset.authIndex;
-      if(act==="checkin") checkin(idx, ev.currentTarget);
+      const uid=ev.currentTarget.dataset.uid||"";
+      if(act==="checkin") checkin(idx, uid, ev.currentTarget);
       else if(act==="refresh") refreshCredits(idx, ev.currentTarget);
     });
   });
@@ -315,10 +339,13 @@ function card(a){
   const cr=a.credits;
   const pool=poolByUID[a.uid]||{};
   const checkedIn=!!ci.checked_in;
-  // v0.12.25: wallet (checkin credits) is a separate upstream wallet from the
-  // subscription pack — "耗尽" only when BOTH are known-and-zero.
+  // v0.12.25/28: wallet (checkin credits) is a separate upstream wallet from the
+  // subscription pack — "耗尽" only when the pack remain is KNOWN-and-zero
+  // (usage_model basic) AND the wallet is 0. Unknown remain（Free 等）不算耗尽。
   const wallet=(ci.credits!=null)?Number(ci.credits)||0:null;
-  const exhausted=!!cr && cr.total_remain!=null && Number(cr.total_remain)===0 && wallet===0;
+  const packExhausted=!!cr && cr.usage_model==="basic" && cr.remain_known!==false
+      && cr.total_remain!=null && Number(cr.total_remain)===0;
+  const exhausted=packExhausted && wallet===0;
   const cooling=!!pool.cooling;
   const disabled=!!a.disabled||!!pool.disabled;
   const plan=a.credits&&a.credits.plan?a.credits.plan:(a.plan||"unknown");
@@ -334,8 +361,11 @@ function card(a){
   const btnClass=checkedIn?"done":"sec";
   const btnText=checkedIn?"已签到":"签到";
   const btnDisabled=checkedIn?" disabled=\"disabled\"":"";
-  const actionHTML=isIntl?"":`<button class="${btnClass}" data-action="checkin" data-auth-index="${escAttr(a.auth_index)}"${btnDisabled}>${btnText}</button>`;
-  const refreshBtn=isIntl?"":`<button class="sec" data-action="refresh" data-auth-index="${escAttr(a.auth_index)}" title="查询实时积分">刷新积分</button>`;
+  // v0.12.28: 按钮额外携带 data-uid —— auth_index 因凭证改名/宿主重建失效时，
+  // 后端按 uid 兜底匹配，签到不再“点了没反应、账号变样”。
+  const uidAttr=(a.uid?` data-uid="${escAttr(a.uid)}"`:"");
+  const actionHTML=isIntl?"":`<button class="${btnClass}" data-action="checkin" data-auth-index="${escAttr(a.auth_index)}"${uidAttr}${btnDisabled}>${btnText}</button>`;
+  const refreshBtn=isIntl?"":`<button class="sec" data-action="refresh" data-auth-index="${escAttr(a.auth_index)}"${uidAttr} title="查询实时积分">刷新积分</button>`;
   const bodyHTML=isIntl
     ? ((a.token_expiry?`<div class="row"><span class="k">Token 到期</span><span class="v">${esc(String(a.token_expiry).replace('T',' ').replace('Z',' UTC'))}</span></div>`:"")
        +(a.region?`<div class="row"><span class="k">区域</span><span class="v">${esc(a.region)}</span></div>`:"")
@@ -353,6 +383,26 @@ function card(a){
   ${(refreshBtn||actionHTML)?`<div class="actions">${refreshBtn}${actionHTML}</div>`:""}
   </div>`;
 }
+function applyCreditsResult(a, res){
+  // v0.12.28: 统一合并 /credits 结果到账号对象（含用量模型字段），
+  // 供 progressHTML 按 fast/basic/unknown 渲染。
+  if(res.total_remain!=null || res.plan || res.usage_model){
+    a.credits=Object.assign({}, a.credits||{}, {
+      total_remain: res.total_remain!=null?res.total_remain:(a.credits?a.credits.total_remain:0),
+      plan: res.plan||(a.credits?a.credits.plan:""),
+      fetched_at: new Date().toISOString(),
+      usage_model: res.usage_model||"legacy",
+      remain_known: !!res.remain_known,
+      used: res.used,
+      total: res.total,
+      fast_limit: res.fast_limit,
+      fast_used: res.fast_used
+    });
+  }
+  if(res.checkin_credits!=null){
+    a.checkin=Object.assign({}, a.checkin||{}, {credits:res.checkin_credits, checked_in:!!res.checked_in});
+  }
+}
 function lazyLoadCredits(accounts){
   // For cards whose credits are missing/stale, fetch /credits per-account.
   // trae /credits does a live upstream call (slow) — parallel is OK for small pools.
@@ -365,17 +415,7 @@ function lazyLoadCredits(accounts){
         const res=(d.results||[])[0]||{};
         if(d.error){ a.error=d.error; }
         if(res.error){ a.error=res.error; }
-        if(res.total_remain!=null || res.plan){
-          a.credits=Object.assign({}, a.credits||{}, {
-            total_remain: res.total_remain!=null?res.total_remain:(a.credits?a.credits.total_remain:0),
-            plan: res.plan||(a.credits?a.credits.plan:""),
-            fetched_at: new Date().toISOString()
-          });
-        }
-        // v0.12.25: wallet sync (separate from the pack quota).
-        if(res.checkin_credits!=null){
-          a.checkin=Object.assign({}, a.checkin||{}, {credits:res.checkin_credits, checked_in:!!res.checked_in});
-        }
+        applyCreditsResult(a, res);
         updateOneCard(a);
       })
       .catch(()=>{
@@ -385,16 +425,7 @@ function lazyLoadCredits(accounts){
             .then(d=>{
               const res=(d.results||[])[0]||{};
               if(d.error||res.error){ a.error=d.error||res.error; updateOneCard(a); return; }
-              if(res.total_remain!=null || res.plan){
-                a.credits=Object.assign({}, a.credits||{}, {
-                  total_remain: res.total_remain!=null?res.total_remain:0,
-                  plan: res.plan||"",
-                  fetched_at: new Date().toISOString()
-                });
-              }
-              if(res.checkin_credits!=null){
-                a.checkin=Object.assign({}, a.checkin||{}, {credits:res.checkin_credits, checked_in:!!res.checked_in});
-              }
+              applyCreditsResult(a, res);
               updateOneCard(a);
             })
             .catch(()=>{ a.error="积分查询失败"; updateOneCard(a); });
@@ -601,10 +632,12 @@ function creditOf(a){
   const ci=(a&&a.checkin)||{};
   const wallet=(ci.credits!=null)?Number(ci.credits)||0:null;
   if(!cr && wallet==null) return {remain:0, known:false};
-  const packKnown=!!cr && cr.total_remain!=null;
-  const pack=packKnown?Number(cr.total_remain)||0:0;
-  // v0.12.25: the summary total counts pack + checkin wallet.
-  const known=packKnown||wallet!=null;
+  // v0.12.28: usage-model aware — unknown remain（remain_known=false）不计入汇总
+  // 而不是当作 0（否则纯签到账号会被误判“耗尽”）。
+  const knownRemain=!!cr && cr.total_remain!=null && cr.remain_known!==false;
+  const pack=knownRemain?(Number(cr.total_remain)||0):0;
+  const packKnown=knownRemain&&Number(cr.total_remain)>=0;
+  const known=(packKnown&&cr.usage_model!="unknown")||wallet!=null;
   return {remain:pack+(wallet||0), known:known};
 }
 function renderSummary(accounts){
@@ -655,11 +688,27 @@ function isCheckinDoneResult(res){
   if(res.claim_code!=null||res.claim_message) return true;
   return false;
 }
-async function checkin(idx, btn){
+async function checkin(idx, uid, btn){
   busy(btn,true);
   try{
-    const d=await api("/checkin",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth_index:idx})});
-    const res=(d.results||[])[0]||{};
+    // v0.12.28: 携带 uid 兑底；auth_index 因凭证改名/宿主重建失效时后端按 uid 匹配。
+    const d=await api("/checkin",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth_index:idx,uid:uid||""})});
+    if(d.error){
+      toast("签到失败","err",d.error);
+      busy(btn,false);
+      await load(false);
+      return;
+    }
+    const res=(d.results||[]).find(x=>x.auth_index===idx && !x.error)
+           || (d.results||[]).find(x=>!x.error)
+           || (d.results||[])[0]
+           || {};
+    if(!(d.results||[]).length){
+      // 空结果 ≠ 成功：明确报错并刷新列表（旧行为会弹“签到完成”假成功）。
+      toast("签到未执行","warn","账号未匹配到（可能已重命名/重注册），已刷新列表");
+      await load(false);
+      return;
+    }
     checkinResultToast(res);
     if(isCheckinDoneResult(res)){
       markCheckinDone(btn);
@@ -717,22 +766,25 @@ async function refreshCredits(idx, btn){
     }
     const a=(lastAccounts||[]).find(x=>x.auth_index===idx);
     if(a){
-      a.credits=Object.assign({}, a.credits||{}, {
-        total_remain: res.total_remain!=null?res.total_remain:(a.credits?a.credits.total_remain:0),
-        plan: res.plan||(a.credits?a.credits.plan:""),
-        fetched_at: new Date().toISOString()
-      });
-      // v0.12.25: keep the check-in wallet in sync (separate upstream wallet).
-      if(res.checkin_credits!=null){
-        a.checkin=Object.assign({}, a.checkin||{}, {credits:res.checkin_credits, checked_in:!!res.checked_in});
-      }
+      applyCreditsResult(a, res);
       if(res.error) a.error=res.error; else a.error="";
       updateOneCard(a);
     }
-    const remain=res.total_remain!=null?res.total_remain:"?";
-    const wallet=res.checkin_credits!=null?" · 签到钱包 "+res.checkin_credits:"";
+    // v0.12.28: toast 按用量模型措辞（速通次数/剩余积分/未知）。
     const who=res.nickname||res.uid||idx;
-    toast("积分已刷新","ok",who+" · 套餐 "+remain+wallet);
+    let detail;
+    if(res.usage_model==="fast"&&res.remain_known){
+      const av=Number(res.total_remain)||0;
+      detail=who+" · 速通可用 "+(av<0?"无限次":av+" 次");
+    }else if(res.usage_model==="basic"&&res.remain_known){
+      detail=who+" · 套餐 "+(res.total_remain!=null?res.total_remain:"?")+" · 已用 "+(res.used!=null?res.used:0);
+    }else if(res.remain_known===false){
+      detail=who+" · 剩余未知（不猜测）";
+    }else{
+      detail=who+" · 套餐 "+(res.total_remain!=null?res.total_remain:"?");
+    }
+    if(res.checkin_credits!=null) detail+=" · 签到钱包 "+res.checkin_credits;
+    toast("积分已刷新","ok",detail);
   }catch(e){
     toast("刷新失败","err",e.message||String(e));
   }finally{
