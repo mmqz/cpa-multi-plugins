@@ -94,27 +94,34 @@ func identityFromJSON(raw string, depth int) cbIdentity {
 	return cbIdentity{UID: uid, Nickname: nickname}
 }
 
-// unknownUIDFallback returns the stable last-resort file identity for a realm.
-// It is intentionally CONSTANT per realm: repeated logins of the same account
-// overwrite the same file instead of minting trae-<uuid>.json duplicates.
-func unknownUIDFallback(realm string) string {
-	if realm == "intl" {
+// unknownUIDFallback returns the stable last-resort file identity for a
+// login variant. It is intentionally CONSTANT per variant: repeated logins
+// of the same account overwrite the same file instead of minting
+// trae-<uuid>.json duplicates. v0.12.27: solo gets its own fallback so a
+// solo login with an unresolvable identity no longer collides with (and
+// overwrite-flips) a cn login of the same situation.
+func unknownUIDFallback(variant string) string {
+	switch normalizeVariant(variant) {
+	case variantIntl:
 		return "unknown-intl"
+	case variantSolo:
+		return "solo-unknown"
+	default:
+		return "unknown-cn"
 	}
-	return "unknown-cn"
 }
 
 // resolveLoginUID picks the credential-file identity for a completed login.
 // Precedence: fresh GetUserInfo result → callback userInfo echo → stable
-// per-realm unknown fallback. Never returns a per-login value.
-func resolveLoginUID(getUserInfoUID, callbackUID, realm string) string {
+// per-variant unknown fallback. Never returns a per-login value.
+func resolveLoginUID(getUserInfoUID, callbackUID, variant string) string {
 	if s := strings.TrimSpace(getUserInfoUID); s != "" {
 		return s
 	}
 	if s := strings.TrimSpace(callbackUID); s != "" {
 		return s
 	}
-	return unknownUIDFallback(realm)
+	return unknownUIDFallback(variant)
 }
 
 // resolveLoginNickname mirrors resolveLoginUID for the display name.

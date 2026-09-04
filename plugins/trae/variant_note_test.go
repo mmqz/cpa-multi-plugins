@@ -15,7 +15,7 @@ func TestAuthNote(t *testing.T) {
 		{variantCN, "CN"},
 		{variantSolo, "SOLO"},
 		{variantIntl, "INTL"},
-		{"", "CN"},        // legacy/unknown falls to CN (cn is the default variant)
+		{"", "CN"},         // legacy/unknown falls to CN (cn is the default variant)
 		{" SOLO ", "SOLO"}, // tolerant of stray whitespace/case
 		{"INTL", "INTL"},
 		{"garbage", "CN"},

@@ -424,7 +424,10 @@ func selfCompleteCN(lc *loginCtx, source string) {
 	// v0.12.25: GetUserInfo → callback userInfo echo → stable unknown
 	// fallback. The old per-login loginTraceID fallback minted a fresh
 	// trae-<uuid>.json per submission — the duplicate-account bug.
-	uid = resolveLoginUID(uid, lc.cbUID, "cn")
+	// v0.12.27: pass the login VARIANT (cn vs solo get distinct unknown
+	// fallbacks — a solo login no longer collides with a cn login whose
+	// identity also failed to resolve).
+	uid = resolveLoginUID(uid, lc.cbUID, lc.variant)
 	nickname = resolveLoginNickname(nickname, lc.cbNickname)
 	a.UID = uid
 	a.Nickname = nickname
@@ -451,7 +454,10 @@ func selfCompleteCN(lc *loginCtx, source string) {
 		},
 		"disabled": false,
 	}, "", "  ")
-	fileName := fmt.Sprintf("%s-%s.json", providerName, uid)
+	// v0.12.27: per-variant namespace — solo credentials land in
+	// trae-solo-cn-<uid>.json instead of overwriting the cn file of the
+	// same Trae account (the "solo became init" overwrite bug).
+	fileName := credentialFileName(lc.variant, uid)
 	if lc.authDir == "" {
 		fail("no AuthDir to write the credential file")
 		return

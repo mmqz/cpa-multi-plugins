@@ -98,6 +98,18 @@ func TestResolveLoginUID_NoPerLoginFallback(t *testing.T) {
 	if intlFirst == first {
 		t.Fatal("cn and intl unknown fallbacks must not collide (shared file name space)")
 	}
+
+	// v0.12.27: solo has its own fallback — a solo login with an
+	// unresolvable identity must not overwrite (flip the variant of) a
+	// cn login in the same situation.
+	soloFirst := resolveLoginUID("", "", "solo")
+	soloSecond := resolveLoginUID("", "", "solo")
+	if soloFirst == "" || soloFirst != soloSecond {
+		t.Fatalf("solo fallback not stable: %q vs %q", soloFirst, soloSecond)
+	}
+	if soloFirst == first || soloFirst == intlFirst {
+		t.Fatalf("solo fallback must not collide with cn/intl: got %q", soloFirst)
+	}
 }
 
 func TestResolveLoginUID_Precedence(t *testing.T) {

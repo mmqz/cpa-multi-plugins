@@ -239,7 +239,13 @@ type traeCheckin struct {
 // store, plus a snapshot of credits / checkin status from the account cache
 // (or live upstream if the cache is stale).
 func buildDashboard() map[string]any {
-	// v0.12.26: heal first — if the host's manager dropped any on-disk
+	// v0.12.27: migrate shared-namespace solo credentials FIRST (rename +
+	// re-register) so the inventory below and the heal scan both see the
+	// final names. Idempotent; a no-op once every solo file is namespaced.
+	if n := migrateSoloFileNames(); n > 0 {
+		log.Printf("trae dashboard: migrated %d solo credential(s) into the solo namespace", n)
+	}
+	// v0.12.26: heal next — if the host's manager dropped any on-disk
 	// credential (torn-read reconciliation, see heal.go), re-register it so
 	// the panel reflects the REAL credential inventory, not the manager's.
 	if n := healAuthRegistration(providerName+"-", hostAuthList); n > 0 {
@@ -673,7 +679,8 @@ func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *auth.Auth) {
 	// Derive file name from auth ID or StorageJSON.
 	fileName := req.AuthID
 	if fileName == "" {
-		fileName = fmt.Sprintf("%s-%s.json", providerName, a.UID)
+		// v0.12.27: per-variant fallback naming (solo → its own namespace).
+		fileName = credentialFileName(a.Variant, a.UID)
 	} else if !strings.HasSuffix(strings.ToLower(fileName), ".json") {
 		// v0.12.8: a uid-shaped AuthID would land as an extension-less
 		// file the watcher ignores, losing the refreshed token on restart.
@@ -752,7 +759,9 @@ func handleImportAuth(req pluginapi.ManagementRequest) map[string]any {
 		},
 		"disabled": false,
 	}, "", "  ")
-	fileName := fmt.Sprintf("%s-%s.json", providerName, a.UID)
+	// v0.12.27: per-variant namespace — an imported solo credential must
+	// not overwrite the cn file of the same Trae account.
+	fileName := credentialFileName(a.Variant, a.UID)
 	if err := hostAuthSave(fileName, storageJSON); err != nil {
 		return map[string]any{"success": false, "error": err.Error()}
 	}

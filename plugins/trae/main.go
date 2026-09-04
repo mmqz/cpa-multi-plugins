@@ -134,7 +134,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.26"
+var version = "0.12.27"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -1275,11 +1275,11 @@ func handlePollLogin(request []byte) ([]byte, error) {
 		log.Printf("GetUserInfo failed: %v — proceeding with callback/unknown identity", err)
 	}
 	// v0.12.25: identity chain — GetUserInfo → callback userInfo echo →
-	// stable per-realm unknown name. The old behavior proceeded "with
+	// stable per-variant unknown name. The old behavior proceeded "with
 	// empty UID" and saved the nameless trae-.json; the self-complete
 	// path meanwhile minted a per-login trae-<uuid>.json — together the
 	// reported duplicate-account bug.
-	a.UID = resolveLoginUID(uid, lc.cbUID, "cn")
+	a.UID = resolveLoginUID(uid, lc.cbUID, lc.variant)
 	a.Nickname = resolveLoginNickname(nickname, lc.cbNickname)
 	a.EnterpriseID = entID
 
@@ -1323,9 +1323,12 @@ func handlePollLogin(request []byte) ([]byte, error) {
 		Auth: pluginapi.AuthData{
 			// v0.12.8: ID must equal the saved file name so the login upsert
 			// and the watcher claim of the new file share one record.
+			// v0.12.27: per-variant namespace (solo → trae-solo-cn-<uid>.json)
+			// so a cn+solo dual login of one Trae account stops overwriting
+			// itself ("solo became init").
 			Provider:    providerName,
-			ID:          fmt.Sprintf("%s-%s.json", providerName, a.UID),
-			FileName:    fmt.Sprintf("%s-%s.json", providerName, a.UID),
+			ID:          credentialFileName(a.Variant, a.UID),
+			FileName:    credentialFileName(a.Variant, a.UID),
 			Label:       nonEmpty(a.Nickname, variantLabel(a.Variant)+" "+a.UID),
 			StorageJSON: storageJSON,
 			Metadata:    map[string]any{"type": providerName, "uid": a.UID, "nickname": a.Nickname, "note": authNote(a.Variant)},
@@ -1622,7 +1625,7 @@ func handleRefreshAuth(request []byte) ([]byte, error) {
 			// v0.12.8: empty ID — the host keeps the existing record's ID.
 			Provider:    providerName,
 			ID:          "",
-			FileName:    fmt.Sprintf("%s-%s.json", providerName, a.UID),
+			FileName:    credentialFileName(a.Variant, a.UID),
 			Label:       nonEmpty(a.Nickname, variantLabel(a.Variant)+" "+a.UID),
 			StorageJSON: storageJSON,
 			Metadata:    map[string]any{"type": providerName, "uid": a.UID, "note": authNote(a.Variant)},
