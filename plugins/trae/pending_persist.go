@@ -421,9 +421,11 @@ func selfCompleteCN(lc *loginCtx, source string) {
 	if err != nil {
 		log.Printf("trae self-complete GetUserInfo: %v — proceeding", err)
 	}
-	if strings.TrimSpace(uid) == "" {
-		uid = lc.loginTraceID // avoid a nameless trae-.json credential file
-	}
+	// v0.12.25: GetUserInfo → callback userInfo echo → stable unknown
+	// fallback. The old per-login loginTraceID fallback minted a fresh
+	// trae-<uuid>.json per submission — the duplicate-account bug.
+	uid = resolveLoginUID(uid, lc.cbUID, "cn")
+	nickname = resolveLoginNickname(nickname, lc.cbNickname)
 	a.UID = uid
 	a.Nickname = nickname
 	a.EnterpriseID = entID
@@ -540,9 +542,9 @@ func selfCompleteIntl(lc *intlloginCtx, source string) {
 	if err != nil {
 		log.Printf("trae-intl self-complete GetUserInfo: %v — proceeding", err)
 	}
-	if strings.TrimSpace(uid) == "" {
-		uid = lc.loginTraceID
-	}
+	// v0.12.25: identity chain (see selfCompleteCN) — intl realm.
+	uid = resolveLoginUID(uid, lc.cbUID, "intl")
+	nickname = resolveLoginNickname(nickname, lc.cbNickname)
 	a.UID = uid
 	a.Nickname = nickname
 	a.EnterpriseID = entID

@@ -202,6 +202,16 @@ func intlbuildDashboard() map[string]any {
 			out = append(out, acct)
 			continue
 		}
+		// v0.12.25: this list previously matched EVERY trae-* file (both
+		// hostAuthList and intlhostAuthList filter by the same "trae-" name
+		// prefix since the v0.12.0 merge), so the unified panel concatenated
+		// the same accounts twice — "同一个账号显示多个". Scope the intl list
+		// to intl-variant credentials; the CN list already carries the rest.
+		if raw, rawErr := hostAuthGetRaw(f.AuthIndex); rawErr == nil {
+			if sniffVariantFromJSON(raw) != variantIntl {
+				continue
+			}
+		}
 		// Sa is the parsed nested {auth, account} shape (see intlhostAuthGet).
 		// Trae Intl stores extended identity fields directly under auth:
 		// region, scope, tenant, etc.

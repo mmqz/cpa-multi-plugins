@@ -688,10 +688,11 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 	}
 	uid, nickname, entID, err := intlupstreamClient.GetUserInfo(a)
 	if err != nil {
-		log.Printf("GetUserInfo failed: %v — proceeding with empty UID", err)
+		log.Printf("GetUserInfo failed: %v — proceeding with callback/unknown identity", err)
 	}
-	a.UID = uid
-	a.Nickname = nickname
+	// v0.12.25: identity chain (see handlePollLogin CN) — intl realm.
+	a.UID = resolveLoginUID(uid, lc.cbUID, "intl")
+	a.Nickname = resolveLoginNickname(nickname, lc.cbNickname)
 	a.EnterpriseID = entID
 	storageJSON, _ := json.MarshalIndent(map[string]any{
 		"type":     intlproviderName,
@@ -1017,8 +1018,13 @@ type intlloginCtx struct {
 	// origin (grow-normal.traeapi.us) instead of the SG default.
 	userTag  string
 	authCode string
-	err      error
-	done     chan struct{}
+	// cbUID/cbNickname: the callback's userInfo identity echo (v0.12.25,
+	// cockpit-tools TraeCallbackPayload.userInfo) — stable per-account file
+	// identity when GetUserInfo fails (duplicate-account fix, intl parity).
+	cbUID      string
+	cbNickname string
+	err        error
+	done       chan struct{}
 
 	// authDir: host auth dir for the .oauth callback-file fallback.
 	authDir string

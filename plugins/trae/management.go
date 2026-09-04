@@ -220,7 +220,11 @@ type traeAccount struct {
 }
 
 type traeCredits struct {
-	TotalRemain int64  `json:"total_remain"`
+	// TotalRemain is the SUBSCRIPTION pack quota (UserEntUsage pack
+	// credits_limit). nil = never fetched — NOT the same as 0 (a
+	// checkin-only free account has a 0 pack but a non-zero wallet).
+	// v0.12.25: the check-in WALLET lives in checkin.credits (traeCheckin).
+	TotalRemain *int64 `json:"total_remain"`
 	Plan        string `json:"plan"`
 	FetchedAt   string `json:"fetched_at,omitempty"`
 }
@@ -260,18 +264,21 @@ func buildDashboard() map[string]any {
 		acct.Variant = sa.Variant
 
 		// Cached credits / checkin (filled by scheduler + manual endpoints).
+		// v0.12.25: credits < 0 = pack quota never fetched — leave the
+		// object off so the panel lazy-loads it via /credits.
 		if v, ok := accountCache.Load(f.AuthIndex); ok {
-			if e, ok2 := v.(*accountCacheEntry); ok2 {
+			if e, ok2 := v.(*accountCacheEntry); ok2 && e.credits >= 0 {
+				remain := e.credits
 				acct.Credits = &traeCredits{
-					TotalRemain: e.credits,
+					TotalRemain: &remain,
 					FetchedAt:   e.fetched.Format(time.RFC3339),
 				}
-				if e.checkin != nil {
-					acct.Checkin = &traeCheckin{
-						CheckedIn: e.checkin.CheckedIn,
-						Credits:   e.checkin.Credits,
-						Enable:    e.checkin.Enable,
-					}
+			}
+			if e, ok2 := v.(*accountCacheEntry); ok2 && e.checkin != nil {
+				acct.Checkin = &traeCheckin{
+					CheckedIn: e.checkin.CheckedIn,
+					Credits:   e.checkin.Credits,
+					Enable:    e.checkin.Enable,
 				}
 			}
 		}
@@ -463,8 +470,20 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 			}
 		}
 		// Refresh cached checkin / credits.
+		// v0.12.25 semantics: e.credits = SUBSCRIPTION pack quota
+		// (UserEntUsage); e.checkin.Credits = the CHECK-IN WALLET
+		// (checkin_credits/status) — two different upstream wallets.
+		// Storing the wallet into e.credits here made the card read
+		// 150 right after check-in, then drop to the pack's 0 on the
+		// next /credits refresh ("签到 150 积分一刷新就归零").
+		packCredits := int64(-1) // -1 = unknown, keep previous
+		if v, ok := accountCache.Load(f.AuthIndex); ok {
+			if e, ok2 := v.(*accountCacheEntry); ok2 {
+				packCredits = e.credits
+			}
+		}
 		accountCache.Store(f.AuthIndex, &accountCacheEntry{
-			credits: status.Credits,
+			credits: packCredits,
 			checkin: &checkinStatus{
 				CheckedIn: status.CheckedIn,
 				Credits:   status.Credits,
@@ -473,8 +492,15 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 			fetched: time.Now(),
 		})
 		// Re-enable account in pool if checkin restored credits.
+		// v0.12.25: pool score = pack + wallet so a checkin-only
+		// account (pack 0, wallet 150) is neither starved nor shown
+		// as exhausted.
 		if accountPool != nil {
-			accountPool.ReenableIfCredits(sa.Account.UID, status.Credits)
+			if packCredits > 0 {
+				accountPool.ReenableIfCredits(sa.Account.UID, packCredits+status.Credits)
+			} else {
+				accountPool.ReenableIfCredits(sa.Account.UID, status.Credits)
+			}
 		}
 		results = append(results, entry)
 	}
@@ -535,16 +561,38 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 			remain = selected.EntitlementBaseInfo.Quota.CreditsLimit
 			plan = upstream.ProductTypeIdentity(selected.EntitlementBaseInfo.ProductType, true)
 		}
+		// v0.12.25: also fetch the CHECK-IN WALLET (a separate upstream
+		// wallet from the subscription pack). The old code stored the
+		// pack limit into BOTH slots, so a checkin-only account's card
+		// flipped 150 → 0 on every refresh ("一刷新就归零").
+		wallet := int64(-1)
+		checkedIn, enable := false, false
+		if st, stErr := upstreamClient.CheckinStatus(a); stErr == nil {
+			wallet = st.Credits
+			checkedIn, enable = st.CheckedIn, st.Enable
+		} else {
+			entry["checkin_status_error"] = stErr.Error()
+		}
 		entry["total_remain"] = remain
 		entry["plan"] = plan
-		// Update cache + pool.
+		if wallet >= 0 {
+			entry["checkin_credits"] = wallet
+			entry["checked_in"] = checkedIn
+		}
+		// Update cache + pool. e.credits stays pack-only; the wallet
+		// lives in e.checkin.Credits. Pool score = pack + wallet so a
+		// checkin-only account is not treated as exhausted.
 		accountCache.Store(f.AuthIndex, &accountCacheEntry{
 			credits: remain,
-			checkin: &checkinStatus{Credits: remain},
+			checkin: &checkinStatus{
+				CheckedIn: checkedIn,
+				Credits:   wallet,
+				Enable:    enable,
+			},
 			fetched: time.Now(),
 		})
 		if accountPool != nil {
-			accountPool.SetCredits(sa.Account.UID, remain)
+			accountPool.SetCredits(sa.Account.UID, remain+wallet)
 		}
 		results = append(results, entry)
 	}

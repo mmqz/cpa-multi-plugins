@@ -152,6 +152,11 @@ type callbackParams struct {
 	// TraeCallbackPayload.user_tag): routes USTTP intl accounts to the US
 	// exchange origin.
 	userTag string
+	// identity echoes the callback's userInfo parameter (v0.12.25,
+	// cockpit-tools TraeCallbackPayload.userInfo): the account's real
+	// UID/ScreenName, used as the file identity whenever the fresh
+	// GetUserInfo call fails — the duplicate-account fix.
+	identity cbIdentity
 }
 
 // parseCallbackParams applies the cockpit-tools callback parameter
@@ -180,6 +185,9 @@ func parseCallbackParams(vals url.Values) callbackParams {
 			break
 		}
 	}
+	// v0.12.25: the userInfo echo — the account's real identity, the
+	// duplicate-account fix's second identity source.
+	p.identity = parseCallbackIdentity(vals)
 	for _, k := range []string{"refreshToken", "refresh_token", "RefreshToken", "refresh-token"} {
 		if v := vals.Get(k); v != "" {
 			p.refreshToken = v
@@ -298,6 +306,14 @@ func handleOAuthCallbackResource(req pluginapi.ManagementRequest) []byte {
 		if p.userTag != "" {
 			lc.userTag = p.userTag
 		}
+		// v0.12.25: carry the callback's account identity echo into the
+		// save paths (last-writer wins per field, GetUserInfo still wins).
+		if p.identity.UID != "" {
+			lc.cbUID = p.identity.UID
+		}
+		if p.identity.Nickname != "" {
+			lc.cbNickname = p.identity.Nickname
+		}
 		lc.refreshToken = p.refreshToken
 		lc.authCode = p.authCode
 		lc.err = p.err
@@ -328,6 +344,13 @@ func handleOAuthCallbackResource(req pluginapi.ManagementRequest) []byte {
 		} // else keep the start-login host
 		if p.userTag != "" {
 			lc.userTag = p.userTag
+		}
+		// v0.12.25: intl parity — userInfo echo into the save path.
+		if p.identity.UID != "" {
+			lc.cbUID = p.identity.UID
+		}
+		if p.identity.Nickname != "" {
+			lc.cbNickname = p.identity.Nickname
 		}
 		lc.authCode = p.authCode
 		lc.err = p.err

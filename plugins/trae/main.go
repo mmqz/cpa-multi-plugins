@@ -912,8 +912,15 @@ type loginCtx struct {
 	refreshToken string
 	loginHost    string // for ExchangeToken (from callback or fallback)
 	userTag      string // callback userTag echo (v0.12.24, intl parity)
-	err          error
-	done         chan struct{}
+	// cbUID/cbNickname: the callback's userInfo identity echo (v0.12.25,
+	// cockpit-tools TraeCallbackPayload.userInfo). Stable per-account file
+	// identity when the fresh GetUserInfo call fails — the per-login
+	// loginTraceID fallback this replaces minted trae-<uuid>.json duplicates
+	// for every re-submission of the same account.
+	cbUID      string
+	cbNickname string
+	err        error
+	done       chan struct{}
 }
 
 // acceptCallback accepts OAuth callback GET /authorize?... requests until the
@@ -1263,10 +1270,15 @@ func handlePollLogin(request []byte) ([]byte, error) {
 	a.Variant = lc.variant
 	uid, nickname, entID, err := upstreamClient.GetUserInfo(a)
 	if err != nil {
-		log.Printf("GetUserInfo failed: %v — proceeding with empty UID", err)
+		log.Printf("GetUserInfo failed: %v — proceeding with callback/unknown identity", err)
 	}
-	a.UID = uid
-	a.Nickname = nickname
+	// v0.12.25: identity chain — GetUserInfo → callback userInfo echo →
+	// stable per-realm unknown name. The old behavior proceeded "with
+	// empty UID" and saved the nameless trae-.json; the self-complete
+	// path meanwhile minted a per-login trae-<uuid>.json — together the
+	// reported duplicate-account bug.
+	a.UID = resolveLoginUID(uid, lc.cbUID, "cn")
+	a.Nickname = resolveLoginNickname(nickname, lc.cbNickname)
 	a.EnterpriseID = entID
 
 	// Persist the auth file (nested form: {type, provider, auth:{...}, account:{...}}).

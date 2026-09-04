@@ -119,7 +119,10 @@ func (s *Scheduler) RunCheckinNow() {
 		}
 		// 查积分 + 解冻
 		// 对齐 cockpit-tools apply_usage_response：按 pack 优先级选最高 pack，
-		// 用选中 pack 的 credits_limit 作为 remain（而非 sum 全部 pack）。
+		// 用选中 pack 的 credits_limit 作为套餐额度（而非 sum 全部 pack）。
+		// v0.12.25：池子积分 = 套餐额度 + 签到钱包（checkin_credits/status
+		// 的 credits）——签到赠送的积分不在订阅 pack 里，只算 pack 会把
+		// 纯签到账号打成 0 分（排序垫底 + 面板"耗尽"徽标）。
 		usage, err := s.cfg.Upstream.UserEntUsage(a)
 		if err != nil {
 			log.Printf("ent-usage %s: %v", st.UID, err)
@@ -131,7 +134,11 @@ func (s *Scheduler) RunCheckinNow() {
 		if selected != nil {
 			remain = selected.EntitlementBaseInfo.Quota.CreditsLimit
 		}
-		s.cfg.Pool.ReenableIfCredits(st.UID, remain)
+		wallet := int64(0)
+		if status != nil {
+			wallet = status.Credits
+		}
+		s.cfg.Pool.ReenableIfCredits(st.UID, remain+wallet)
 	}
 }
 

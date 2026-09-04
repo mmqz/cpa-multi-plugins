@@ -315,7 +315,10 @@ function card(a){
   const cr=a.credits;
   const pool=poolByUID[a.uid]||{};
   const checkedIn=!!ci.checked_in;
-  const exhausted=!!cr && Number(cr.total_remain)===0;
+  // v0.12.25: wallet (checkin credits) is a separate upstream wallet from the
+  // subscription pack — "耗尽" only when BOTH are known-and-zero.
+  const wallet=(ci.credits!=null)?Number(ci.credits)||0:null;
+  const exhausted=!!cr && cr.total_remain!=null && Number(cr.total_remain)===0 && wallet===0;
   const cooling=!!pool.cooling;
   const disabled=!!a.disabled||!!pool.disabled;
   const plan=a.credits&&a.credits.plan?a.credits.plan:(a.plan||"unknown");
@@ -337,7 +340,10 @@ function card(a){
     ? ((a.token_expiry?`<div class="row"><span class="k">Token 到期</span><span class="v">${esc(String(a.token_expiry).replace('T',' ').replace('Z',' UTC'))}</span></div>`:"")
        +(a.region?`<div class="row"><span class="k">区域</span><span class="v">${esc(a.region)}</span></div>`:"")
        +'<div class="row"><span class="k">类型</span><span class="v">Trae Intl（marscode · 无积分/签到）</span></div>')
-    : progressHTML(cr);
+    : (progressHTML(cr)
+       // v0.12.25: the check-in wallet row — the 150 积分 from check-in live
+       // here, NOT in the subscription pack above; never conflated again.
+       +((wallet!=null&&(wallet>0||checkedIn))?`<div class="row"><span class="k">签到钱包</span><span class="v">${wallet} 积分${checkedIn?" · 今日已签":""}</span></div>`:""));
   return `<div class="card" data-uid="${escAttr(a.uid)}" data-auth="${escAttr(a.auth_index)}">
   <h2>${esc(a.nickname||a.label||a.name)} <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
@@ -366,6 +372,10 @@ function lazyLoadCredits(accounts){
             fetched_at: new Date().toISOString()
           });
         }
+        // v0.12.25: wallet sync (separate from the pack quota).
+        if(res.checkin_credits!=null){
+          a.checkin=Object.assign({}, a.checkin||{}, {credits:res.checkin_credits, checked_in:!!res.checked_in});
+        }
         updateOneCard(a);
       })
       .catch(()=>{
@@ -381,6 +391,9 @@ function lazyLoadCredits(accounts){
                   plan: res.plan||"",
                   fetched_at: new Date().toISOString()
                 });
+              }
+              if(res.checkin_credits!=null){
+                a.checkin=Object.assign({}, a.checkin||{}, {credits:res.checkin_credits, checked_in:!!res.checked_in});
               }
               updateOneCard(a);
             })
@@ -547,8 +560,13 @@ async function load(force, btn){
       if(force) toast("刷新失败", "err", d.error);
       return;
     }
-    const accounts=(d.accounts||[]).map(a=>Object.assign({variant:a.variant||"cn"},a))
-      .concat(intlAccounts.map(a=>Object.assign({variant:"intl"},a)));
+    const accounts=[];
+    // v0.12.25: dedupe by auth_index — the CN list (all trae-* files) and the
+    // intl list overlapped before the server-side filter, and concatenated
+    // here without a key check, rendering the same account twice.
+    const seenIdx=new Set();
+    (d.accounts||[]).forEach(a=>{ if(a.auth_index&&seenIdx.has(a.auth_index))return; if(a.auth_index)seenIdx.add(a.auth_index); accounts.push(Object.assign({variant:a.variant||"cn"},a)); });
+    (intlAccounts||[]).forEach(a=>{ if(a.auth_index&&seenIdx.has(a.auth_index))return; if(a.auth_index)seenIdx.add(a.auth_index); accounts.push(Object.assign({variant:"intl"},a)); });
     lastAccounts=accounts;
     // Merge pool status (cooling/disabled) — best effort.
     await loadPoolStatus();
@@ -580,10 +598,14 @@ async function load(force, btn){
 }
 function creditOf(a){
   const cr=a&&a.credits;
-  if(!cr) return {remain:0, known:false};
-  const remain=Number(cr.total_remain)||0;
-  const known=cr.total_remain!=null || !!cr.plan;
-  return {remain, known};
+  const ci=(a&&a.checkin)||{};
+  const wallet=(ci.credits!=null)?Number(ci.credits)||0:null;
+  if(!cr && wallet==null) return {remain:0, known:false};
+  const packKnown=!!cr && cr.total_remain!=null;
+  const pack=packKnown?Number(cr.total_remain)||0:0;
+  // v0.12.25: the summary total counts pack + checkin wallet.
+  const known=packKnown||wallet!=null;
+  return {remain:pack+(wallet||0), known:known};
 }
 function renderSummary(accounts){
   const box=document.getElementById("summaryBox");
@@ -700,12 +722,17 @@ async function refreshCredits(idx, btn){
         plan: res.plan||(a.credits?a.credits.plan:""),
         fetched_at: new Date().toISOString()
       });
+      // v0.12.25: keep the check-in wallet in sync (separate upstream wallet).
+      if(res.checkin_credits!=null){
+        a.checkin=Object.assign({}, a.checkin||{}, {credits:res.checkin_credits, checked_in:!!res.checked_in});
+      }
       if(res.error) a.error=res.error; else a.error="";
       updateOneCard(a);
     }
     const remain=res.total_remain!=null?res.total_remain:"?";
+    const wallet=res.checkin_credits!=null?" · 签到钱包 "+res.checkin_credits:"";
     const who=res.nickname||res.uid||idx;
-    toast("积分已刷新","ok",who+" · 剩余 "+remain);
+    toast("积分已刷新","ok",who+" · 套餐 "+remain+wallet);
   }catch(e){
     toast("刷新失败","err",e.message||String(e));
   }finally{
