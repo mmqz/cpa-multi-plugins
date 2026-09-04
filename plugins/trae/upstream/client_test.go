@@ -380,3 +380,64 @@ func TestCheckinBizCodeNonZero(t *testing.T) {
 		t.Errorf("9074 should surface as biz rate limit, got %v", err)
 	}
 }
+
+func TestPayStatusParsing(t *testing.T) {
+	// v0.12.29: ide_user_pay_status 容错解析 —— 对齐上游 getCnEntitlementDetailFields
+	// 的三段回退（detail → entitlementInfo → originPayStatusData）。Free CN/SOLO
+	// 账户的 ent_usage pack 无 quota，快请求/月与 SOLO 并发只能从这里拿。
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		if !strings.HasSuffix(r.URL.Path, EpPayStatus) {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		return jsonResp(200, `{"code":0,"user_pay_identity_str":"free",`+
+			`"detail":{"fast_request_per":50,"can_get_express_status":1},`+
+			`"quota":{"solo_agent_parallel_limit":2,"enable_solo_agent":true}}`), nil
+	})
+	ps, err := c.PayStatus(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := ps.FastRequestPer(); v == nil || *v != 50 {
+		t.Errorf("fast_request_per = %v, want 50", v)
+	}
+	if v := ps.CanGetExpressStatus(); v == nil || *v != 1 {
+		t.Errorf("can_get_express_status = %v, want 1", v)
+	}
+	if v := ps.SoloParallelLimit(); v == nil || *v != 2 {
+		t.Errorf("solo_agent_parallel_limit = %v, want 2", v)
+	}
+	if !ps.HasSoloPackage() {
+		t.Error("enable_solo_agent=true should set HasSoloPackage")
+	}
+	if got := ps.PlanIdentity(); got != "free" {
+		t.Errorf("plan identity = %q, want free", got)
+	}
+	// camelCase 键名 + entitlementInfo/originPayStatusData 回退。
+	c2 := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"entitlementInfo":{"detail":{"fastRequestPer":30}},`+
+			`"originPayStatusData":{"detail":{"canGetExpressStatus":0}}}`), nil
+	})
+	ps2, err := c2.PayStatus(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := ps2.FastRequestPer(); v == nil || *v != 30 {
+		t.Errorf("fallback fastRequestPer = %v, want 30", v)
+	}
+	if v := ps2.CanGetExpressStatus(); v == nil || *v != 0 {
+		t.Errorf("fallback canGetExpressStatus = %v, want 0", v)
+	}
+	if ps2.SoloParallelLimit() != nil {
+		t.Error("absent solo limit should be nil, not 0")
+	}
+	if ps2.HasSoloPackage() {
+		t.Error("absent enable_solo_* should not set HasSoloPackage")
+	}
+	// IsFreePlan：中英文两种 display_desc 都要命中（上游 .includes('free') 漏"免费"）。
+	if !IsFreePlan("免费", "") || !IsFreePlan("Free Plan", "") || !IsFreePlan("", "free") {
+		t.Error("IsFreePlan should match 免费/Free/plan_type=free")
+	}
+	if IsFreePlan("Pro+", "") || IsFreePlan("专业版", "") {
+		t.Error("IsFreePlan should not match paid plans")
+	}
+}

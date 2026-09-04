@@ -2,24 +2,29 @@
 package upstream
 
 const (
-	AgentHost      = "https://trae-api-cn.mchost.guru"
-	UgHost         = "https://api.trae.cn"
-	OAuthHost      = "https://api.trae.com.cn"
-	ConsoleHost    = "https://www.trae.cn"
-	ClientID       = "ono9krqynydwx5" // non-solo (Trae Code CN)
-	AppID          = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
-	IdeVersion     = "0.1.43"
-	IdeVersionCode = "20260716"
-	DeviceBrand    = "83DG"
-	OSVersion      = "Windows 11 Pro"
-	Function       = "inline_chat" // cn variant default (kept for compat)
+        AgentHost      = "https://trae-api-cn.mchost.guru"
+        UgHost         = "https://api.trae.cn"
+        OAuthHost      = "https://api.trae.com.cn"
+        ConsoleHost    = "https://www.trae.cn"
+        ClientID       = "ono9krqynydwx5" // non-solo (Trae Code CN)
+        AppID          = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
+        IdeVersion     = "0.1.43"
+        IdeVersionCode = "20260716"
+        DeviceBrand    = "83DG"
+        OSVersion      = "Windows 11 Pro"
+        Function       = "inline_chat" // cn variant default (kept for compat)
 
-	// 端点
-	EpChat          = "/api/agent/v3/llm_utils_chat"
-	EpModels        = "/api/ide/v1/get_detail_param"
-	EpExchange      = "/cloudide/api/v3/trae/oauth/ExchangeToken"
-	EpUserInfo      = "/cloudide/api/v3/trae/GetUserInfo"
-	EpCheckinStatus = "/trae/api/v2/ug/checkin_credits/status"
-	EpCheckinClaim  = "/trae/api/v2/ug/checkin_credits/claim"
-	EpEntUsage      = "/trae/api/v2/pay/ide_user_ent_usage"
+        // 端点
+        EpChat          = "/api/agent/v3/llm_utils_chat"
+        EpModels        = "/api/ide/v1/get_detail_param"
+        EpExchange      = "/cloudide/api/v3/trae/oauth/ExchangeToken"
+        EpUserInfo      = "/cloudide/api/v3/trae/GetUserInfo"
+        EpCheckinStatus = "/trae/api/v2/ug/checkin_credits/status"
+        EpCheckinClaim  = "/trae/api/v2/ug/checkin_credits/claim"
+        EpEntUsage      = "/trae/api/v2/pay/ide_user_ent_usage"
+        // v0.12.29: 上游 cockpit-tools 刷新链路的另一数据源（trae_account_core_refresh.rs
+        // TRAE_PAY_STATUS_PATH）——detail.fast_request_per（快请求/月）、
+        // quota.solo_agent_parallel_limit（SOLO 并发）、user_pay_identity_str（计划标识）。
+        // Free CN/SOLO 账户在 ent_usage 里没有可解析 quota，剩余只能靠这里补真实数值。
+        EpPayStatus     = "/trae/api/v1/pay/ide_user_pay_status"
 )

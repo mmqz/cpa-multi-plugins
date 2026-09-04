@@ -268,12 +268,15 @@ function escAttr(s){return esc(s)}
 
 function progressHTML(cr){
   // trae credits object: { total_remain, plan, fetched_at, usage_model,
-  // remain_known, used, total, fast_limit, fast_used }.
+  // remain_known, used, total, fast_limit, fast_used,
+  // fast_request_per, solo_parallel, solo_package, plan_type }.
   // v0.12.28: 对齐 cockpit-tools TraeAccountsPage.tsx 的 CN 展示规则——
   //   fast 证据 → "速通可用 X 次/无限次"
+  //   fast_request_per>0 → "快请求/月：X"（v0.12.29，pay_status detail）
   //   basic（付费包 quota 可解析） → 剩余/额度池
   //   unknown（Free 等） → "免费剩余：--"，进度条不猜测（旧代码把未知渲染成
-  //   "剩余 0 积分 · 00%"，即用户截图中的显示异常）。
+  //   "剩余 0 积分 · 00%"，即用户截图中的显示异常）；meta 附 pay_status
+  //   真实维度（快通道/Solo 并发），有数就不只给 "--"。
   if(!cr || (cr.total_remain==null && !cr.plan)){
     return '<div class="pb"><div class="pb-label"><span>剩余积分</span><span class="spin"></span>加载中…</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
   }
@@ -290,6 +293,15 @@ function progressHTML(cr){
     const meta=(fl!=null&&!isUnl)?`速通已用 ${fu} / ${fl} 次${when}`:(isUnl?`速通无限次 · 已用 ${fu}${when}`:'');
     return `<div class="pb"><div class="pb-label"><span>速通可用 ${isUnl?"无限次":avail+" 次"}</span><span>${pct==null?"":pct+"%"}</span></div>${bar}<div class="pb-meta">${meta}</div></div>`;
   }
+  // v0.12.29: pay_status detail.fast_request_per —— 上游 CN 卡片第 2 分支
+  // （TraeAccountsPage.tsx "快请求/月：{{count}}"）。Free/SOLO 账户的 ent_usage
+  // pack 里没有 quota，这是仅有的真实剩余维度，绝不能再渲染成 "--"。
+  // （fast 证据分支已先行返回，此处即上游的 !hasFastRequest 场景。）
+  const fpm=(cr.fast_request_per!=null)?Number(cr.fast_request_per):null;
+  const solo=(cr.solo_parallel!=null)?Number(cr.solo_parallel):null;
+  if(fpm!=null&&fpm>0){
+    return `<div class="pb"><div class="pb-label"><span>快请求/月：${fpm}</span><span></span></div><div class="pb-track"><div class="pb-bar" style="width:0%;background:var(--mut)"></div></div><div class="pb-meta">快通道: ${fpm}/月${solo!=null?` · Solo 并发 ${solo}`:""} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
+  }
   if(model==="basic" && cr.remain_known){
     const remain=Number(cr.total_remain)||0;
     const used=(cr.used!=null)?Number(cr.used):0;
@@ -300,8 +312,13 @@ function progressHTML(cr){
   }
   if(cr.remain_known===false || (model==="unknown")){
     // 对齐上游：无可靠剩余时不猜测（社区 #1281）。
-    const isFree=plan.includes("free");
-    return `<div class="pb"><div class="pb-label"><span>${isFree?"免费剩余":"剩余"}</span><span>--</span></div><div class="pb-track"><div class="pb-bar" style="width:0%;background:var(--mut)"></div></div><div class="pb-meta">${isFree?"免费剩余：--":"剩余次数：--"} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
+    // v0.12.29: Free 判定补中文"免费"+ plan_type（上游 isFreePlan 的
+    // .includes('free') 对 CN display_desc"免费"漏判 → 错显示"剩余次数：--"）；
+    // meta 附上 pay_status 的真实维度（快通道/Solo 并发），有数就不只给 "--"。
+    const ptype=String(cr.plan_type||"");
+    const isFree=plan.includes("free")||plan.includes("免费")||ptype.toLowerCase().includes("free");
+    const extras=(fpm!=null?` · 快通道: ${fpm}/月`:"")+(solo!=null?` · Solo 并发 ${solo}`:"")+(cr.solo_package?" · 权益包: Solo":"");
+    return `<div class="pb"><div class="pb-label"><span>${isFree?"免费剩余":"剩余"}</span><span>--</span></div><div class="pb-track"><div class="pb-bar" style="width:0%;background:var(--mut)"></div></div><div class="pb-meta">${isFree?"免费剩余：--":"剩余次数：--"}${extras} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
   }
   // legacy（升级前缓存）：老字段直显，不再按 PLAN_REF 估算百分比。
   const remain=Number(cr.total_remain)||0;
@@ -396,7 +413,12 @@ function applyCreditsResult(a, res){
       used: res.used,
       total: res.total,
       fast_limit: res.fast_limit,
-      fast_used: res.fast_used
+      fast_used: res.fast_used,
+      // v0.12.29: pay_status 维度（快请求/月、Solo 并发、权益包、plan_type）。
+      fast_request_per: res.fast_request_per,
+      solo_parallel: res.solo_parallel,
+      solo_package: !!res.solo_package,
+      plan_type: res.plan_type||(a.credits?a.credits.plan_type:"")
     });
   }
   if(res.checkin_credits!=null){
@@ -776,6 +798,9 @@ async function refreshCredits(idx, btn){
     if(res.usage_model==="fast"&&res.remain_known){
       const av=Number(res.total_remain)||0;
       detail=who+" · 速通可用 "+(av<0?"无限次":av+" 次");
+    }else if(res.fast_request_per!=null&&Number(res.fast_request_per)>0){
+      // v0.12.29: Free/SOLO 的真实剩余维度（pay_status 快请求/月）。
+      detail=who+" · 快请求/月 "+res.fast_request_per;
     }else if(res.usage_model==="basic"&&res.remain_known){
       detail=who+" · 套餐 "+(res.total_remain!=null?res.total_remain:"?")+" · 已用 "+(res.used!=null?res.used:0);
     }else if(res.remain_known===false){
