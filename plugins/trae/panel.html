@@ -266,7 +266,7 @@ function markCheckinDone(btn){
 function esc(s){return (s==null?"":String(s)).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 function escAttr(s){return esc(s)}
 
-function progressHTML(cr){
+function progressHTML(cr, acct){
   // trae credits object: { total_remain, plan, fetched_at, usage_model,
   // remain_known, used, total, fast_limit, fast_used,
   // fast_request_per, solo_parallel, solo_package, plan_type }.
@@ -277,12 +277,17 @@ function progressHTML(cr){
   //   unknown（Free 等） → "免费剩余：--"，进度条不猜测（旧代码把未知渲染成
   //   "剩余 0 积分 · 00%"，即用户截图中的显示异常）；meta 附 pay_status
   //   真实维度（快通道/Solo 并发），有数就不只给 "--"。
+  // v0.12.30: SOLO 已转积分制——模型调用消耗签到钱包积分，unknown 模型下
+  // 直接把钱包余额作为"剩余积分"展示；快通道: 0/月 是噪音，只在 >0 时显示。
   if(!cr || (cr.total_remain==null && !cr.plan)){
     return '<div class="pb"><div class="pb-label"><span>剩余积分</span><span class="spin"></span>加载中…</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
   }
   const plan=String(cr.plan||"").toLowerCase();
   const when=cr.fetched_at?` · 快照 ${esc(String(cr.fetched_at).replace('T',' ').replace('Z',' UTC'))}`:'';
   const model=cr.usage_model||"legacy";
+  // v0.12.30: SOLO 语境（积分制）与签到钱包余额，供后续分支使用。
+  const isSoloAcct=!!(acct&&acct.variant==="solo");
+  const wallet=(acct&&acct.checkin&&acct.checkin.credits!=null)?Number(acct.checkin.credits):null;
   if(model==="fast" && cr.remain_known){
     const avail=Number(cr.total_remain)||0;
     const isUnl=avail<0;
@@ -294,12 +299,13 @@ function progressHTML(cr){
     return `<div class="pb"><div class="pb-label"><span>速通可用 ${isUnl?"无限次":avail+" 次"}</span><span>${pct==null?"":pct+"%"}</span></div>${bar}<div class="pb-meta">${meta}</div></div>`;
   }
   // v0.12.29: pay_status detail.fast_request_per —— 上游 CN 卡片第 2 分支
-  // （TraeAccountsPage.tsx "快请求/月：{{count}}"）。Free/SOLO 账户的 ent_usage
+  // （TraeAccountsPage.tsx "快请求/月：{{count}}"）。Free CN 账户的 ent_usage
   // pack 里没有 quota，这是仅有的真实剩余维度，绝不能再渲染成 "--"。
-  // （fast 证据分支已先行返回，此处即上游的 !hasFastRequest 场景。）
+  // v0.12.30: SOLO 已转积分制（模型调用扣签到钱包积分，与快通道无关），
+  // 快通道: 0/月 对 solo 是误导性噪音 —— solo 跳过此分支，直接用钱包展示。
   const fpm=(cr.fast_request_per!=null)?Number(cr.fast_request_per):null;
   const solo=(cr.solo_parallel!=null)?Number(cr.solo_parallel):null;
-  if(fpm!=null&&fpm>0){
+  if(fpm!=null&&fpm>0&&!isSoloAcct){
     return `<div class="pb"><div class="pb-label"><span>快请求/月：${fpm}</span><span></span></div><div class="pb-track"><div class="pb-bar" style="width:0%;background:var(--mut)"></div></div><div class="pb-meta">快通道: ${fpm}/月${solo!=null?` · Solo 并发 ${solo}`:""} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
   }
   if(model==="basic" && cr.remain_known){
@@ -313,11 +319,17 @@ function progressHTML(cr){
   if(cr.remain_known===false || (model==="unknown")){
     // 对齐上游：无可靠剩余时不猜测（社区 #1281）。
     // v0.12.29: Free 判定补中文"免费"+ plan_type（上游 isFreePlan 的
-    // .includes('free') 对 CN display_desc"免费"漏判 → 错显示"剩余次数：--"）；
-    // meta 附上 pay_status 的真实维度（快通道/Solo 并发），有数就不只给 "--"。
+    // .includes('free') 对 CN display_desc"免费"漏判 → 错显示"剩余次数：--"）。
+    // v0.12.30: SOLO 已转积分制，模型调用消耗签到钱包积分——钱包余额就是
+    // 该账户的真实剩余，直接展示；非 SOLO 保持"免费剩余：--"不猜测。
     const ptype=String(cr.plan_type||"");
     const isFree=plan.includes("free")||plan.includes("免费")||ptype.toLowerCase().includes("free");
-    const extras=(fpm!=null?` · 快通道: ${fpm}/月`:"")+(solo!=null?` · Solo 并发 ${solo}`:"")+(cr.solo_package?" · 权益包: Solo":"");
+    if(isSoloAcct&&wallet!=null){
+      let color=wallet>0?'var(--ok)':'var(--err)';
+      return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>${wallet>0?"":"0%"}</span></div><div class="pb-track"><div class="pb-bar" style="width:${wallet>0?100:0}%;background:${color}"></div></div><div class="pb-meta">剩余 ${wallet} 积分 · 签到钱包（SOLO 按积分计费） · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
+    }
+    // 快通道 0/月是噪音：只在有量时展示（对齐上游 >0 分支）。
+    const extras=(fpm!=null&&fpm>0?` · 快通道: ${fpm}/月`:"")+(solo!=null?` · Solo 并发 ${solo}`:"")+(cr.solo_package?" · 权益包: Solo":"");
     return `<div class="pb"><div class="pb-label"><span>${isFree?"免费剩余":"剩余"}</span><span>--</span></div><div class="pb-track"><div class="pb-bar" style="width:0%;background:var(--mut)"></div></div><div class="pb-meta">${isFree?"免费剩余：--":"剩余次数：--"}${extras} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
   }
   // legacy（升级前缓存）：老字段直显，不再按 PLAN_REF 估算百分比。
@@ -387,7 +399,7 @@ function card(a){
     ? ((a.token_expiry?`<div class="row"><span class="k">Token 到期</span><span class="v">${esc(String(a.token_expiry).replace('T',' ').replace('Z',' UTC'))}</span></div>`:"")
        +(a.region?`<div class="row"><span class="k">区域</span><span class="v">${esc(a.region)}</span></div>`:"")
        +'<div class="row"><span class="k">类型</span><span class="v">Trae Intl（marscode · 无积分/签到）</span></div>')
-    : (progressHTML(cr)
+    : (progressHTML(cr, a)
        // v0.12.25: the check-in wallet row — the 150 积分 from check-in live
        // here, NOT in the subscription pack above; never conflated again.
        +((wallet!=null&&(wallet>0||checkedIn))?`<div class="row"><span class="k">签到钱包</span><span class="v">${wallet} 积分${checkedIn?" · 今日已签":""}</span></div>`:""));
