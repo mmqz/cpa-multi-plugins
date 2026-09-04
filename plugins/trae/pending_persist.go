@@ -456,9 +456,19 @@ func selfCompleteCN(lc *loginCtx, source string) {
 		fail("no AuthDir to write the credential file")
 		return
 	}
-	if err := os.WriteFile(filepath.Join(lc.authDir, fileName), storageJSON, 0o600); err != nil {
+	// v0.12.26: atomic temp+rename write — a bare os.WriteFile truncates the
+	// destination first, and the host's full auth-dir reconciliation reading
+	// the file mid-write deletes the credential from its manager (panel then
+	// shows fewer accounts than exist; verified 2026-09-04). See heal.go.
+	if err := atomicWriteJSON(filepath.Join(lc.authDir, fileName), storageJSON); err != nil {
 		fail("write credential file: " + err.Error())
 		return
+	}
+	// v0.12.26: re-save through host.auth.save so the manager record is
+	// upserted immediately — not subject to the watcher's hash-skip of the
+	// just-finished write. Failure is non-fatal: the file is already on disk.
+	if err := hostAuthSave(fileName, storageJSON); err != nil {
+		log.Printf("trae self-complete: post-save host.auth.save %s: %v", fileName, err)
 	}
 	accountPool.Add(a)
 	recordLoginOutcome(state, true, "")
@@ -578,9 +588,13 @@ func selfCompleteIntl(lc *intlloginCtx, source string) {
 		fail("no AuthDir to write the credential file")
 		return
 	}
-	if err := os.WriteFile(filepath.Join(lc.authDir, fileName), storageJSON, 0o600); err != nil {
+	// v0.12.26: atomic write + immediate host re-save (see the CN twin above).
+	if err := atomicWriteJSON(filepath.Join(lc.authDir, fileName), storageJSON); err != nil {
 		fail("write credential file: " + err.Error())
 		return
+	}
+	if err := hostAuthSave(fileName, storageJSON); err != nil {
+		log.Printf("trae-intl self-complete: post-save host.auth.save %s: %v", fileName, err)
 	}
 	recordLoginOutcome(state, true, "")
 	clearPendingLogin(lc.authDir)

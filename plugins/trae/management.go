@@ -239,6 +239,12 @@ type traeCheckin struct {
 // store, plus a snapshot of credits / checkin status from the account cache
 // (or live upstream if the cache is stale).
 func buildDashboard() map[string]any {
+	// v0.12.26: heal first — if the host's manager dropped any on-disk
+	// credential (torn-read reconciliation, see heal.go), re-register it so
+	// the panel reflects the REAL credential inventory, not the manager's.
+	if n := healAuthRegistration(providerName+"-", hostAuthList); n > 0 {
+		log.Printf("trae dashboard: healed %d credential(s) missing from host manager", n)
+	}
 	files, err := hostAuthList()
 	if err != nil {
 		return map[string]any{"error": err.Error()}

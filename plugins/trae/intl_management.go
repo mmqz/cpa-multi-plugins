@@ -182,6 +182,11 @@ type intltraeAccount struct {
 // per account on every page load); the panel can lazily trigger /status if
 // it wants live reachability.
 func intlbuildDashboard() map[string]any {
+	// v0.12.26: heal intl credentials missing from the host manager first
+	// (same reconciliation-drop mechanism as the CN panel; see heal.go).
+	if n := healAuthRegistration(intlproviderName+"-", intlhostAuthList); n > 0 {
+		log.Printf("trae-intl dashboard: healed %d credential(s) missing from host manager", n)
+	}
 	files, err := intlhostAuthList()
 	if err != nil {
 		return map[string]any{"error": err.Error()}
