@@ -357,9 +357,10 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 }
 
 // CheckinStatus 查询签到状态。
-// v0.12.40: 对齐官方客户端契约（反编译 TraeWork CN 2.3.81345 out/main.js
-// eb()/fetchCheckinCreditsStatus()）：POST /trae/api/v2/ug/checkin_credits/status，
-// body {"req_source":2}，无 did query。响应为扁平结构：
+// v0.12.41: 对齐官方客户端契约（反编译 TraeCode CN 2.3.79946 deb 与 TraeWork
+// CN 2.3.81345 exe（装出 "TRAE SOLO CN"）两版 out/main.js 交叉实证）：
+// POST /trae/api/v2/ug/checkin_credits/status，body {"req_source":N}
+// （N 走探测序列 ugCheckinReqSources），无 did query。响应为扁平结构：
 //   {enable, checked_in, did_checked_in, credits, extra_credits}
 // 其中 credits = 每日签到奖励数额（官方卡片 "Daily check-in: {credits} credits"），
 // 并非可花余额——此前误标"签到钱包"（v0.12.30 时代的误读）。
@@ -369,7 +370,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 // 返回完整字段：CheckedIn / Credits / Enable + 业务码 Code（用于 9074 限流识别）。
 // 对齐上游 code!=0 语义（trae_account_token_injection.rs:2786-2791）：
 // 非零业务码 → 返回错误（上游 message 透传），绝不能当成 "未签到" 静默通过。
-// 9074（参与用户太多）作为 *Error{BizCode:9074} 返回，调用方可识别重试。
+// 9074（活动校验拒绝）作为 *Error{BizCode:9074} 返回，调用方可识别重试。
 type CheckinStatusResult struct {
         CheckedIn bool   `json:"checked_in"`
         // DidCheckedIn 官方字段 did_checked_in：设备维度的"今日已签"
@@ -384,10 +385,12 @@ type CheckinStatusResult struct {
         // v0.12.31 "官方依次给 200 面板却是 150"悬案即源于此（150 基础 + 50 加码）。
         ExtraCredits int64  `json:"extra_credits"`
         Enable    bool   `json:"enable"`
-        Code      int32  `json:"code"` // 业务码：0=成功，9074=限流，其他=会话类失败
+        Code      int32  `json:"code"` // 业务码：0=成功，9074=活动校验拒绝，其他=会话类失败
         Message   string `json:"message"`
         // SchemeUsed 实际成功使用的鉴权方案（v0.12.38 双方案探测，面板诊断用）。
         SchemeUsed string `json:"-"`
+        // ReqSourceUsed 实际成功使用的 req_source body（v0.12.41 双探测，日志/诊断用）。
+        ReqSourceUsed string `json:"-"`
 }
 
 // v0.12.38: 签到鉴权双方案。证据链复盘：
@@ -411,15 +414,31 @@ const (
 // 对齐反编译的 TraeWork CN 2.3.81345）。
 const ugAppVersion = "2.3.81345"
 
-// ugCheckinBody 签到类请求（status/claim）统一 body。v0.12.40 官方契约
-// （反编译 TraeWork CN 2.3.81345 out/main.js eb()）:
-//   data = method=="POST" ? {req_source: Dr(P) ? 2 : 1} : void 0
-//   Dr(P) = runMode=="solo-lite"（SOLO 客户端）→ req_source=2
-//   （web 端枚举 {IDE:1, Lite:2}，plain IDE 客户端发 1）。
-// 9074 真因（v0.12.40 定案）：v0.12.34-38 时代我方 claim 发空 {}，官方
-// 2025-09-04 收紧活动校验后拒绝无 req_source 的参与请求，返回通用活动错误
-// 9074（"当前参与用户太多"）；官方客户端同账号正常——与用户实测吻合。
-const ugCheckinBody = `{"req_source":2}`
+// ugCheckinReqSources 签到类请求（status/claim）的 req_source 探测序列。
+// v0.12.41 双版官方包反编译交叉实证（out/main.js eb()）：
+//   - TraeCode CN 2.3.79946（09-01 build，deb）：status/claim body 均为 {}。
+//   - TraeWork CN 2.3.81345（09-04 build，exe "TRAE SOLO CN"）：
+//     body = {req_source: Dr(P) ? 2 : 1}，
+//     Dr(P) = Su(P)==SOLO_Lite || packageType==SOLO_CN_ENTERPRISE，
+//     Su(P): packageType∈{SOLO_CN,SOLO_I18N,SOLO_CN_ENTERPRISE}→SOLO_Lite，否则 TRAE。
+//     product.json 实证该包 packageType="SOLO_CN" → Dr=true → 官方 TraeWork/SOLO
+//     客户端发 2；普通 Trae CN IDE（packageType=TRAE_CN）Dr=false → 发 1。
+//   - req_source 是【客户端产品谱系】而非用户套餐：TRAE 谱系配 OAuth appId
+//     ono9krqynydwx5、SOLO 谱系配 en1oxy7wnw8j9n（iCubeApp.authConfig），
+//     官方客户端 jb() 按 Dr(P) 二选一，两者从未交叉。
+// v0.12.40 误读：把"用户是 SOLO 套餐"当成了 req_source=2 的依据，对我方
+// TRAE 谱系 token（ClientID=ono9krqynydwx5，constants.go）发 req_source=2 →
+// 请求体与 token 谱系自相矛盾；09-04 上游收紧活动校验后 claim 被通用活动
+// 错误 9074 拒绝（status 只读不受校验，所以 v0.12.40 面板状态可读、claim 被拒）。
+// 策略：req_source=1 优先——与我方 token 谱系一致，且是用户实测可正常签到的
+// Trae CN IDE 契约；9074 回退 req_source=2 一次（覆盖 SOLO 谱系 token 或官方
+// 调整路由）；Bearer 方案保持末位回退（v0.12.38 语义）。
+func ugCheckinReqSources() []string {
+        return []string{
+                `{"req_source":1}`,
+                `{"req_source":2}`,
+        }
+}
 
 // ugCheckinSchemes 返回签到请求的鉴权方案优先级。
 func ugCheckinSchemes() []string {
@@ -473,32 +492,36 @@ func (c *Client) ugCheckinOnce(a *auth.Auth, method, url, body, scheme string) (
 
 func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
         var lastBiz *Error
-        for _, scheme := range ugCheckinSchemes() {
-                code, msg, data, err := c.ugCheckinOnce(a, http.MethodPost, c.ugBase()+EpCheckinStatus, ugCheckinBody, scheme)
-                if err != nil {
-                        return nil, err
-                }
-                if code == 0 {
-                        var resp CheckinStatusResult
-                        if err := json.Unmarshal(data, &resp); err != nil {
-                                return nil, fmt.Errorf("checkin status parse: %w", err)
+        for _, body := range ugCheckinReqSources() {
+                for _, scheme := range ugCheckinSchemes() {
+                        code, msg, data, err := c.ugCheckinOnce(a, http.MethodPost, c.ugBase()+EpCheckinStatus, body, scheme)
+                        if err != nil {
+                                return nil, err
                         }
-                        resp.SchemeUsed = scheme
-                        return &resp, nil
-                }
-                log.Printf("checkin status: scheme %s -> biz_code=%d msg=%q", scheme, code, msg)
-                lastBiz = bizError(code, "获取签到状态失败", msg)
-                if code == 9074 {
-                        return nil, lastBiz // 限流语义，叩第二个方案无意义
+                        if code == 0 {
+                                var resp CheckinStatusResult
+                                if err := json.Unmarshal(data, &resp); err != nil {
+                                        return nil, fmt.Errorf("checkin status parse: %w", err)
+                                }
+                                resp.SchemeUsed = scheme
+                                resp.ReqSourceUsed = body
+                                return &resp, nil
+                        }
+                        log.Printf("checkin status: %s scheme %s -> biz_code=%d msg=%q", body, scheme, code, msg)
+                        lastBiz = bizError(code, "获取签到状态失败", msg)
+                        if code == 9074 {
+                                break // 活动校验拒绝：换 req_source 再试（v0.12.41），同源换鉴权方案无意义
+                        }
                 }
         }
         return nil, lastBiz
 }
 
 // CheckinClaim 执行签到。返回业务码 Code 用于 9074 限流识别。
-// v0.12.40: 对齐官方客户端契约（反编译 TraeWork CN 2.3.81345
-// claimCheckinCredits()）：POST /trae/api/v2/ug/checkin_credits/claim，
-// body {"req_source":2}（此前空 {}——9074 真因，见 ugCheckinBody 注释），
+// v0.12.41: 对齐官方客户端契约（两版官方包 out/main.js claimCheckinCredits()
+// 交叉实证）：POST /trae/api/v2/ug/checkin_credits/claim，body 走
+// ugCheckinReqSources 双探测（req_source=1 优先 = TRAE 谱系 token 的正确
+// 契约，9074 回退 2；谱系错配即遭 9074，见 ugCheckinReqSources 注释），
 // Authorization: Cloud-IDE-JWT + x-device-id（真实绑定 did）+ 设备头。
 // 响应 {code, message}，code!=0 → 错误；领取成功后由调用方重查状态。
 // 响应中的 credits/add_credits/reward 等数值字段作为"入账证据"带回
@@ -507,7 +530,7 @@ func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
 // biz_code=1001——其 token 来自官方客户端托管会话，与自走 OAuth 的 token
 // 类别不同，Bearer 经验不可平移（详见 CheckinStatus 上方证据链）。
 // v0.12.38: 鉴权随 CheckinStatus 统一走双方案探测（Cloud-IDE-JWT 优先，
-// Bearer 回退）；9074 仍立即返回不回退。
+// Bearer 回退）；v0.12.41 起 9074 触发 req_source 换源重试（同源不换方案）。
 type CheckinClaimResult struct {
         Code    int32  `json:"code"`
         Message string `json:"message"`
@@ -515,28 +538,33 @@ type CheckinClaimResult struct {
         ClaimCredits *int64 `json:"-"`
         // SchemeUsed 实际成功使用的鉴权方案（v0.12.38 双方案探测，面板诊断用）。
         SchemeUsed string `json:"-"`
+        // ReqSourceUsed 实际成功使用的 req_source body（v0.12.41 双探测，日志/诊断用）。
+        ReqSourceUsed string `json:"-"`
 }
 
 func (c *Client) CheckinClaim(a *auth.Auth) (*CheckinClaimResult, error) {
         var lastBiz *Error
-        for _, scheme := range ugCheckinSchemes() {
-                code, msg, data, err := c.ugCheckinOnce(a, http.MethodPost, c.ugBase()+EpCheckinClaim, ugCheckinBody, scheme)
-                if err != nil {
-                        return nil, err
-                }
-                if code == 0 {
-                        var resp CheckinClaimResult
-                        if err := json.Unmarshal(data, &resp); err != nil {
-                                return nil, fmt.Errorf("checkin claim parse: %w", err)
+        for _, body := range ugCheckinReqSources() {
+                for _, scheme := range ugCheckinSchemes() {
+                        code, msg, data, err := c.ugCheckinOnce(a, http.MethodPost, c.ugBase()+EpCheckinClaim, body, scheme)
+                        if err != nil {
+                                return nil, err
                         }
-                        resp.ClaimCredits = pickCreditField(data)
-                        resp.SchemeUsed = scheme
-                        return &resp, nil
-                }
-                log.Printf("checkin claim: scheme %s -> biz_code=%d msg=%q", scheme, code, msg)
-                lastBiz = bizError(code, "签到领取失败", msg)
-                if code == 9074 {
-                        return nil, lastBiz
+                        if code == 0 {
+                                var resp CheckinClaimResult
+                                if err := json.Unmarshal(data, &resp); err != nil {
+                                        return nil, fmt.Errorf("checkin claim parse: %w", err)
+                                }
+                                resp.ClaimCredits = pickCreditField(data)
+                                resp.SchemeUsed = scheme
+                                resp.ReqSourceUsed = body
+                                return &resp, nil
+                        }
+                        log.Printf("checkin claim: %s scheme %s -> biz_code=%d msg=%q", body, scheme, code, msg)
+                        lastBiz = bizError(code, "签到领取失败", msg)
+                        if code == 9074 {
+                                break // 活动校验拒绝：换 req_source 再试（v0.12.41），同源换鉴权方案无意义
+                        }
                 }
         }
         return nil, lastBiz

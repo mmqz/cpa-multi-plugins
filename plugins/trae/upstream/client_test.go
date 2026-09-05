@@ -336,8 +336,9 @@ func TestSelectActivePackPriority(t *testing.T) {
 }
 
 func TestCheckinStatusAndClaim(t *testing.T) {
-	// v0.12.40: 官方契约 = POST + {"req_source":2}（反编译 TraeWork CN
-	// 2.3.81345 out/main.js eb()）；status 不再是 GET+did query。
+	// v0.12.41: 官方契约 = POST + {"req_source":N}（TraeCode 2.3.79946 deb 与
+	// TraeWork 2.3.81345 exe 双版反编译交叉实证）；req_source=1 是 TRAE 谱系
+	// token 的正确值（我方 ClientID=ono9krqynydwx5），居探测序列首位。
 	var path, method, body string
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		path, method = r.URL.Path, r.Method
@@ -361,8 +362,8 @@ func TestCheckinStatusAndClaim(t *testing.T) {
 	if method != http.MethodPost {
 		t.Errorf("method=%s, want POST (official contract)", method)
 	}
-	if body != `{"req_source":2}` {
-		t.Errorf("body=%s, want backtick-req_source-2 literal", body)
+	if body != `{"req_source":1}` {
+		t.Errorf("body=%s, want first-probe req_source:1 literal", body)
 	}
 }
 
@@ -461,17 +462,42 @@ func TestCheckinSchemeFallbackClaim(t *testing.T) {
 		t.Errorf("ClaimCredits=%v, want 150", resp.ClaimCredits)
 	}
 }
-func TestCheckinNoFallbackOn9074(t *testing.T) {
-	// 9074 限流语义立即返回，不做方案回退（避免对限流端点二次叩门）。
+func TestCheckinReqSourceProbeOn9074(t *testing.T) {
+	// v0.12.41: 9074 = 活动校验拒绝（req_source 与 token 产品谱系错配）→ 换
+	// req_source 重试一次；两个源都被拒才把 9074 作为 soft rate-limit 上抛。
 	a := &auth.Auth{AccessToken: "tok"}
+	var bodies []string
 	n := 0
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		n++
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		if n == 1 {
+			return jsonResp(200, `{"code":9074,"message":"当前参与用户太多"}`), nil
+		}
+		return jsonResp(200, `{"code":0,"message":"ok","add_credits":150}`), nil
+	})
+	resp, err := c.CheckinClaim(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 || bodies[0] != `{"req_source":1}` || bodies[1] != `{"req_source":2}` {
+		t.Errorf("probe order = %v (%d attempts), want [req_source:1 req_source:2]", bodies, n)
+	}
+	if resp.ReqSourceUsed != `{"req_source":2}` || resp.ClaimCredits == nil || *resp.ClaimCredits != 150 {
+		t.Errorf("resp = %+v, want ReqSourceUsed=req_source:2 + 150 credits", resp)
+	}
+
+	// 两个 req_source 均被拒（真·活动侧拒绝）→ 每源一次 Cloud-IDE-JWT 尝试
+	// （9074 不在同源内换鉴权方案），错误仍以 biz 9074 上抛供调度器退避重试。
+	n2 := 0
+	c2 := testClient(func(r *http.Request) (*http.Response, error) {
+		n2++
 		return jsonResp(200, `{"code":9074,"message":"当前参与用户太多"}`), nil
 	})
-	_, err := c.CheckinClaim(a)
-	if n != 1 {
-		t.Errorf("attempts=%d, want 1 (no fallback on 9074)", n)
+	_, err = c2.CheckinClaim(a)
+	if n2 != 2 {
+		t.Errorf("attempts=%d, want 2 (one per req_source)", n2)
 	}
 	var ue *Error
 	if !errors.As(err, &ue) || !IsRateLimit9074(ue.BizCode) {

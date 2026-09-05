@@ -22,14 +22,15 @@ type Config struct {
 	RefreshSkew  time.Duration // 预刷新窗口，默认 24h
 }
 
-// 9074（"当前参与用户太多，请稍后再试"）是官方签到活动侧限流：每日奖励
-// 名额先到先得，重置后短时间内即被抢完——status 恒可查、claim 高峰被拒
-// （v0.12.38 双方案排查后确认是真实活动限流，非鉴权/余额问题）。
-// 因此重试策略的核心是贴着官方每日重置点抢：
+// 9074（"当前参与用户太多，请稍后再试"）是官方签到活动侧的通用校验拒绝码。
+// v0.12.41 反编译双版官方包（TraeCode 2.3.79946 / TraeWork 2.3.81345）定案：
+// claim 的 req_source 必须与 token 的客户端产品谱系一致（1=TRAE IDE、
+// 2=SOLO/TraeWork），错配即遭 9074——并非单纯名额限流（用户 09-03 在官方
+// 客户端仍可正常签到可证）。客户端层已在 CheckinClaim/CheckinStatus 做
+// req_source 1→2 双探测，本层退避仅作为官方真·高峰限流/瞬时故障兜底：
 //   - 主循环签到时刻默认 0 点（defaultCheckinHour=0，官方按自然日重置）；
 //   - v0.12.33 起当日内指数退避自动重试；v0.12.39 起改为前密后疏——
-//     1m→2m→4m→8m→16m→32m→64m→2h（封顶），当日最多 maxCheckinRetries 次，
-//     重置抖动（名额晚几秒/几分钟放出）落在前几次 1-8 分钟的密集重试里；
+//     1m→2m→4m→8m→16m→32m→64m→2h（封顶），当日最多 maxCheckinRetries 次；
 //   - 出现一轮无 9074 或跨天即复位。
 const (
 	baseCheckinRetry     = 1 * time.Minute

@@ -243,11 +243,12 @@
 ### Trae 系
 - `IdeVersion` 选择: `0.1.52` / `20260811` 可看到 glm-5.3 等新模型
 - `trae-api-cn.mchost.guru` 是社区反代，官方对应 `api.trae.cn`
-- 签到鉴权（v0.12.40 定稿，反编译 TraeWork CN 2.3.81345）: `Authorization: Cloud-IDE-JWT <token>`（官方客户端统一方案）+ `x-device-id`（真实绑定 did）+ `x-device-brand/x-device-type/x-os-version/x-app-version`；`Bearer` 对自走 OAuth token 报 biz_code=1001（cockpit-tools 的 Bearer 经验不可平移——其 token 来自官方客户端托管会话，类别不同）。v0.12.38 起双方案探测: Cloud-IDE-JWT 优先，非 9074 失败回退 Bearer 一次；9074 不回退
-- 签到契约（v0.12.40 官方契约，out/main.js eb()）: **status 与 claim 均 POST**，body = `{"req_source":2}`（SOLO 客户端；plain IDE 发 1，web 端枚举 {IDE:1, Lite:2, OfficialSite:0,...}）。status 响应扁平结构 `{enable, checked_in, did_checked_in, credits, extra_credits}`；claim 响应 `{code, message}`
+- 签到鉴权（v0.12.40 定稿，反编译 TraeWork CN 2.3.81345）: `Authorization: Cloud-IDE-JWT <token>`（官方客户端统一方案）+ `x-device-id`（真实绑定 did）+ `x-device-brand/x-device-type/x-os-version/x-app-version`；`Bearer` 对自走 OAuth token 报 biz_code=1001（cockpit-tools 的 Bearer 经验不可平移——其 token 来自官方客户端托管会话，类别不同）。v0.12.38 起双方案探测: Cloud-IDE-JWT 优先，非 9074 失败回退 Bearer 一次；9074 同源不换方案，改换 req_source（v0.12.41）
+- 签到契约（v0.12.41 双版反编译交叉实证，out/main.js eb()）: **status 与 claim 均 POST**，body = `{"req_source":N}`。req_source 是【客户端产品谱系】而非用户套餐：TraeCode CN 2.3.79946（deb，09-01 build）body 为 `{}`；TraeWork CN 2.3.81345（exe 装出 "TRAE SOLO CN"，09-04 build，product.json packageType="SOLO_CN"）body 为 `{req_source: Dr(P)?2:1}`，Dr(P)=packageType∈{SOLO_CN,SOLO_I18N,SOLO_CN_ENTERPRISE}→2（SOLO/TraeWork 客户端），否则 1（Trae CN IDE 客户端）。产品谱系同时决定 OAuth appId（iCubeApp.authConfig: TRAE→ono9krqynydwx5、SOLO→en1oxy7wnw8j9n）。我方 token 全部为 TRAE 谱系（ClientID=ono9krqynydwx5）→ 插件探测序列 1 优先、9074 回退 2。status 响应扁平结构 `{enable, checked_in, did_checked_in, credits, extra_credits}`；claim 响应 `{code, message}`
+- 签到契约（v0.12.41 双版反编译交叉实证，见上一条）
 - credits 语义（v0.12.40 定案）: `credits` = 每日签到奖励数额（官方卡片 "Daily check-in: {credits} credits"），**非钱包/可花余额**；`extra_credits` = 会员/活动加码（"Member bonus: +{extraCredits} daily"）；到账总额 = credits + extra_credits（v0.12.31 "官方给 200 面板 150" = 150 基础 + 50 加码）
 - 签到去重: `checked_in` 账号维度、`did_checked_in` 设备维度（"This device has checked in today"）；官方 claim 前置 = 两者均为 false。官方用 beijingDayKey 判定签到日
-- 9074 真因（v0.12.40 定案）: claim body 缺 `req_source` 被上游以通用活动错误 9074（"当前参与用户太多"）拒绝——2025-09-04 官方收紧活动校验所致；官方客户端同账号正常。非真实限流、非鉴权问题
+- 9074 真因（v0.12.41 修正 v0.12.40 结论）: 通用活动校验拒绝码，核心是 claim 的 req_source 与 token 产品谱系错配（v0.12.40 对 TRAE 谱系 token 发 req_source=2 即例证；更早发 `{}` 同样被拒）——2026-09-04 官方收紧活动校验所致；status 只读不受校验，故面板状态可读、claim 被拒。客户端已改为 req_source 1→2 双探测；两个源均被拒才是真·活动侧限制，由调度器退避重试兑底
 - 签到时刻（v0.12.39）: 官方按自然日重置奖励，主循环默认 0 点（`defaultCheckinHour=0`）+ 前密后疏退避（1m→2m→4m→8m→16m→32m→64m→2h 封顶，10 次/日）；宿主机时区应为 CN 时区
 - Trae Intl 走的是另一套协议（Web SOLO remote `chat_sessions` + GET events），与 CN 不同
 

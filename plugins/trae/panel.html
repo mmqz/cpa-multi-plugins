@@ -736,12 +736,12 @@ function renderSummary(accounts){
 function checkinResultToast(res){
   const name=res.nickname||res.uid||res.auth_index||"账号";
   if(res.error){
-    // v0.12.40: 9074 真因定案——此前 claim body 缺 req_source（官方契约
-    // {"req_source":2}）被上游以通用活动错误 9074 拒绝，与余额/鉴权无关。
-    // 已对齐官方请求；若升级后仍 9074，则为官方名额/风控，插件每日 0 点起
-    // 自动密集重试；手动点按仍随时可用。
+    // v0.12.41: 9074 根因修正——req_source 是客户端产品谱系（1=TRAE IDE、
+    // 2=SOLO/TraeWork），必须与 token 的 OAuth appId 谱系一致；v0.12.40 对
+    // TRAE 谱系 token 发 2 被拒。已改为 req_source 1→2 双探测；若两个源仍
+    // 均 9074，则为官方活动侧限制，插件每日 0 点起自动密集重试。
     if(/9074|参与用户太多/.test(res.error)){
-      toast(name+"：签到被官方限流","warn",res.error+" —— 与余额无关；v0.12.40 已对齐官方签到请求（req_source），若仍被拒则是官方名额/风控，系统每日 0 点起自动密集重试，也可稍后再手动点一次");return;
+      toast(name+"：签到被官方拒绝","warn",res.error+" —— 与余额无关；v0.12.41 已按官方客户端契约 req_source 1→2 双探测，若仍被拒为官方活动侧限制，系统每日 0 点起自动密集重试，也可稍后再手动点一次");return;
     }
     toast(name+"：签到失败","err",res.error);return;
   }
