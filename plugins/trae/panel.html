@@ -324,6 +324,17 @@ function progressHTML(cr, acct){
     // 该账户的真实剩余，直接展示；非 SOLO 保持"免费剩余：--"不猜测。
     const ptype=String(cr.plan_type||"");
     const isFree=plan.includes("free")||plan.includes("免费")||ptype.toLowerCase().includes("free");
+    // v0.12.34: SOLO 积分池 = 官方 cashier 同口径（Σ max(credits_limit-usage,0)），
+    // 模型调用真正扣减的池子；签到钱包是另一笔钱，放 meta 单独展示。
+    if(isSoloAcct&&cr.credits_pool_known){
+      const wm=(wallet!=null)?` · 签到钱包余额 ${wallet}`:"";
+      if(cr.credits_pool_unlimited){
+        return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>不限</span></div><div class="pb-track"><div class="pb-bar" style="width:100%;background:var(--ok)"></div></div><div class="pb-meta">积分池不限量${wm} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
+      }
+      const pr=Number(cr.credits_pool_remain)||0;
+      let color=pr>0?'var(--ok)':'var(--err)';
+      return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>${pr>0?"":"0%"}</span></div><div class="pb-track"><div class="pb-bar" style="width:${pr>0?100:0}%;background:${color}"></div></div><div class="pb-meta">剩余 ${pr} 积分 · SOLO 积分池（模型调用扣减，与官方一致）${wm} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
+    }
     if(isSoloAcct&&wallet!=null){
       let color=wallet>0?'var(--ok)':'var(--err)';
       return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>${wallet>0?"":"0%"}</span></div><div class="pb-track"><div class="pb-bar" style="width:${wallet>0?100:0}%;background:${color}"></div></div><div class="pb-meta">剩余 ${wallet} 积分 · 签到钱包余额（签到入账、模型调用扣减） · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
@@ -435,7 +446,11 @@ function applyCreditsResult(a, res){
       fast_request_per: res.fast_request_per,
       solo_parallel: res.solo_parallel,
       solo_package: !!res.solo_package,
-      plan_type: res.plan_type||(a.credits?a.credits.plan_type:"")
+      plan_type: res.plan_type||(a.credits?a.credits.plan_type:""),
+      // v0.12.34: 官方口径积分池。
+      credits_pool_known: !!res.credits_pool_known,
+      credits_pool_remain: res.credits_pool_remain,
+      credits_pool_unlimited: !!res.credits_pool_unlimited
     });
   }
   if(res.checkin_credits!=null){
@@ -674,23 +689,30 @@ function creditOf(a){
   // v0.12.28: usage-model aware — unknown remain（remain_known=false）不计入汇总
   // 而不是当作 0（否则纯签到账号会被误判“耗尽”）。
   const knownRemain=!!cr && cr.total_remain!=null && cr.remain_known!==false;
-  const pack=knownRemain?(Number(cr.total_remain)||0):0;
+  let pack=knownRemain?(Number(cr.total_remain)||0):0;
   const packKnown=knownRemain&&Number(cr.total_remain)>=0;
-  const known=(packKnown&&cr.usage_model!="unknown")||wallet!=null;
-  return {remain:pack+(wallet||0), known:known};
+  let known=(packKnown&&cr.usage_model!="unknown")||wallet!=null;
+  // v0.12.34: SOLO 积分池（官方口径）——模型 unknown 时的真实剩余计入汇总。
+  let unlimited=false;
+  if(cr&&cr.credits_pool_known){
+    known=true;
+    if(cr.credits_pool_unlimited) unlimited=true;
+    else pack+=(Number(cr.credits_pool_remain)||0);
+  }
+  return {remain:pack+(wallet||0), known:known, unlimited:unlimited};
 }
 function renderSummary(accounts){
   const box=document.getElementById("summaryBox");
   if(!box) return;
   const all=accounts||[];
   if(!all.length){ box.style.display="none"; box.innerHTML=""; return; }
-  let remain=0, knownN=0, disabledN=0, exhaustedN=0, coolingN=0, checkedN=0;
+  let remain=0, knownN=0, disabledN=0, exhaustedN=0, coolingN=0, checkedN=0, unl=false;
   all.forEach(a=>{
     const c=creditOf(a);
-    if(c.known){ remain+=c.remain; knownN++; }
+    if(c.known){ if(c.unlimited){unl=true;} else {remain+=c.remain;} knownN++; }
     const pool=poolByUID[a.uid]||{};
     if(a.disabled||pool.disabled) disabledN++;
-    if(c.known&&c.remain===0) exhaustedN++;
+    if(c.known&&!c.unlimited&&c.remain===0) exhaustedN++;
     if(pool.cooling) coolingN++;
     if(a.checkin&&a.checkin.checked_in) checkedN++;
   });
@@ -701,7 +723,7 @@ function renderSummary(accounts){
       <div class="summary-meta">${all.length} 个账号 · 有积分 ${knownN} · 已签到 ${checkedN} · 冷却 ${coolingN} · 禁用 ${disabledN} · 耗尽 ${exhaustedN}</div>
     </div>
     <div class="summary-grid">
-      <div class="summary-item"><div class="k">总剩余积分</div><div class="v ok">${remain}</div></div>
+      <div class="summary-item"><div class="k">总剩余积分</div><div class="v ok">${unl?"不限":remain}</div></div>
       <div class="summary-item"><div class="k">账号数</div><div class="v">${all.length}</div></div>
       <div class="summary-item"><div class="k">今日已签</div><div class="v ok">${checkedN}</div></div>
       <div class="summary-item"><div class="k">冷却中</div><div class="v ${coolingN?"warn":""}">${coolingN}</div></div>
@@ -836,6 +858,9 @@ async function refreshCredits(idx, btn){
       detail=who+" · 快请求/月 "+res.fast_request_per;
     }else if(res.usage_model==="basic"&&res.remain_known){
       detail=who+" · 套餐 "+(res.total_remain!=null?res.total_remain:"?")+" · 已用 "+(res.used!=null?res.used:0);
+    }else if(res.credits_pool_known){
+      // v0.12.34: 官方口径积分池。
+      detail=who+" · 积分池 "+(res.credits_pool_unlimited?"不限":(Number(res.credits_pool_remain)||0));
     }else if(res.remain_known===false){
       detail=who+" · 剩余未知（不猜测）";
     }else{

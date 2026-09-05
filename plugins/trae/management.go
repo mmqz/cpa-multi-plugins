@@ -246,6 +246,12 @@ type traeCredits struct {
         SoloParallel   *int64  `json:"solo_parallel,omitempty"`    // SOLO 并发数
         SoloPackage    bool    `json:"solo_package,omitempty"`     // enable_solo_* 任一
         PlanType       string  `json:"plan_type,omitempty"`        // user_pay_identity_str
+
+        // v0.12.34: 官方 cashier 同口径积分池（模型调用真正扣减的钱；
+        // 签到钱包在 checkin.credits，两笔分开的钱不再混显）。
+        CreditsPoolRemain    *int64 `json:"credits_pool_remain,omitempty"`
+        CreditsPoolKnown     bool   `json:"credits_pool_known,omitempty"`
+        CreditsPoolUnlimited bool   `json:"credits_pool_unlimited,omitempty"`
 }
 
 type traeCheckin struct {
@@ -479,6 +485,13 @@ func creditsFromCache(e *accountCacheEntry) *traeCredits {
                 c.SoloParallel = e.usage.SoloParallel
                 c.SoloPackage = e.usage.SoloPackage
                 c.PlanType = e.usage.PlanType
+                // v0.12.34: 积分池随缓存透出（/accounts 免刷新可见）。
+                if e.usage.CreditsPool.Known {
+                        pr := e.usage.CreditsPool.Remain
+                        c.CreditsPoolRemain = &pr
+                        c.CreditsPoolKnown = true
+                        c.CreditsPoolUnlimited = e.usage.CreditsPool.Unlimited
+                }
                 return c
         }
         if e.credits < 0 {
@@ -744,6 +757,10 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
                 //   unknown → 剩余不可知（面板显示 "--"；旧代码读不存在的
                 //             credits_limit 字段把这里渲染成"剩余 0 积分 · 00%"）。
                 sum := upstream.SummarizeUsage(usage.UserEntitlementPackList, true)
+                // v0.12.34: 官方 cashier 同口径积分池（Σ max(credits_limit-usage,0)，
+                // -1 不限）。这是模型调用真正扣减的池子——此前把签到钱包当
+                // "剩余积分"展示，与官方数字对不上（用户实测反馈）。
+                sum.CreditsPool = upstream.CreditsPoolUsage(usage.UserEntitlementPackList, usage.IsCreditsBilling)
                 selected := upstream.SelectActivePack(usage.UserEntitlementPackList, true)
                 plan := "Unknown"
                 if selected != nil {
@@ -779,6 +796,12 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
                         entry["total_remain"] = 0 // 向后兼容；remain_known=false 时面板显示 "--"
                 }
                 entry["plan"] = plan
+                // v0.12.34: 积分池透出（面板"剩余积分"对齐官方口径）。
+                entry["credits_pool_known"] = sum.CreditsPool.Known
+                if sum.CreditsPool.Known {
+                        entry["credits_pool_remain"] = sum.CreditsPool.Remain
+                        entry["credits_pool_unlimited"] = sum.CreditsPool.Unlimited
+                }
                 if sum.UsageModel == "basic" {
                         entry["used"] = sum.Used
                         entry["total"] = sum.Total
@@ -824,6 +847,15 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
                         scoreRemain = sum.Remain
                         if scoreRemain < 0 { // unlimited
                                 scoreRemain = 1 << 30
+                        }
+                }
+                if sum.CreditsPool.Known { // v0.12.34: 积分池参与池子评分
+                        pr := sum.CreditsPool.Remain
+                        if pr < 0 {
+                                pr = 1 << 30
+                        }
+                        if pr > scoreRemain {
+                                scoreRemain = pr
                         }
                 }
                 accountCache.Store(f.AuthIndex, &accountCacheEntry{

@@ -458,8 +458,8 @@ func pickCreditField(data []byte) *int64 {
 // 对齐 cockpit-tools src/types/trae.ts 的用量模型：quota 字段位于
 // entitlement_base_info.quota 或 product_extra.{subscription_extra,package_extra}.quota
 // 三层中的任意一层（getPackQuota 的多路径探测）；usage 位于 pack.usage。
-// 注意：上游从不读取 "credits_limit"——v2 API 的 quota 字段是
-// basic_usage_limit / bonus_usage_limit / premium_model_fast_request_limit。
+// v0.12.34 注：quota 里还有 credits_limit（SOLO 积分计费额度，官方 cashier
+// 与 traework2api 以它为准；cockpit-tools 上游不读，因其面向订阅制）。
 type EntitlementPack struct {
         EntitlementBaseInfo struct {
                 ProductType  int       `json:"product_type"` // 0=Free, 1=Pro, 4=Pro+, 5=Pro+CN, 6=Ultra, 8=Lite, 9=Trial, 100=CNExpress
@@ -485,6 +485,10 @@ type PackQuota struct {
         BasicUsageLimit              *int64 `json:"basic_usage_limit"`
         BonusUsageLimit              *int64 `json:"bonus_usage_limit"`
         PremiumModelFastRequestLimit *int64 `json:"premium_model_fast_request_limit"` // -1=unlimited
+        // v0.12.34: SOLO 积分计费的额度字段——官方 cashier 用它减 credits_amount
+        // 得"剩余积分"（-1=不限）。cockpit-tools 上游不读它，但官方 Web
+        // main.js 与 traework2api 都以它为准，SOLO 积分制账户必须读。
+        CreditsLimit                 *int64 `json:"credits_limit"`
 }
 
 // PackUsage 是 pack.usage 的已知数值字段。
@@ -493,6 +497,8 @@ type PackUsage struct {
         BonusUsageAmount       *int64 `json:"bonus_usage_amount"`
         PremiumModelFastAmount *int64 `json:"premium_model_fast_amount"`
         IsFlashConsuming       bool   `json:"is_flash_consuming"`
+        // v0.12.34: 积分池已用量（浮点，官方 Math.round 后再聚合）。
+        CreditsAmount          *float64 `json:"credits_amount"`
 }
 
 // EffectiveQuota 返回三层 quota 中第一层带任何已知字段的值（对齐上游
@@ -510,7 +516,7 @@ func (p *EntitlementPack) EffectiveQuota() PackQuota {
 }
 
 func (q PackQuota) hasAny() bool {
-        return q.BasicUsageLimit != nil || q.BonusUsageLimit != nil || q.PremiumModelFastRequestLimit != nil
+        return q.BasicUsageLimit != nil || q.BonusUsageLimit != nil || q.PremiumModelFastRequestLimit != nil || q.CreditsLimit != nil
 }
 
 // PackRemain 返回该 pack 的剩余额度（basic_quota - basic_usage，考虑 bonus）。
@@ -621,6 +627,76 @@ func FastRequestUsage(packs []EntitlementPack, dashboardPayload bool) (available
                 available = 0
         }
         return available, limit, used, true
+}
+
+// ---- v0.12.34: 官方 cashier 同口径积分池（SOLO 积分制真实余额）----
+
+// CreditsPoolInfo 汇总 ide_user_ent_usage 的积分池口径余额。
+// 官方 Web main.js cashier：Σ max(credits_limit - credits_amount, 0)，
+// 任一 credits_limit==-1 → 整体不限（-1）；credits_limit 缺失按 0 计。
+// is_credits_billing=true 即积分计费账户（官方以此决定渲染积分池）。
+// 注意与 checkin_credits/status 的 credits（签到钱包）是两笔钱。
+type CreditsPoolInfo struct {
+        Remain    int64
+        Known     bool
+        Unlimited bool
+}
+
+// CreditsPoolUsage 按官方公式聚合积分池。可见性过滤与 FastRequestUsage
+// 一致（去 PROMO_CODE/隐藏/已取消）。isCreditsBilling=true 时即使 pack
+// 未携带 credits_limit 也视为已知（官方此时按 0 展示）。
+func CreditsPoolUsage(packs []EntitlementPack, isCreditsBilling bool) CreditsPoolInfo {
+        var filtered []EntitlementPack
+        for _, p := range packs {
+                if p.EntitlementBaseInfo.ProductType == 3 {
+                        continue
+                }
+                if p.EntitlementBaseInfo.IsHide {
+                        continue
+                }
+                if p.EntitlementBaseInfo.Status != nil && *p.EntitlementBaseInfo.Status == 3 {
+                        continue
+                }
+                filtered = append(filtered, p)
+        }
+        hasField := false
+        for _, p := range filtered {
+                if p.EffectiveQuota().CreditsLimit != nil {
+                        hasField = true
+                        break
+                }
+        }
+        if !isCreditsBilling && !hasField {
+                return CreditsPoolInfo{}
+        }
+        if len(filtered) == 0 {
+                return CreditsPoolInfo{Known: isCreditsBilling}
+        }
+        unlimited := false
+        var total int64
+        for _, p := range filtered {
+                q := p.EffectiveQuota()
+                if q.CreditsLimit == nil {
+                        continue // 官方 `?? 0`：无字段贡献 0
+                }
+                if *q.CreditsLimit == -1 {
+                        unlimited = true
+                        continue
+                }
+                used := float64(0)
+                if p.Usage.CreditsAmount != nil {
+                        used = *p.Usage.CreditsAmount
+                }
+                left := float64(*q.CreditsLimit) - used
+                if left < 0 {
+                        left = 0
+                }
+                total += int64(left + 0.5) // 官方 Math.round
+        }
+        if unlimited {
+                return CreditsPoolInfo{Remain: -1, Known: true, Unlimited: true}
+        }
+        return CreditsPoolInfo{Remain: total, Known: true}
 }
 
 // ---- v0.12.29: ide_user_pay_status（CN 套餐 detail/quota 数据源）----
@@ -772,6 +848,9 @@ type UsageSummary struct {
         SoloParallel   *int64 // quota.solo_agent_parallel_limit（SOLO 并发）
         SoloPackage    bool   // quota.enable_solo_* 任一为 true
         PlanType       string // user_pay_identity_str（"free" 等，Free 判定用）
+
+        // v0.12.34: 官方口径积分池（handleCreditsQuery 填充，缓存随行）。
+        CreditsPool CreditsPoolInfo
 }
 
 // IsFreePlan 对齐上游 isFreePlan，但补上中文 display_desc（"免费"）——
