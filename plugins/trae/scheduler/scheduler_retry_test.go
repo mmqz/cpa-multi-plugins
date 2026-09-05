@@ -5,18 +5,19 @@ import (
 	"time"
 )
 
-// v0.12.33: 9074 当日退避重试节奏。
+// v0.12.39: 9074 当日退避重试节奏（前密后疏，贴 0 点重置抢签）。
 func TestCheckinRetryDelay(t *testing.T) {
 	cases := []struct {
 		attempt int
 		want    time.Duration
 	}{
-		{0, 10 * time.Minute},
-		{1, 20 * time.Minute},
-		{2, 40 * time.Minute},
-		{3, 80 * time.Minute},
-		{4, 2 * time.Hour}, // 160m → 封顶 2h
-		{7, 2 * time.Hour},
+		{0, 1 * time.Minute},
+		{1, 2 * time.Minute},
+		{2, 4 * time.Minute},
+		{3, 8 * time.Minute},
+		{4, 16 * time.Minute},
+		{6, 64 * time.Minute},
+		{7, 2 * time.Hour}, // 128m → 封顶 2h
 		{24, 2 * time.Hour}, // 移位溢出防护
 	}
 	for _, c := range cases {

@@ -325,9 +325,11 @@ function progressHTML(cr, acct){
     const ptype=String(cr.plan_type||"");
     const isFree=plan.includes("free")||plan.includes("免费")||ptype.toLowerCase().includes("free");
     // v0.12.34: SOLO 积分池 = 官方 cashier 同口径（Σ max(credits_limit-usage,0)），
-    // 模型调用真正扣减的池子；签到钱包是另一笔钱，放 meta 单独展示。
+    // 模型调用真正扣减的池子；签到钱包是官方签到接口返回的账本余额（历史签到
+    // 入账，非每日新增），放 meta 单独展示——v0.12.39: 标注“不叠加”防误读成
+    // 余额翻倍/显示 bug（用户反馈：“明明只有349个积分怎么出bug了”）。
     if(isSoloAcct&&cr.credits_pool_known){
-      const wm=(wallet!=null)?` · 签到钱包余额 ${wallet}`:"";
+      const wm=(wallet!=null)?` · 签到钱包余额 ${wallet}（签到账本，不与积分池叠加）`:"";
       if(cr.credits_pool_unlimited){
         return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>不限</span></div><div class="pb-track"><div class="pb-bar" style="width:100%;background:var(--ok)"></div></div><div class="pb-meta">积分池不限量${wm} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
       }
@@ -735,9 +737,11 @@ function renderSummary(accounts){
 function checkinResultToast(res){
   const name=res.nickname||res.uid||res.auth_index||"账号";
   if(res.error){
-    // v0.12.33: 9074=官方瞬时限流（"参与用户太多，请稍后再试"），插件当日自动退避重试。
+    // v0.12.39: 9074=官方签到活动侧名额限流（每日奖励先到先得，status 可查证
+    // 鉴权/余额均正常），与账户余额无关。插件每日 0 点（官方重置点）起自动
+    // 密集抢签（1 分钟起前密后疏退避）；手动点按仍随时可用。
     if(/9074|参与用户太多/.test(res.error)){
-      toast(name+"：签到被官方限流","warn",res.error+" —— 稍后自动重试（10 分钟起退避），也可稍后再手动点一次");return;
+      toast(name+"：签到被官方限流","warn",res.error+" —— 与余额无关，官方每日名额先到先得；插件每日 0 点起自动密集抢签（1 分钟起退避），也可稍后再手动点一次");return;
     }
     toast(name+"：签到失败","err",res.error);return;
   }

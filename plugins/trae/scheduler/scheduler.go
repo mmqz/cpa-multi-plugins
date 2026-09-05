@@ -17,20 +17,24 @@ import (
 type Config struct {
 	Pool         *pool.Pool
 	Upstream     *upstream.Client
-	CheckinHour  int           // 每日签到小时，默认 9
+	CheckinHour  int           // 每日签到小时，默认 0（官方每日重置后立即抢签）
 	RefreshHours []int         // token 预刷新小时，默认 [3]
 	RefreshSkew  time.Duration // 预刷新窗口，默认 24h
 }
 
-// 9074（"当前参与用户太多，请稍后再试"）是官方瞬时限流，语义为"稍后再试"。
-// 旧实现撞 9074 后只等"下个周期"，而签到周期每天一次（CheckinHour）——
-// 等于整天放弃该账号。v0.12.33 起当日内按指数退避自动重试：
-// 10m→20m→40m→80m→2h（封顶），当日最多 maxCheckinRetries 次；
-// 出现一轮无 9074 或跨天即复位。
+// 9074（"当前参与用户太多，请稍后再试"）是官方签到活动侧限流：每日奖励
+// 名额先到先得，重置后短时间内即被抢完——status 恒可查、claim 高峰被拒
+// （v0.12.38 双方案排查后确认是真实活动限流，非鉴权/余额问题）。
+// 因此重试策略的核心是贴着官方每日重置点抢：
+//   - 主循环签到时刻默认 0 点（defaultCheckinHour=0，官方按自然日重置）；
+//   - v0.12.33 起当日内指数退避自动重试；v0.12.39 起改为前密后疏——
+//     1m→2m→4m→8m→16m→32m→64m→2h（封顶），当日最多 maxCheckinRetries 次，
+//     重置抖动（名额晚几秒/几分钟放出）落在前几次 1-8 分钟的密集重试里；
+//   - 出现一轮无 9074 或跨天即复位。
 const (
-	baseCheckinRetry     = 10 * time.Minute
+	baseCheckinRetry     = 1 * time.Minute
 	maxCheckinRetryDelay = 2 * time.Hour
-	maxCheckinRetries    = 8
+	maxCheckinRetries    = 10
 )
 
 // Scheduler 调度器。
@@ -48,7 +52,7 @@ type Scheduler struct {
 // New 构建。
 func New(cfg Config) *Scheduler {
 	if cfg.CheckinHour < 0 {
-		cfg.CheckinHour = 9
+		cfg.CheckinHour = 0
 	}
 	if len(cfg.RefreshHours) == 0 {
 		cfg.RefreshHours = []int{3}

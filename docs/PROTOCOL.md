@@ -243,7 +243,8 @@
 ### Trae 系
 - `IdeVersion` 选择: `0.1.52` / `20260811` 可看到 glm-5.3 等新模型
 - `trae-api-cn.mchost.guru` 是社区反代，官方对应 `api.trae.cn`
-- 签到 headers 中 `Authorization` 用 `Bearer` 或 `Cloud-IDE-JWT` 都可
+- 签到鉴权（v0.12.38 定稿）: 自走 OAuth（ExchangeToken）的 token 用 `Cloud-IDE-JWT`（官方客户端实证方案，BlueChonk FINDINGS §五实测到账）；`Bearer` 对该类 token 报 biz_code=1001（cockpit-tools 的 Bearer 经验不可平移——其 token 来自官方客户端托管会话，类别不同）。v0.12.38 起双方案探测: Cloud-IDE-JWT 优先，非 9074 失败回退 Bearer 一次；9074=官方活动名额限流（先到先得），不回退
+- 签到时刻（v0.12.39）: 官方按自然日重置奖励名额，主循环默认 0 点（`defaultCheckinHour=0`）+ 前密后疏退避（1m→2m→4m→8m→16m→32m→64m→2h 封顶，10 次/日），贴重置点抢签；9 点起签 + 长退避会恒抢不到名额
 - Trae Intl 走的是另一套协议（Web SOLO remote `chat_sessions` + GET events），与 CN 不同
 
 ### Qoder 系

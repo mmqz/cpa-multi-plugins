@@ -99,7 +99,11 @@ const (
         loginTTL = 15 * time.Minute
 
         // Scheduler defaults.
-        defaultCheckinHour = 9
+        // v0.12.39: 签到主循环改 0 点——官方签到奖励每日重置、名额先到先得
+        // （9074 "当前参与用户太多"即名额抢完），9 点起签恒迟到；0 点贴重置点
+        // 抢签 + 前密后疏退避（见 scheduler.go const 块注释）。宿主机时区应为
+        // CN 时区（auth 为 trae-solo-cn-* 的部署即如此）。
+        defaultCheckinHour = 0
         defaultRefreshSkew = 24 * time.Hour
 
         // Account cache TTL for credits/checkin status.
@@ -134,7 +138,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.38"
+var version = "0.12.39"
 
 var (
         hostAPI *C.cliproxy_host_api
