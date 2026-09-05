@@ -119,10 +119,23 @@ func (s *Scheduler) RunCheckinNow() {
 					log.Printf("checkin claim %s: %v", st.UID, err)
 				}
 			} else {
-				log.Printf("checkin %s: ok (credits=%d)", st.UID, status.Credits)
+				// v0.12.31: 领取成功后重查状态（对齐上游 claim_trae_checkin
+				// trae_account_token_injection.rs:2891"领取后重新查询状态"）。
+				// 旧日志用签到前余额充当结果（"ok (credits=150)"实为签到前
+				// 钱包），奖励（前后差值）与签到后余额分开记录。
+				if after, stErr := s.cfg.Upstream.CheckinStatus(a); stErr == nil {
+					awarded := after.Credits - status.Credits
+					if awarded < 0 {
+						awarded = 0
+					}
+					log.Printf("checkin %s: ok +%d (wallet %d)", st.UID, awarded, after.Credits)
+					status = after
+				} else {
+					log.Printf("checkin %s: claimed, wallet refresh failed: %v", st.UID, stErr)
+				}
 			}
 		} else if status.CheckedIn {
-			log.Printf("checkin %s: already checked in (credits=%d)", st.UID, status.Credits)
+			log.Printf("checkin %s: already checked in (wallet %d)", st.UID, status.Credits)
 		}
 		// 查积分 + 解冻
 		// 对齐 cockpit-tools apply_usage_response：按 pack 优先级选最高 pack。

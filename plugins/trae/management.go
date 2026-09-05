@@ -560,8 +560,14 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                         results = append(results, entry)
                         continue
                 }
-                entry["already_checked_in"] = status.CheckedIn
-                entry["credits"] = status.Credits
+                // v0.12.31: awarded = 签到后余额 - 签到前余额（-1 = 未知）。
+                // 旧实现 claim 成功后不重查状态，entry/缓存里留的是签到前余额，
+                // 面板 toast 又把 res.credits 当"本次奖励"显示（"+150 积分"实为
+                // 签到前的钱包余额）——官方 SOLO 签到 +200 与面板 150 对不上即源于此。
+                // 现在对齐上游 claim_trae_checkin（trae_account_token_injection.rs:2891
+                // "领取后重新查询状态"）：奖励与余额分开呈现。
+                beforeCredits := status.Credits
+                awarded := int64(-1)
                 if !status.CheckedIn && status.Enable {
                         claim, err := upstreamClient.CheckinClaim(a)
                         if err != nil {
@@ -569,7 +575,19 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                         } else {
                                 entry["claim_code"] = claim.Code
                                 entry["claim_message"] = claim.Message
+                                // 领取成功后重查状态（对齐上游）。
+                                if after, stErr := upstreamClient.CheckinStatus(a); stErr == nil {
+                                        if after.Credits >= beforeCredits {
+                                                awarded = after.Credits - beforeCredits
+                                        }
+                                        status = after
+                                }
                         }
+                }
+                entry["already_checked_in"] = status.CheckedIn
+                entry["credits"] = status.Credits
+                if awarded >= 0 {
+                        entry["awarded"] = awarded
                 }
                 // Refresh cached checkin / credits.
                 // v0.12.25 semantics: e.credits = SUBSCRIPTION pack quota;

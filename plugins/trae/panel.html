@@ -326,7 +326,7 @@ function progressHTML(cr, acct){
     const isFree=plan.includes("free")||plan.includes("免费")||ptype.toLowerCase().includes("free");
     if(isSoloAcct&&wallet!=null){
       let color=wallet>0?'var(--ok)':'var(--err)';
-      return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>${wallet>0?"":"0%"}</span></div><div class="pb-track"><div class="pb-bar" style="width:${wallet>0?100:0}%;background:${color}"></div></div><div class="pb-meta">剩余 ${wallet} 积分 · 签到钱包（SOLO 按积分计费） · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
+      return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>${wallet>0?"":"0%"}</span></div><div class="pb-track"><div class="pb-bar" style="width:${wallet>0?100:0}%;background:${color}"></div></div><div class="pb-meta">剩余 ${wallet} 积分 · 签到钱包余额（签到入账、模型调用扣减） · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
     }
     // 快通道 0/月是噪音：只在有量时展示（对齐上游 >0 分支）。
     const extras=(fpm!=null&&fpm>0?` · 快通道: ${fpm}/月`:"")+(solo!=null?` · Solo 并发 ${solo}`:"")+(cr.solo_package?" · 权益包: Solo":"");
@@ -400,9 +400,11 @@ function card(a){
        +(a.region?`<div class="row"><span class="k">区域</span><span class="v">${esc(a.region)}</span></div>`:"")
        +'<div class="row"><span class="k">类型</span><span class="v">Trae Intl（marscode · 无积分/签到）</span></div>')
     : (progressHTML(cr, a)
-       // v0.12.25: the check-in wallet row — the 150 积分 from check-in live
+       // v0.12.25/31: the check-in wallet row — live WALLET BALANCE from
+       // checkin_credits/status (same field upstream renders as "共 X 积分"),
        // here, NOT in the subscription pack above; never conflated again.
-       +((wallet!=null&&(wallet>0||checkedIn))?`<div class="row"><span class="k">签到钱包</span><span class="v">${wallet} 积分${checkedIn?" · 今日已签":""}</span></div>`:""));
+       // 签到奖励入账、模型调用扣减；标签用"余额"避免读成"签到给150"。
+       +((wallet!=null&&(wallet>0||checkedIn))?`<div class="row"><span class="k">签到钱包余额</span><span class="v">${wallet} 积分${checkedIn?" · 今日已签":""}</span></div>`:""));
   return `<div class="card" data-uid="${escAttr(a.uid)}" data-auth="${escAttr(a.auth_index)}">
   <h2>${esc(a.nickname||a.label||a.name)} <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
@@ -708,11 +710,16 @@ function renderSummary(accounts){
 function checkinResultToast(res){
   const name=res.nickname||res.uid||res.auth_index||"账号";
   if(res.error){toast(name+"：签到失败","err",res.error);return}
+  // v0.12.31: 奖励(res.awarded=签到前后余额差)与钱包余额(res.credits=签到后)
+  // 分开显示。旧实现把签到前余额当奖励弹"+150 积分"，与官方 +200 对不上。
   if(res.already_checked_in){
-    toast(name+"：今日已签到","ok",res.claim_message||"");return;
+    toast(name+"：今日已签到","ok",res.credits!=null?("签到钱包余额 "+res.credits+" 积分"):(res.claim_message||""));return;
   }
   if(res.claim_code!=null||res.claim_message){
-    toast(name+"：签到成功","ok",res.claim_message||("+"+(res.credits!=null?res.credits:"?")+" 积分"));return;
+    const parts=[];
+    if(res.awarded!=null) parts.push("本次签到 +"+res.awarded+" 积分");
+    if(res.credits!=null) parts.push("签到钱包余额 "+res.credits+" 积分");
+    toast(name+"：签到成功","ok",parts.join(" · ")||res.claim_message||"");return;
   }
   toast(name+"：签到完成","ok",res.claim_message||"");
 }
@@ -820,7 +827,7 @@ async function refreshCredits(idx, btn){
     }else{
       detail=who+" · 套餐 "+(res.total_remain!=null?res.total_remain:"?");
     }
-    if(res.checkin_credits!=null) detail+=" · 签到钱包 "+res.checkin_credits;
+    if(res.checkin_credits!=null) detail+=" · 签到钱包余额 "+res.checkin_credits;
     toast("积分已刷新","ok",detail);
   }catch(e){
     toast("刷新失败","err",e.message||String(e));
