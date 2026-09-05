@@ -24,7 +24,14 @@ func convertSOLOStreamToOpenAI(r io.Reader, model string, onErr func(*upstream.S
 
                 emit := func(obj map[string]any) {
                         raw, _ := json.Marshal(obj)
-                        ch <- []byte("data: " + string(raw) + "\n\n")
+                        // v0.12.36: payload MUST be bare JSON — the host SSE-writer
+                        // frames every chunk as "data: %s\n\n" (openai_handlers.go),
+                        // so a pre-framed "data: {...}\n\n" payload reached clients as
+                        // "data: data: {...}" and strict OpenAI SSE clients
+                        // (deepseek-harness) died with "Unexpected token 'd' ... is
+                        // not valid JSON". Same contract as workbuddy's
+                        // pumpUpstreamStream (no prefix by default).
+                        ch <- raw
                 }
 
                 // Role chunk
@@ -121,8 +128,11 @@ func convertSOLOStreamToOpenAI(r io.Reader, model string, onErr func(*upstream.S
                                 break
                         }
                 }
-                ch <- []byte("data: [DONE]\n\n")
-                _ = sawDone // sawDone tracked for future use (e.g. conditional [DONE])
+                // v0.12.36: no "data: [DONE]" here — the host appends the final
+                // "data: [DONE]\n\n" itself when the chunk channel closes
+                // (openai_handlers.go handleStreamResult); emitting our own made
+                // clients see "data: data: [DONE]" / duplicate DONE markers.
+                _ = sawDone // tracked for future use (e.g. conditional [DONE])
         }()
         return ch
 }

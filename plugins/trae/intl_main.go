@@ -858,22 +858,29 @@ func intlhandleExecStream(request []byte) ([]byte, error) {
         if err != nil {
                 return nil, fmt.Errorf("stream: %w", err)
         }
-        // Read all chunks and emit as a single ExecutorStreamChunk (simpler than
-        // real-time piping through the host's chunk channel).
+        // Read all chunks and split into bare-JSON ExecutorStreamChunks
+        // (v0.12.36; was a single raw-body chunk).
         raw, err := io.ReadAll(reader)
         if err != nil {
                 return nil, fmt.Errorf("stream: read: %w", err)
         }
+        chunks := splitSSEBodyChunks(raw)
         // v0.12.30: the RPC envelope carries chunks as a SLICE (rpc_schema.go
         // rpcExecutorStreamResponse). Marshaling pluginapi.ExecutorStreamResponse
         // embedded the receive-only channel and failed with "json: unsupported
         // type: <-chan pluginapi.ExecutorStreamChunk" — INTL streaming 503'd on
         // every call. If the host opened an async stream (stream_id), pump the
         // body through host.stream.emit; otherwise return the collected slice.
+        // v0.12.36: each payload is BARE JSON — the host SSE-writer frames every
+        // chunk as "data: %s\n\n" (openai_handlers.go), so emitting the raw SSE
+        // body produced "data: data: {...}" on the wire and duplicated the
+        // trailing [DONE] the host appends itself.
         if req.StreamID != "" {
                 go func() {
-                        if err := streamEmit(req.StreamID, raw); err != nil {
-                                return
+                        for _, chunk := range chunks {
+                                if err := streamEmit(req.StreamID, chunk.Payload); err != nil {
+                                        return
+                                }
                         }
                         streamClose(req.StreamID)
                 }()
@@ -883,13 +890,35 @@ func intlhandleExecStream(request []byte) ([]byte, error) {
         }
         return okEnvelope(streamResponse{
                 Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
-                Chunks:  []pluginapi.ExecutorStreamChunk{{Payload: raw}},
+                Chunks:  chunks,
         })
 }
 
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+// splitSSEBodyChunks splits a raw OpenAI-compatible SSE body ("data: {...}"
+// lines) into bare-JSON ExecutorStreamChunk payloads. Empty lines and the
+// upstream's own "data: [DONE]" marker are dropped: the host frames every
+// payload as "data: %s\n\n" and appends its final "data: [DONE]" itself
+// (openai_handlers.go handleStreamResult). Shared by the INTL stream path
+// (v0.12.36 double-prefix fix).
+func splitSSEBodyChunks(raw []byte) []pluginapi.ExecutorStreamChunk {
+        var chunks []pluginapi.ExecutorStreamChunk
+        for _, line := range strings.Split(string(raw), "\n") {
+                line = strings.TrimRight(line, "\r")
+                if !strings.HasPrefix(line, "data:") {
+                        continue
+                }
+                content := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+                if content == "" || content == "[DONE]" {
+                        continue
+                }
+                chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: []byte(content)})
+        }
+        return chunks
+}
 
 func intltruncate(s string, n int) string {
         s = strings.TrimSpace(s)

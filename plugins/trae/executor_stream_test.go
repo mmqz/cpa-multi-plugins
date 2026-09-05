@@ -72,3 +72,55 @@ func TestExecutorStreamResponseTypeIsUnmarshalable(t *testing.T) {
 		t.Fatalf("expected unsupported-type marshal error, got %v", err)
 	}
 }
+
+func TestConvertSOLOStreamChunksAreBareJSON(t *testing.T) {
+	// v0.12.36 regression: the host SSE-writer frames every chunk payload as
+	// "data: %s\n\n" (openai_handlers.go), so pre-framed "data: {...}\n\n"
+	// payloads reached clients as "data: data: {...}" — deepseek-harness died
+	// with "Unexpected token 'd' ... is not valid JSON". Chunks must be bare
+	// JSON with no SSE framing and no plugin-side "[DONE]" (the host appends
+	// its own when the channel closes).
+	body := "event: output\ndata: {\"response\":\"你好\"}\n\n" +
+		"event: token_usage\ndata: {\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}\n\n" +
+		"event: done\ndata: {\"finish_reason\":\"stop\"}\n\n"
+	var chunks [][]byte
+	for c := range convertSOLOStreamToOpenAI(strings.NewReader(body), "m1", nil) {
+		chunks = append(chunks, c)
+	}
+	if len(chunks) < 3 {
+		t.Fatalf("want >=3 chunks (role/content/finish/usage), got %d", len(chunks))
+	}
+	for i, c := range chunks {
+		s := string(c)
+		if strings.HasPrefix(s, "data:") {
+			t.Errorf("chunk %d carries SSE prefix: %q", i, s)
+		}
+		if strings.Contains(s, "\n\n") || strings.Contains(s, "[DONE]") {
+			t.Errorf("chunk %d is SSE-framed or carries [DONE]: %q", i, s)
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(c, &obj); err != nil {
+			t.Errorf("chunk %d is not bare JSON: %v (%q)", i, err, s)
+		}
+	}
+	// The upstream reported token_usage, so a final usage chunk must follow.
+	last := string(chunks[len(chunks)-1])
+	if !strings.Contains(last, "usage") {
+		t.Errorf("last chunk should carry usage, got %s", last)
+	}
+}
+
+func TestSplitSSEBodyChunks(t *testing.T) {
+	// v0.12.36: the INTL path used to emit the whole raw SSE body as ONE
+	// chunk payload — the host framed it as "data: data: {...}" and the
+	// plugin-side [DONE] duplicated the host's own. Splitting must yield
+	// bare JSON per chunk, dropping blanks and [DONE].
+	raw := "data: {\"a\":1}\r\n\r\ndata: {\"b\":2}\n\ndata: [DONE]\n\n"
+	chunks := splitSSEBodyChunks([]byte(raw))
+	if len(chunks) != 2 {
+		t.Fatalf("want 2 chunks, got %d", len(chunks))
+	}
+	if string(chunks[0].Payload) != `{"a":1}` || string(chunks[1].Payload) != `{"b":2}` {
+		t.Errorf("payloads: %q / %q", chunks[0].Payload, chunks[1].Payload)
+	}
+}
