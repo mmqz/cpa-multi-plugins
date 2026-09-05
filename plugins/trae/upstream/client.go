@@ -353,6 +353,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 // CheckinStatus 查询签到状态。
 // 对齐 cockpit-tools trae_account_token_injection.rs:2761 用 GET + did query param
 // （cockpit-tools 用 GET；traework2api 原版用 POST body={}，两种都被接受）。
+// 鉴权用 Bearer 方案（UgCheckinHeaders，对齐上游签到实现；v0.12.35 起）。
 // 返回完整字段：CheckedIn / Credits / Enable + 业务码 Code（用于 9074 限流识别）。
 // 对齐上游 code!=0 语义（trae_account_token_injection.rs:2786-2791）：
 // 非零业务码 → 返回错误（Token 过期/限流等），绝不能当成 "未签到" 静默通过。
@@ -374,7 +375,7 @@ func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
         if err != nil {
                 return nil, err
         }
-        UgHeaders(req, a)
+        UgCheckinHeaders(req, a)
         data, err := c.doJSON(req)
         if err != nil {
                 return nil, err
@@ -396,6 +397,10 @@ func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
 // （BlueChonk/trae-credential-reverse-engineering FINDINGS §五 实测到账，
 // trae-mate/traework2api/trae-work-checkin 同构）。响应中的 credits/add_credits/
 // reward 等数值字段作为"入账证据"带回（ClaimCredits），便于诊断"code=0 但未到账"。
+// v0.12.35: 鉴权改用 Bearer 方案（UgCheckinHeaders）。cockpit-tools 实测可用实现
+// （claim_trae_checkin, rs:2859）对签到端点恒用 Bearer；Cloud-IDE-JWT 方案下
+// status 读接口放行、claim 写接口被拒为 biz_code=9074（"当前参与用户太多"）——
+// 这是此前"每次签到都 9074"的根因，并非真实限流。
 type CheckinClaimResult struct {
         Code    int32  `json:"code"`
         Message string `json:"message"`
@@ -408,7 +413,7 @@ func (c *Client) CheckinClaim(a *auth.Auth) (*CheckinClaimResult, error) {
         if err != nil {
                 return nil, err
         }
-        UgHeaders(req, a)
+        UgCheckinHeaders(req, a)
         data, err := c.doJSON(req)
         if err != nil {
                 return nil, err

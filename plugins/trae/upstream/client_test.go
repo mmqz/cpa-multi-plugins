@@ -356,6 +356,53 @@ func TestCheckinStatusAndClaim(t *testing.T) {
 	}
 }
 
+func TestCheckinAuthSchemeAlignment(t *testing.T) {
+	// v0.12.35: 签到端点必须用 Bearer 方案（对齐上游 get_trae_checkin_status/
+	// claim_trae_checkin）；pay/usage 端点保持 Cloud-IDE-JWT（对齐
+	// request_trae_pay_json）。Cloud-IDE-JWT 方案下 claim 被服务端拒为 9074。
+	a := &auth.Auth{AccessToken: "tok", DeviceID: "dev-1"}
+	mk := func(checkin bool) *http.Request {
+		req, _ := http.NewRequest(http.MethodPost, "https://api.trae.cn/x", nil)
+		if checkin {
+			UgCheckinHeaders(req, a)
+		} else {
+			UgHeaders(req, a)
+		}
+		return req
+	}
+	if got := mk(true).Header.Get("Authorization"); got != "Bearer tok" {
+		t.Errorf("checkin Authorization=%q, want Bearer tok", got)
+	}
+	if got := mk(false).Header.Get("Authorization"); got != "Cloud-IDE-JWT tok" {
+		t.Errorf("pay/usage Authorization=%q, want Cloud-IDE-JWT tok", got)
+	}
+	if got := mk(true).Header.Get("x-device-id"); got != "dev-1" {
+		t.Errorf("checkin x-device-id=%q, want dev-1", got)
+	}
+	// 端到端：CheckinStatus/CheckinClaim 实际发出的请求必须都是 Bearer。
+	var sawStatus, sawClaim string
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case EpCheckinStatus:
+			sawStatus = r.Header.Get("Authorization")
+			return jsonResp(200, `{"checked_in":false,"credits":150,"enable":true}`), nil
+		case EpCheckinClaim:
+			sawClaim = r.Header.Get("Authorization")
+			return jsonResp(200, `{"code":0,"message":"ok"}`), nil
+		}
+		return jsonResp(200, `{}`), nil
+	})
+	if _, err := c.CheckinStatus(a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CheckinClaim(a); err != nil {
+		t.Fatal(err)
+	}
+	if sawStatus != "Bearer tok" || sawClaim != "Bearer tok" {
+		t.Errorf("status auth=%q claim auth=%q, want Bearer on both", sawStatus, sawClaim)
+	}
+}
+
 func TestCheckinBizCodeNonZero(t *testing.T) {
 	// 对齐上游 code!=0 → 错误（Token 已过期）语义；绝不能当成“未签到”通过。
 	c := testClient(func(r *http.Request) (*http.Response, error) {

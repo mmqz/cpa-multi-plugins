@@ -44,16 +44,32 @@ func SOLOHeaders(req *http.Request, a *auth.Auth, stream bool) {
 	}
 }
 
-// UgHeaders 设置签到/积分（api.trae.cn）所需头。
-// 对齐 cockpit-tools trae_account_token_injection.rs:2761,2859 的 header 集：
+// UgHeaders 设置积分/权益（api.trae.cn pay/usage）所需头，Cloud-IDE-JWT 方案。
+// 对齐 cockpit-tools request_trae_pay_json（trae_account_token_injection.rs:1595）：
+// ide_user_pay_status / ide_user_ent_usage 上游用 Cloud-IDE-JWT。
+func UgHeaders(req *http.Request, a *auth.Auth) {
+	ugBaseHeaders(req, a)
+	req.Header.Set("Authorization", "Cloud-IDE-JWT "+a.JWT()) // 读锁快照
+}
+
+// UgCheckinHeaders 设置签到（checkin_credits/*）所需头，Bearer 方案。
+// 对齐 cockpit-tools get_trae_checkin_status / claim_trae_checkin（:2761,2859）：
+// 同一 token 上游在签到端点用 Bearer 而非 Cloud-IDE-JWT。
+// v0.12.35 实证：Cloud-IDE-JWT 方案下 status 读接口放行、claim 写接口
+// 被服务端拒绝并报 biz_code=9074（"当前参与用户太多"），改 Bearer 后对齐。
+func UgCheckinHeaders(req *http.Request, a *auth.Auth) {
+	ugBaseHeaders(req, a)
+	req.Header.Set("Authorization", "Bearer "+a.JWT()) // 读锁快照
+}
+
+// ugBaseHeaders 是 UgHeaders/UgCheckinHeaders 的公共头集：
 //   - x-app-type: trae
 //   - Origin/Referer: https://www.trae.cn
 //   - x-device-id
-func UgHeaders(req *http.Request, a *auth.Auth) {
+func ugBaseHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("User-Agent", clientUA)
-	req.Header.Set("Authorization", "Cloud-IDE-JWT "+a.JWT()) // 读锁快照
 	req.Header.Set("X-User-Region", "CN")
 	req.Header.Set("x-app-type", "trae")
 	req.Header.Set("Origin", "https://www.trae.cn")
