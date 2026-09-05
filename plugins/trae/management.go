@@ -592,6 +592,30 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                 if strings.TrimSpace(a.DeviceID) == "" {
                         log.Printf("checkin %s: WARNING auth has no deviceId — claim may be silently dropped (x-device-id missing)", sa.Account.UID)
                 }
+                // v0.12.38: 签到前保鲜。宿主对 trae 无主动刷新调度（无 RefreshLead/
+                // refresh_interval 元数据，CLIProxyAPI auto_refresh_loop 只调度内置
+                // provider），面板签到读的是 hostAuthGet 快照；若执行器侧已轮换而
+                // 快照滞后，签到会撞过期 token。过期即刷新，并写回宿主——refreshToken
+                // 轮换后不落盘，下次宿主侧刷新用旧 token 必失败（会话死）。
+                if a.RefreshTokenValue() != "" {
+                        refreshed, rerr := upstreamClient.RefreshTokenIfNeeded(a, 0)
+                        if rerr != nil {
+                                log.Printf("checkin %s: pre-flight refresh failed: %v", sa.Account.UID, rerr)
+                                entry["refresh_error"] = rerr.Error()
+                        } else if refreshed {
+                                name := f.Name
+                                if strings.TrimSpace(name) == "" {
+                                        name = credentialFileName(a.Variant, a.UID)
+                                }
+                                if serr := hostAuthSave(name, storageJSONForAuth(a)); serr != nil {
+                                        log.Printf("checkin %s: CRITICAL token refreshed but persist failed: %v — host copy may hold a stale refreshToken", sa.Account.UID, serr)
+                                        entry["persist_error"] = serr.Error()
+                                } else {
+                                        entry["refreshed"] = true
+                                }
+                        }
+                }
+                entry["expires_at"] = a.ExpiresAt
                 status, err := upstreamClient.CheckinStatus(a)
                 if err != nil {
                         entry["error"] = "checkin_status: " + err.Error()
@@ -943,19 +967,9 @@ func hostAuthSave(name string, raw []byte) error {
         return nil
 }
 
-// persistRefreshedAuth writes updated token fields back to host auth store
-// after a successful RefreshTokenIfNeeded in the executor path.
-func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *auth.Auth) {
-        // Derive file name from auth ID or StorageJSON.
-        fileName := req.AuthID
-        if fileName == "" {
-                // v0.12.27: per-variant fallback naming (solo → its own namespace).
-                fileName = credentialFileName(a.Variant, a.UID)
-        } else if !strings.HasSuffix(strings.ToLower(fileName), ".json") {
-                // v0.12.8: a uid-shaped AuthID would land as an extension-less
-                // file the watcher ignores, losing the refreshed token on restart.
-                fileName += ".json"
-        }
+// storageJSONForAuth 构建嵌套形 credential JSON（host.auth.save 载荷）。
+// type/provider 字段必须有——CPA 按它们把文件路由给本插件（v0.12.6+）。
+func storageJSONForAuth(a *auth.Auth) []byte {
         storageJSON, _ := json.MarshalIndent(map[string]any{
                 "type":     providerName,
                 "provider": providerName,
@@ -978,7 +992,23 @@ func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *auth.Auth) {
                 },
                 "disabled": false,
         }, "", "  ")
-        if err := hostAuthSave(fileName, storageJSON); err != nil {
+        return storageJSON
+}
+
+// persistRefreshedAuth writes updated token fields back to host auth store
+// after a successful RefreshTokenIfNeeded in the executor path.
+func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *auth.Auth) {
+        // Derive file name from auth ID or StorageJSON.
+        fileName := req.AuthID
+        if fileName == "" {
+                // v0.12.27: per-variant fallback naming (solo → its own namespace).
+                fileName = credentialFileName(a.Variant, a.UID)
+        } else if !strings.HasSuffix(strings.ToLower(fileName), ".json") {
+                // v0.12.8: a uid-shaped AuthID would land as an extension-less
+                // file the watcher ignores, losing the refreshed token on restart.
+                fileName += ".json"
+        }
+        if err := hostAuthSave(fileName, storageJSONForAuth(a)); err != nil {
                 log.Printf("persist refreshed auth %s: %v", a.UID, err)
         }
 }
@@ -1004,31 +1034,8 @@ func handleImportAuth(req pluginapi.ManagementRequest) map[string]any {
         if err != nil {
                 return map[string]any{"success": false, "error": err.Error()}
         }
-        // Build nested storage JSON for host.auth.save.
-        // CRITICAL: include "type" and "provider" fields so CPA can route this
-        // auth file to the correct plugin provider (matches workbuddy pattern).
-        storageJSON, _ := json.MarshalIndent(map[string]any{
-                "type":     providerName,
-                "provider": providerName,
-                "auth": map[string]any{
-                        "accessToken":  a.AccessToken,
-                        "refreshToken": a.RefreshToken,
-                        "expiresAt":    a.ExpiresAt,
-                        "domain":       a.Domain,
-                        "apiHost":      a.APIHost,
-                        "machineId":    a.MachineID,
-                        "deviceId":     a.DeviceID,
-                        // v0.12.6: keep the parsed variant — dropping it made a solo
-                        // account degrade to cn on refresh/import.
-                        "variant": a.Variant,
-                },
-                "account": map[string]any{
-                        "uid":          a.UID,
-                        "enterpriseId": a.EnterpriseID,
-                        "nickname":     a.Nickname,
-                },
-                "disabled": false,
-        }, "", "  ")
+        // Build nested storage JSON for host.auth.save (v0.12.38: shared builder).
+        storageJSON := storageJSONForAuth(a)
         // v0.12.27: per-variant namespace — an imported solo credential must
         // not overwrite the cn file of the same Trae account.
         fileName := credentialFileName(a.Variant, a.UID)

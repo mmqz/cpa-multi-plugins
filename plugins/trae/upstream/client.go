@@ -64,16 +64,22 @@ func (e *Error) Error() string {
         return fmt.Sprintf("upstream %s (http %d): %s", e.Kind, e.Status, e.Msg)
 }
 
-// bizError 构造业务码错误（对齐 cockpit-tools 签到接口 code!=0 的报错语义：
-// "获取签到状态失败 (code=N): Token 已过期，请重新登录"）。9074 归类软限流，
-// 其余非零码按会话失效处理（pool 据此禁用，与上游提示一致）。
-func bizError(code int32, prefix string) *Error {
-        msg := fmt.Sprintf("%s (code=%d): %s", prefix, code, func() string {
+// bizError 构造业务码错误。v0.12.38 起优先透传上游响应的 message 原文——
+// 此前照抄 cockpit-tools 的兜底文案（rs:2788 对一切非零码硬编码
+// "Token 已过期，请重新登录"）并把上游真实 message 丢弃，导致 v0.12.35
+// 的 1001（实为 Bearer 方案拒绝我们的 token 类别）被误读成 token 过期。
+// 上游 message 为空时才回退到本地兜底文案。9074 归类软限流，
+// 其余非零码按会话失效处理（pool 据此禁用）。
+func bizError(code int32, prefix, upstreamMsg string) *Error {
+        detail := strings.TrimSpace(upstreamMsg)
+        if detail == "" {
                 if code == 9074 {
-                        return "当前参与用户太多，请稍后再试"
+                        detail = "当前参与用户太多，请稍后再试"
+                } else {
+                        detail = "Token 已过期，请重新登录"
                 }
-                return "Token 已过期，请重新登录"
-        }())
+        }
+        msg := fmt.Sprintf("%s (code=%d): %s", prefix, code, detail)
         kind := ErrSessionDead
         if code == 9074 {
                 kind = ErrSoftRate
@@ -353,17 +359,82 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 // CheckinStatus 查询签到状态。
 // 对齐 cockpit-tools trae_account_token_injection.rs:2761 用 GET + did query param
 // （cockpit-tools 用 GET；traework2api 原版用 POST body={}，两种都被接受）。
-// 鉴权用 Bearer 方案（UgCheckinHeaders，对齐上游签到实现；v0.12.35 起）。
+// 鉴权双方案（v0.12.38）：Cloud-IDE-JWT 优先，非 9074 失败回退 Bearer 一次
+// （ugCheckinSchemes/ugCheckinOnce）。
 // 返回完整字段：CheckedIn / Credits / Enable + 业务码 Code（用于 9074 限流识别）。
 // 对齐上游 code!=0 语义（trae_account_token_injection.rs:2786-2791）：
-// 非零业务码 → 返回错误（Token 过期/限流等），绝不能当成 "未签到" 静默通过。
+// 非零业务码 → 返回错误（上游 message 透传），绝不能当成 "未签到" 静默通过。
 // 9074（参与用户太多）作为 *Error{BizCode:9074} 返回，调用方可识别重试。
 type CheckinStatusResult struct {
         CheckedIn bool   `json:"checked_in"`
         Credits   int64  `json:"credits"`
         Enable    bool   `json:"enable"`
-        Code      int32  `json:"code"` // 业务码：0=成功，9074=限流，其他=token 失效
+        Code      int32  `json:"code"` // 业务码：0=成功，9074=限流，其他=会话类失败
         Message   string `json:"message"`
+        // SchemeUsed 实际成功使用的鉴权方案（v0.12.38 双方案探测，面板诊断用）。
+        SchemeUsed string `json:"-"`
+}
+
+// v0.12.38: 签到鉴权双方案。证据链复盘：
+//   - 官方客户端 claim = POST {} + Cloud-IDE-JWT + x-device-id（BlueChonk
+//     FINDINGS §五 实测到账；trae-mate/traework2api/trae-work-checkin 同构）。
+//   - 我方 v0.12.34 Cloud-IDE-JWT 下 status 读接口实测 code=0（积分显示正确）。
+//   - v0.12.35 照搬 cockpit-tools（rs:2761,2859）改 Bearer 后 status 反报
+//     biz_code=1001。cockpit-tools 的 token 来自官方客户端托管会话，与我们
+//     自走 OAuth（ClientID ono9krqynydwx5）ExchangeToken 的 token 类别不同，
+//     其 Bearer 经验不可平移；同期聊天/积分查询（Cloud-IDE-JWT）均正常，
+//     排除 token 过期。
+// 策略：Cloud-IDE-JWT 优先（官方客户端实证方案）；非 9074 失败回退 Bearer
+// 一次（兼容 cockpit-tools 所代表的 token 类别）。每次尝试的 biz code 与
+// 上游 message 全量落日志，SchemeUsed 记入结果供面板诊断。
+const (
+        UgSchemeCloudIDEJWT = "Cloud-IDE-JWT"
+        UgSchemeBearer      = "Bearer"
+)
+
+// ugCheckinSchemes 返回签到请求的鉴权方案优先级。
+func ugCheckinSchemes() []string {
+        return []string{UgSchemeCloudIDEJWT, UgSchemeBearer}
+}
+
+// ugCheckinRequest 构造签到请求（公共头 + 指定方案的 Authorization）。
+func ugCheckinRequest(a *auth.Auth, method, url, body, scheme string) (*http.Request, error) {
+        var rdr io.Reader
+        if body != "" {
+                rdr = strings.NewReader(body)
+        }
+        req, err := http.NewRequest(method, url, rdr)
+        if err != nil {
+                return nil, err
+        }
+        ugBaseHeaders(req, a)
+        if scheme == UgSchemeBearer {
+                req.Header.Set("Authorization", "Bearer "+a.JWT()) // 读锁快照
+        } else {
+                req.Header.Set("Authorization", UgSchemeCloudIDEJWT+" "+a.JWT()) // 读锁快照
+        }
+        return req, nil
+}
+
+// ugCheckinOnce 执行一次签到类请求，返回业务码/消息与原始 body。
+// 网络层错误（doJSON）与解析错误原样上抛，不做方案回退。
+func (c *Client) ugCheckinOnce(a *auth.Auth, method, url, body, scheme string) (int32, string, []byte, error) {
+        req, err := ugCheckinRequest(a, method, url, body, scheme)
+        if err != nil {
+                return 0, "", nil, err
+        }
+        data, err := c.doJSON(req)
+        if err != nil {
+                return 0, "", nil, err
+        }
+        var reply struct {
+                Code    int32  `json:"code"`
+                Message string `json:"message"`
+        }
+        if err := json.Unmarshal(data, &reply); err != nil {
+                return 0, "", nil, fmt.Errorf("checkin %s parse: %w", strings.ToLower(method), err)
+        }
+        return reply.Code, reply.Message, data, nil
 }
 
 func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
@@ -371,23 +442,27 @@ func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
         if a.DeviceID != "" {
                 url += "?did=" + a.DeviceID
         }
-        req, err := http.NewRequest(http.MethodGet, url, nil)
-        if err != nil {
-                return nil, err
+        var lastBiz *Error
+        for _, scheme := range ugCheckinSchemes() {
+                code, msg, data, err := c.ugCheckinOnce(a, http.MethodGet, url, "", scheme)
+                if err != nil {
+                        return nil, err
+                }
+                if code == 0 {
+                        var resp CheckinStatusResult
+                        if err := json.Unmarshal(data, &resp); err != nil {
+                                return nil, fmt.Errorf("checkin status parse: %w", err)
+                        }
+                        resp.SchemeUsed = scheme
+                        return &resp, nil
+                }
+                log.Printf("checkin status: scheme %s -> biz_code=%d msg=%q", scheme, code, msg)
+                lastBiz = bizError(code, "获取签到状态失败", msg)
+                if code == 9074 {
+                        return nil, lastBiz // 限流语义，叩第二个方案无意义
+                }
         }
-        UgCheckinHeaders(req, a)
-        data, err := c.doJSON(req)
-        if err != nil {
-                return nil, err
-        }
-        var resp CheckinStatusResult
-        if err := json.Unmarshal(data, &resp); err != nil {
-                return nil, fmt.Errorf("checkin status parse: %w", err)
-        }
-        if resp.Code != 0 {
-                return nil, bizError(resp.Code, "获取签到状态失败")
-        }
-        return &resp, nil
+        return nil, lastBiz
 }
 
 // CheckinClaim 执行签到。返回业务码 Code 用于 9074 限流识别。
@@ -397,36 +472,43 @@ func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
 // （BlueChonk/trae-credential-reverse-engineering FINDINGS §五 实测到账，
 // trae-mate/traework2api/trae-work-checkin 同构）。响应中的 credits/add_credits/
 // reward 等数值字段作为"入账证据"带回（ClaimCredits），便于诊断"code=0 但未到账"。
-// v0.12.35: 鉴权改用 Bearer 方案（UgCheckinHeaders）。cockpit-tools 实测可用实现
-// （claim_trae_checkin, rs:2859）对签到端点恒用 Bearer；Cloud-IDE-JWT 方案下
-// status 读接口放行、claim 写接口被拒为 biz_code=9074（"当前参与用户太多"）——
-// 这是此前"每次签到都 9074"的根因，并非真实限流。
+// v0.12.35 曾改 Bearer（照搬 cockpit-tools rs:2859），实测 status 反遭
+// biz_code=1001——其 token 来自官方客户端托管会话，与自走 OAuth 的 token
+// 类别不同，Bearer 经验不可平移（详见 CheckinStatus 上方证据链）。
+// v0.12.38: 鉴权随 CheckinStatus 统一走双方案探测（Cloud-IDE-JWT 优先，
+// Bearer 回退）；9074 仍立即返回不回退。
 type CheckinClaimResult struct {
         Code    int32  `json:"code"`
         Message string `json:"message"`
         // ClaimCredits 服务端响应里携带的积分入账数额（best-effort 提取，nil=响应未携带）。
         ClaimCredits *int64 `json:"-"`
+        // SchemeUsed 实际成功使用的鉴权方案（v0.12.38 双方案探测，面板诊断用）。
+        SchemeUsed string `json:"-"`
 }
 
 func (c *Client) CheckinClaim(a *auth.Auth) (*CheckinClaimResult, error) {
-        req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte("{}")))
-        if err != nil {
-                return nil, err
+        var lastBiz *Error
+        for _, scheme := range ugCheckinSchemes() {
+                code, msg, data, err := c.ugCheckinOnce(a, http.MethodPost, c.ugBase()+EpCheckinClaim, "{}", scheme)
+                if err != nil {
+                        return nil, err
+                }
+                if code == 0 {
+                        var resp CheckinClaimResult
+                        if err := json.Unmarshal(data, &resp); err != nil {
+                                return nil, fmt.Errorf("checkin claim parse: %w", err)
+                        }
+                        resp.ClaimCredits = pickCreditField(data)
+                        resp.SchemeUsed = scheme
+                        return &resp, nil
+                }
+                log.Printf("checkin claim: scheme %s -> biz_code=%d msg=%q", scheme, code, msg)
+                lastBiz = bizError(code, "签到领取失败", msg)
+                if code == 9074 {
+                        return nil, lastBiz
+                }
         }
-        UgCheckinHeaders(req, a)
-        data, err := c.doJSON(req)
-        if err != nil {
-                return nil, err
-        }
-        var resp CheckinClaimResult
-        if err := json.Unmarshal(data, &resp); err != nil {
-                return nil, fmt.Errorf("checkin claim parse: %w", err)
-        }
-        if resp.Code != 0 {
-                return nil, bizError(resp.Code, "签到领取失败")
-        }
-        resp.ClaimCredits = pickCreditField(data)
-        return &resp, nil
+        return nil, lastBiz
 }
 
 // pickCreditField 从签到 claim 响应中 best-effort 提取入账数额。

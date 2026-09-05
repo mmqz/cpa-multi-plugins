@@ -357,49 +357,131 @@ func TestCheckinStatusAndClaim(t *testing.T) {
 }
 
 func TestCheckinAuthSchemeAlignment(t *testing.T) {
-	// v0.12.35: 签到端点必须用 Bearer 方案（对齐上游 get_trae_checkin_status/
-	// claim_trae_checkin）；pay/usage 端点保持 Cloud-IDE-JWT（对齐
-	// request_trae_pay_json）。Cloud-IDE-JWT 方案下 claim 被服务端拒为 9074。
+	// v0.12.38: 签到鉴权双方案——Cloud-IDE-JWT 优先（官方客户端逆向实证
+	// FINDINGS §五；v0.12.34 我方 status 实测 code=0），Bearer 回退
+	// （cockpit-tools rs:2761,2859 的 token 类别）。pay/usage 恒为 Cloud-IDE-JWT。
 	a := &auth.Auth{AccessToken: "tok", DeviceID: "dev-1"}
-	mk := func(checkin bool) *http.Request {
-		req, _ := http.NewRequest(http.MethodPost, "https://api.trae.cn/x", nil)
-		if checkin {
-			UgCheckinHeaders(req, a)
-		} else {
-			UgHeaders(req, a)
-		}
-		return req
+	req, err := ugCheckinRequest(a, http.MethodPost, "https://api.trae.cn/x", "{}", UgSchemeCloudIDEJWT)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := mk(true).Header.Get("Authorization"); got != "Bearer tok" {
-		t.Errorf("checkin Authorization=%q, want Bearer tok", got)
+	if got := req.Header.Get("Authorization"); got != "Cloud-IDE-JWT tok" {
+		t.Errorf("checkin primary Authorization=%q, want Cloud-IDE-JWT tok", got)
 	}
-	if got := mk(false).Header.Get("Authorization"); got != "Cloud-IDE-JWT tok" {
-		t.Errorf("pay/usage Authorization=%q, want Cloud-IDE-JWT tok", got)
-	}
-	if got := mk(true).Header.Get("x-device-id"); got != "dev-1" {
+	if got := req.Header.Get("x-device-id"); got != "dev-1" {
 		t.Errorf("checkin x-device-id=%q, want dev-1", got)
 	}
-	// 端到端：CheckinStatus/CheckinClaim 实际发出的请求必须都是 Bearer。
-	var sawStatus, sawClaim string
+	reqB, err := ugCheckinRequest(a, http.MethodPost, "https://api.trae.cn/x", "", UgSchemeBearer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reqB.Header.Get("Authorization"); got != "Bearer tok" {
+		t.Errorf("checkin fallback Authorization=%q, want Bearer tok", got)
+	}
+	reqPay, _ := http.NewRequest(http.MethodPost, "https://api.trae.cn/x", nil)
+	UgHeaders(reqPay, a)
+	if got := reqPay.Header.Get("Authorization"); got != "Cloud-IDE-JWT tok" {
+		t.Errorf("pay/usage Authorization=%q, want Cloud-IDE-JWT tok", got)
+	}
+	// 端到端：CheckinStatus 首选方案必须是 Cloud-IDE-JWT。
+	var saw string
 	c := testClient(func(r *http.Request) (*http.Response, error) {
-		switch r.URL.Path {
-		case EpCheckinStatus:
-			sawStatus = r.Header.Get("Authorization")
-			return jsonResp(200, `{"checked_in":false,"credits":150,"enable":true}`), nil
-		case EpCheckinClaim:
-			sawClaim = r.Header.Get("Authorization")
-			return jsonResp(200, `{"code":0,"message":"ok"}`), nil
-		}
-		return jsonResp(200, `{}`), nil
+		saw = r.Header.Get("Authorization")
+		return jsonResp(200, `{"checked_in":false,"credits":150,"enable":true}`), nil
 	})
-	if _, err := c.CheckinStatus(a); err != nil {
+	resp, err := c.CheckinStatus(a)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.CheckinClaim(a); err != nil {
+	if saw != "Cloud-IDE-JWT tok" {
+		t.Errorf("first attempt auth=%q, want Cloud-IDE-JWT tok", saw)
+	}
+	if resp.SchemeUsed != UgSchemeCloudIDEJWT {
+		t.Errorf("SchemeUsed=%q, want Cloud-IDE-JWT", resp.SchemeUsed)
+	}
+	if !resp.Enable || resp.Credits != 150 {
+		t.Errorf("status payload = %+v, want enable/credits=150", resp)
+	}
+}
+func TestCheckinSchemeFallbackStatus(t *testing.T) {
+	// 首选 Cloud-IDE-JWT 被拒（1001）→ 回退 Bearer 成功：SchemeUsed=Bearer，
+	// 两个方案的 Authorization 都按预期发出。
+	a := &auth.Auth{AccessToken: "tok", DeviceID: "dev-1"}
+	var auths []string
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		auths = append(auths, r.Header.Get("Authorization"))
+		if len(auths) == 1 {
+			return jsonResp(200, `{"code":1001,"message":"token class rejected"}`), nil
+		}
+		return jsonResp(200, `{"code":0,"checked_in":false,"credits":150,"enable":true}`), nil
+	})
+	resp, err := c.CheckinStatus(a)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if sawStatus != "Bearer tok" || sawClaim != "Bearer tok" {
-		t.Errorf("status auth=%q claim auth=%q, want Bearer on both", sawStatus, sawClaim)
+	if resp.SchemeUsed != UgSchemeBearer {
+		t.Errorf("SchemeUsed=%q, want Bearer", resp.SchemeUsed)
+	}
+	if resp.Credits != 150 {
+		t.Errorf("credits=%d, want 150", resp.Credits)
+	}
+	if len(auths) != 2 || auths[0] != "Cloud-IDE-JWT tok" || auths[1] != "Bearer tok" {
+		t.Errorf("attempts=%v, want [Cloud-IDE-JWT tok, Bearer tok]", auths)
+	}
+}
+func TestCheckinSchemeFallbackClaim(t *testing.T) {
+	// claim 同构：Cloud-IDE-JWT 失败后回退 Bearer 成功 + ClaimCredits 提取。
+	a := &auth.Auth{AccessToken: "tok"}
+	n := 0
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		n++
+		if n == 1 {
+			return jsonResp(200, `{"code":1001,"message":"denied"}`), nil
+		}
+		return jsonResp(200, `{"code":0,"message":"ok","add_credits":150}`), nil
+	})
+	resp, err := c.CheckinClaim(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.SchemeUsed != UgSchemeBearer {
+		t.Errorf("SchemeUsed=%q, want Bearer", resp.SchemeUsed)
+	}
+	if resp.ClaimCredits == nil || *resp.ClaimCredits != 150 {
+		t.Errorf("ClaimCredits=%v, want 150", resp.ClaimCredits)
+	}
+}
+func TestCheckinNoFallbackOn9074(t *testing.T) {
+	// 9074 限流语义立即返回，不做方案回退（避免对限流端点二次叩门）。
+	a := &auth.Auth{AccessToken: "tok"}
+	n := 0
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		n++
+		return jsonResp(200, `{"code":9074,"message":"当前参与用户太多"}`), nil
+	})
+	_, err := c.CheckinClaim(a)
+	if n != 1 {
+		t.Errorf("attempts=%d, want 1 (no fallback on 9074)", n)
+	}
+	var ue *Error
+	if !errors.As(err, &ue) || !IsRateLimit9074(ue.BizCode) {
+		t.Errorf("9074 should surface as biz rate limit, got %v", err)
+	}
+}
+func TestBizErrorSurfacesUpstreamMessage(t *testing.T) {
+	// v0.12.38: 上游 message 必须透传（此前硬编码"Token 已过期"掩盖 1001 真因）。
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":1001,"message":"upstream says XYZ"}`), nil
+	})
+	_, err := c.CheckinStatus(&auth.Auth{AccessToken: "bad"})
+	if err == nil {
+		t.Fatal("code=1001 should error")
+	}
+	if !strings.Contains(err.Error(), "upstream says XYZ") {
+		t.Errorf("error should carry upstream message, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "biz_code=1001") {
+		t.Errorf("error should carry biz code, got %q", err.Error())
 	}
 }
 

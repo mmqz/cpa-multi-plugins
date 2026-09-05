@@ -52,15 +52,8 @@ func UgHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Authorization", "Cloud-IDE-JWT "+a.JWT()) // 读锁快照
 }
 
-// UgCheckinHeaders 设置签到（checkin_credits/*）所需头，Bearer 方案。
-// 对齐 cockpit-tools get_trae_checkin_status / claim_trae_checkin（:2761,2859）：
-// 同一 token 上游在签到端点用 Bearer 而非 Cloud-IDE-JWT。
-// v0.12.35 实证：Cloud-IDE-JWT 方案下 status 读接口放行、claim 写接口
-// 被服务端拒绝并报 biz_code=9074（"当前参与用户太多"），改 Bearer 后对齐。
-func UgCheckinHeaders(req *http.Request, a *auth.Auth) {
-	ugBaseHeaders(req, a)
-	req.Header.Set("Authorization", "Bearer "+a.JWT()) // 读锁快照
-}
+// UgCheckinHeaders 已移除（v0.12.38）：签到鉴权改为双方案探测
+// （Cloud-IDE-JWT 优先、Bearer 回退），实现见 client.go ugCheckinRequest。
 
 // ugBaseHeaders 是 UgHeaders/UgCheckinHeaders 的公共头集：
 //   - x-app-type: trae

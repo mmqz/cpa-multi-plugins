@@ -121,6 +121,16 @@ func (s *Scheduler) RunCheckinNow() {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
+		// v0.12.38: 签到前保鲜——宿主对 trae 无主动刷新调度（无 RefreshLead/
+		// refresh_interval 元数据，CLIProxyAPI auto_refresh_loop 只调度内置
+		// provider），池内 token 过期时签到必撞会话类错误。过期即刷新并落盘。
+		if refreshed, err := s.cfg.Upstream.RefreshTokenIfNeeded(a, 0); err != nil {
+			log.Printf("checkin %s: pre-flight refresh failed: %v", st.UID, err)
+		} else if refreshed {
+			if err := a.SaveAtomic(); err != nil {
+				log.Printf("checkin %s: refresh save: %v", st.UID, err)
+			}
+		}
 		// 签到（status → 未签到则 claim）
 		// 对齐 cockpit-tools workbuddy_auto_checkin.rs 指数退避策略。
 		// v0.12.28: CheckinStatus/CheckinClaim 现在在上游业务码非零时返回
