@@ -325,11 +325,10 @@ function progressHTML(cr, acct){
     const ptype=String(cr.plan_type||"");
     const isFree=plan.includes("free")||plan.includes("免费")||ptype.toLowerCase().includes("free");
     // v0.12.34: SOLO 积分池 = 官方 cashier 同口径（Σ max(credits_limit-usage,0)），
-    // 模型调用真正扣减的池子；签到钱包是官方签到接口返回的账本余额（历史签到
-    // 入账，非每日新增），放 meta 单独展示——v0.12.39: 标注“不叠加”防误读成
-    // 余额翻倍/显示 bug（用户反馈：“明明只有349个积分怎么出bug了”）。
+    // 模型调用真正扣减的池子；签到奖励（v0.12.40 定案：credits=每日奖励数额，
+    // 非钱包）放 meta 单独展示，标注"不叠加"防误读成余额翻倍/显示 bug。
     if(isSoloAcct&&cr.credits_pool_known){
-      const wm=(wallet!=null)?` · 签到钱包余额 ${wallet}（签到账本，不与积分池叠加）`:"";
+      const wm=(wallet!=null)?` · 签到奖励 ${wallet} 积分（成功签到可领，不与积分池叠加）`:"";
       if(cr.credits_pool_unlimited){
         return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>不限</span></div><div class="pb-track"><div class="pb-bar" style="width:100%;background:var(--ok)"></div></div><div class="pb-meta">积分池不限量${wm} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
       }
@@ -339,7 +338,7 @@ function progressHTML(cr, acct){
     }
     if(isSoloAcct&&wallet!=null){
       let color=wallet>0?'var(--ok)':'var(--err)';
-      return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>${wallet>0?"":"0%"}</span></div><div class="pb-track"><div class="pb-bar" style="width:${wallet>0?100:0}%;background:${color}"></div></div><div class="pb-meta">剩余 ${wallet} 积分 · 签到钱包余额（签到入账、模型调用扣减） · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
+      return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>${wallet>0?"":"0%"}</span></div><div class="pb-track"><div class="pb-bar" style="width:${wallet>0?100:0}%;background:${color}"></div></div><div class="pb-meta">签到奖励 ${wallet} 积分（成功签到可领，模型调用扣积分池） · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
     }
     // 快通道 0/月是噪音：只在有量时展示（对齐上游 >0 分支）。
     const extras=(fpm!=null&&fpm>0?` · 快通道: ${fpm}/月`:"")+(solo!=null?` · Solo 并发 ${solo}`:"")+(cr.solo_package?" · 权益包: Solo":"");
@@ -416,11 +415,11 @@ function card(a){
        +(a.region?`<div class="row"><span class="k">区域</span><span class="v">${esc(a.region)}</span></div>`:"")
        +'<div class="row"><span class="k">类型</span><span class="v">Trae Intl（marscode · 无积分/签到）</span></div>')
     : (progressHTML(cr, a)
-       // v0.12.25/31: the check-in wallet row — live WALLET BALANCE from
-       // checkin_credits/status (same field upstream renders as "共 X 积分"),
-       // here, NOT in the subscription pack above; never conflated again.
-       // 签到奖励入账、模型调用扣减；标签用"余额"避免读成"签到给150"。
-       +((wallet!=null&&(wallet>0||checkedIn))?`<div class="row"><span class="k">签到钱包余额</span><span class="v">${wallet} 积分${checkedIn?" · 今日已签":""}</span></div>`:""));
+       // v0.12.25/31/40: the check-in reward row — live reward amount from
+       // checkin_credits/status。v0.12.40 语义修正（反编译官方 TraeWork 定案）：
+       // credits = 每日签到奖励数额（官方卡片 "Daily check-in: {credits} credits"），
+       // 非钱包/可花余额；模型调用扣的是上方积分池，不扣这个。
+       +((wallet!=null&&(wallet>0||checkedIn))?`<div class="row"><span class="k">签到奖励</span><span class="v">${wallet} 积分${checkedIn?" · 今日已签":""}</span></div>`:""));
   return `<div class="card" data-uid="${escAttr(a.uid)}" data-auth="${escAttr(a.auth_index)}">
   <h2>${esc(a.nickname||a.label||a.name)} <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
@@ -737,24 +736,25 @@ function renderSummary(accounts){
 function checkinResultToast(res){
   const name=res.nickname||res.uid||res.auth_index||"账号";
   if(res.error){
-    // v0.12.39: 9074=官方签到活动侧名额限流（每日奖励先到先得，status 可查证
-    // 鉴权/余额均正常），与账户余额无关。插件每日 0 点（官方重置点）起自动
-    // 密集抢签（1 分钟起前密后疏退避）；手动点按仍随时可用。
+    // v0.12.40: 9074 真因定案——此前 claim body 缺 req_source（官方契约
+    // {"req_source":2}）被上游以通用活动错误 9074 拒绝，与余额/鉴权无关。
+    // 已对齐官方请求；若升级后仍 9074，则为官方名额/风控，插件每日 0 点起
+    // 自动密集重试；手动点按仍随时可用。
     if(/9074|参与用户太多/.test(res.error)){
-      toast(name+"：签到被官方限流","warn",res.error+" —— 与余额无关，官方每日名额先到先得；插件每日 0 点起自动密集抢签（1 分钟起退避），也可稍后再手动点一次");return;
+      toast(name+"：签到被官方限流","warn",res.error+" —— 与余额无关；v0.12.40 已对齐官方签到请求（req_source），若仍被拒则是官方名额/风控，系统每日 0 点起自动密集重试，也可稍后再手动点一次");return;
     }
     toast(name+"：签到失败","err",res.error);return;
   }
-  // v0.12.31: 奖励(res.awarded=签到前后余额差)与钱包余额(res.credits=签到后)
-  // 分开显示。旧实现把签到前余额当奖励弹"+150 积分"，与官方 +200 对不上。
+  // v0.12.31/40: 奖励(res.awarded=claim 响应证据或签到前奖励配置)与
+  // 签到奖励(res.credits=奖励数额)分开显示。
   if(res.already_checked_in){
-    toast(name+"：今日已签到","ok",res.credits!=null?("签到钱包余额 "+res.credits+" 积分"):(res.claim_message||""));return;
+    toast(name+"：今日已签到","ok",res.credits!=null?("签到奖励 "+res.credits+" 积分"):(res.claim_message||""));return;
   }
   if(res.claim_code!=null||res.claim_message){
     const parts=[];
     if(res.claim_credits!=null&&res.awarded!=null&&res.claim_credits!==res.awarded) parts.push("响应入账 "+res.claim_credits+" 积分");
     if(res.awarded!=null) parts.push("本次签到 +"+res.awarded+" 积分");
-    if(res.credits!=null) parts.push("签到钱包余额 "+res.credits+" 积分");
+    if(res.credits!=null) parts.push("签到奖励 "+res.credits+" 积分");
     // v0.12.32: code=0 但余额未增长 —— 服务端静默拒签（缺 did/风控/官方客户端已代签）。
     if(res.awarded===0){
       toast(name+"：签到返回成功但余额未增长","warn",(parts.join(" · ")||"")+" —— 可能未真正到账，请留意官方客户端余额");return;

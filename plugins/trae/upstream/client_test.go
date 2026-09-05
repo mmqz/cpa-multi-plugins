@@ -336,9 +336,13 @@ func TestSelectActivePackPriority(t *testing.T) {
 }
 
 func TestCheckinStatusAndClaim(t *testing.T) {
-	var path string
+	// v0.12.40: 官方契约 = POST + {"req_source":2}（反编译 TraeWork CN
+	// 2.3.81345 out/main.js eb()）；status 不再是 GET+did query。
+	var path, method, body string
 	c := testClient(func(r *http.Request) (*http.Response, error) {
-		path = r.URL.Path
+		path, method = r.URL.Path, r.Method
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
 		if r.Header.Get("X-User-Region") != "CN" {
 			return nil, errors.New("missing X-User-Region")
 		}
@@ -353,6 +357,12 @@ func TestCheckinStatusAndClaim(t *testing.T) {
 	}
 	if path != EpCheckinStatus {
 		t.Errorf("path=%s", path)
+	}
+	if method != http.MethodPost {
+		t.Errorf("method=%s, want POST (official contract)", method)
+	}
+	if body != `{"req_source":2}` {
+		t.Errorf("body=%s, want backtick-req_source-2 literal", body)
 	}
 }
 

@@ -243,8 +243,12 @@
 ### Trae 系
 - `IdeVersion` 选择: `0.1.52` / `20260811` 可看到 glm-5.3 等新模型
 - `trae-api-cn.mchost.guru` 是社区反代，官方对应 `api.trae.cn`
-- 签到鉴权（v0.12.38 定稿）: 自走 OAuth（ExchangeToken）的 token 用 `Cloud-IDE-JWT`（官方客户端实证方案，BlueChonk FINDINGS §五实测到账）；`Bearer` 对该类 token 报 biz_code=1001（cockpit-tools 的 Bearer 经验不可平移——其 token 来自官方客户端托管会话，类别不同）。v0.12.38 起双方案探测: Cloud-IDE-JWT 优先，非 9074 失败回退 Bearer 一次；9074=官方活动名额限流（先到先得），不回退
-- 签到时刻（v0.12.39）: 官方按自然日重置奖励名额，主循环默认 0 点（`defaultCheckinHour=0`）+ 前密后疏退避（1m→2m→4m→8m→16m→32m→64m→2h 封顶，10 次/日），贴重置点抢签；9 点起签 + 长退避会恒抢不到名额
+- 签到鉴权（v0.12.40 定稿，反编译 TraeWork CN 2.3.81345）: `Authorization: Cloud-IDE-JWT <token>`（官方客户端统一方案）+ `x-device-id`（真实绑定 did）+ `x-device-brand/x-device-type/x-os-version/x-app-version`；`Bearer` 对自走 OAuth token 报 biz_code=1001（cockpit-tools 的 Bearer 经验不可平移——其 token 来自官方客户端托管会话，类别不同）。v0.12.38 起双方案探测: Cloud-IDE-JWT 优先，非 9074 失败回退 Bearer 一次；9074 不回退
+- 签到契约（v0.12.40 官方契约，out/main.js eb()）: **status 与 claim 均 POST**，body = `{"req_source":2}`（SOLO 客户端；plain IDE 发 1，web 端枚举 {IDE:1, Lite:2, OfficialSite:0,...}）。status 响应扁平结构 `{enable, checked_in, did_checked_in, credits, extra_credits}`；claim 响应 `{code, message}`
+- credits 语义（v0.12.40 定案）: `credits` = 每日签到奖励数额（官方卡片 "Daily check-in: {credits} credits"），**非钱包/可花余额**；`extra_credits` = 会员/活动加码（"Member bonus: +{extraCredits} daily"）；到账总额 = credits + extra_credits（v0.12.31 "官方给 200 面板 150" = 150 基础 + 50 加码）
+- 签到去重: `checked_in` 账号维度、`did_checked_in` 设备维度（"This device has checked in today"）；官方 claim 前置 = 两者均为 false。官方用 beijingDayKey 判定签到日
+- 9074 真因（v0.12.40 定案）: claim body 缺 `req_source` 被上游以通用活动错误 9074（"当前参与用户太多"）拒绝——2025-09-04 官方收紧活动校验所致；官方客户端同账号正常。非真实限流、非鉴权问题
+- 签到时刻（v0.12.39）: 官方按自然日重置奖励，主循环默认 0 点（`defaultCheckinHour=0`）+ 前密后疏退避（1m→2m→4m→8m→16m→32m→64m→2h 封顶，10 次/日）；宿主机时区应为 CN 时区
 - Trae Intl 走的是另一套协议（Web SOLO remote `chat_sessions` + GET events），与 CN 不同
 
 ### Qoder 系

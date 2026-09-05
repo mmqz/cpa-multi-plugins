@@ -150,13 +150,13 @@ func (s *Scheduler) RunCheckinNow() {
 				log.Printf("checkin status %s: %v", st.UID, err)
 			}
 			status = nil
-		} else if !status.CheckedIn && status.Enable {
+		} else if !status.CheckedIn && !status.DidCheckedIn && status.Enable {
 			// v0.12.32: 官方 claim 需要 x-device-id 携带真实绑定 did；缺失时
 			// 服务端可能 code=0 但静默不入账（FINDINGS §四/§五）。提前告警。
 			if a.DeviceID == "" {
 				log.Printf("checkin %s: WARNING auth has no deviceId — claim may be silently dropped (x-device-id missing)", st.UID)
 			}
-			if _, err := s.cfg.Upstream.CheckinClaim(a); err != nil {
+			if claim, err := s.cfg.Upstream.CheckinClaim(a); err != nil {
 				if isBizRateLimit(err) {
 					rateLimited++
 					log.Printf("checkin %s: claim rate-limited (9074), will auto-retry today", st.UID)
@@ -164,23 +164,23 @@ func (s *Scheduler) RunCheckinNow() {
 					log.Printf("checkin claim %s: %v", st.UID, err)
 				}
 			} else {
-				// v0.12.31: 领取成功后重查状态（对齐上游 claim_trae_checkin
-				// trae_account_token_injection.rs:2891"领取后重新查询状态"）。
-				// 旧日志用签到前余额充当结果（"ok (credits=150)"实为签到前
-				// 钱包），奖励（前后差值）与签到后余额分开记录。
+				// v0.12.40: credits 语义修正——status.credits 是"签到可领奖励"
+				// （官方卡片 "Daily check-in: {credits} credits"），签到后不会增长，
+				// 旧的"签到后-签到前"差值算法作废。入账证据优先取 claim 响应
+				// 携带的数额，缺省回退签到前奖励配置（基础 + 加码）。
+				awarded := status.Credits + status.ExtraCredits
+				if claim.ClaimCredits != nil {
+					awarded = *claim.ClaimCredits
+				}
 				if after, stErr := s.cfg.Upstream.CheckinStatus(a); stErr == nil {
-					awarded := after.Credits - status.Credits
-					if awarded < 0 {
-						awarded = 0
-					}
-					log.Printf("checkin %s: ok +%d (wallet %d)", st.UID, awarded, after.Credits)
+					log.Printf("checkin %s: ok +%d (reward was %d+%d)", st.UID, awarded, status.Credits, status.ExtraCredits)
 					status = after
 				} else {
-					log.Printf("checkin %s: claimed, wallet refresh failed: %v", st.UID, stErr)
+					log.Printf("checkin %s: claimed +%d, status refresh failed: %v", st.UID, awarded, stErr)
 				}
 			}
-		} else if status.CheckedIn {
-			log.Printf("checkin %s: already checked in (wallet %d)", st.UID, status.Credits)
+		} else if status.CheckedIn || status.DidCheckedIn {
+			log.Printf("checkin %s: already checked in (reward %d)", st.UID, status.Credits)
 		}
 		// 查积分 + 解冻
 		// 对齐 cockpit-tools apply_usage_response：按 pack 优先级选最高 pack。
@@ -195,11 +195,9 @@ func (s *Scheduler) RunCheckinNow() {
 		}
 		// SOLO CN 永远是 CN
 		remain, _ := upstream.PackListRemain(usage.UserEntitlementPackList, true)
-		wallet := int64(0)
-		if status != nil {
-			wallet = status.Credits
-		}
-		s.cfg.Pool.ReenableIfCredits(st.UID, remain+wallet)
+		// v0.12.40: credits 语义修正——它是签到奖励配置而非可花余额，
+		// 不再计入池子评分（旧 wallet 叠加源于同一误读）。
+		s.cfg.Pool.ReenableIfCredits(st.UID, remain)
 	}
 
 	// v0.12.33: 本轮有 9074 → 当日指数退避自动重试；无 9074 → 复位并撤销挂起定时器。

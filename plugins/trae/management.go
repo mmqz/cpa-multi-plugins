@@ -623,15 +623,14 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                         results = append(results, entry)
                         continue
                 }
-                // v0.12.31: awarded = 签到后余额 - 签到前余额（-1 = 未知）。
-                // 旧实现 claim 成功后不重查状态，entry/缓存里留的是签到前余额，
-                // 面板 toast 又把 res.credits 当"本次奖励"显示（"+150 积分"实为
-                // 签到前的钱包余额）——官方 SOLO 签到 +200 与面板 150 对不上即源于此。
-                // 现在对齐上游 claim_trae_checkin（trae_account_token_injection.rs:2891
-                // "领取后重新查询状态"）：奖励与余额分开呈现。
+                // v0.12.40: credits 语义修正（反编译官方 TraeWork CN 2.3.81345 定案）——
+                // status.credits 是"每日签到奖励数额"（官方卡片 "Daily check-in:
+                // {credits} credits"），非钱包余额；签到后不增长，旧"签到后-签到前"
+                // 差值算法作废。入账证据优先取 claim 响应携带的数额，缺省回退
+                // 签到前奖励配置（基础 credits + 加码 extra_credits）。
                 beforeCredits := status.Credits
                 awarded := int64(-1)
-                if !status.CheckedIn && status.Enable {
+                if !status.CheckedIn && !status.DidCheckedIn && status.Enable {
                         claim, err := upstreamClient.CheckinClaim(a)
                         if err != nil {
                                 entry["error"] = "checkin_claim: " + err.Error()
@@ -640,30 +639,31 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                         } else {
                                 entry["claim_code"] = claim.Code
                                 entry["claim_message"] = claim.Message
-                                // v0.12.32: 响应中若携带入账数额，作为证据透出。
+                                // 入账证据：claim 响应携带的数额优先。
                                 if claim.ClaimCredits != nil {
                                         entry["claim_credits"] = *claim.ClaimCredits
+                                        awarded = *claim.ClaimCredits
+                                } else {
+                                        awarded = beforeCredits + status.ExtraCredits
                                 }
-                                // 领取成功后重查状态（对齐上游）。
+                                // 领取成功后重查状态（对齐官方 workbench claim 后 refresh）。
                                 if after, stErr := upstreamClient.CheckinStatus(a); stErr == nil {
-                                        if after.Credits >= beforeCredits {
-                                                awarded = after.Credits - beforeCredits
-                                        }
                                         status = after
                                 }
                         }
                 }
-                entry["already_checked_in"] = status.CheckedIn
+                entry["already_checked_in"] = status.CheckedIn || status.DidCheckedIn
                 entry["credits"] = status.Credits
+                if status.ExtraCredits > 0 {
+                        entry["extra_credits"] = status.ExtraCredits
+                }
                 if awarded >= 0 {
                         entry["awarded"] = awarded
                 }
                 // Refresh cached checkin / credits.
-                // v0.12.25 semantics: e.credits = SUBSCRIPTION pack quota;
-                // e.checkin.Credits = the CHECK-IN WALLET — two different wallets.
-                // Storing the wallet into e.credits here made the card read 150 right
-                // after check-in, then drop to the pack's 0 on the next /credits
-                // refresh ("签到 150 积分一刷新就归零").
+                // v0.12.40 语义：e.credits = SUBSCRIPTION pack quota（订阅包余额）；
+                // e.checkin.Credits = 签到奖励数额（非钱包、非可花余额）。此前
+                // "签到 150 积分一刷新就归零"即误把奖励当余额存进 e.credits 所致。
                 prevCredits := int64(-1) // -1 = unknown, keep previous
                 prevUsageFilled := false
                 if v, ok := accountCache.Load(f.AuthIndex); ok {
@@ -675,7 +675,7 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                 newEntry := &accountCacheEntry{
                         credits: prevCredits,
                         checkin: &checkinStatus{
-                                CheckedIn: status.CheckedIn,
+                                CheckedIn: status.CheckedIn || status.DidCheckedIn,
                                 Credits:   status.Credits,
                                 Enable:    status.Enable,
                         },
@@ -689,19 +689,18 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                 accountCache.Store(f.AuthIndex, newEntry)
                 // Re-enable account in pool if checkin restored credits.
                 // v0.12.28: pool score prefers the usage-model remain when known
-                // (fast/basic); falls back to pack + wallet so a checkin-only
-                // account (pack unknown, wallet 150) is neither starved nor shown
-                // as exhausted.
+                // (fast/basic). v0.12.40: credits 是奖励配置而非可花余额，不再叠加进
+                // 评分（旧 pack+wallet 叠加源于同一误读）。
                 if accountPool != nil {
-                        score := status.Credits
+                        score := int64(0)
                         if prevUsageFilled && newEntry.usage.RemainKnown && newEntry.usage.Remain > 0 {
                                 r := newEntry.usage.Remain
                                 if r < 0 { // unlimited fast requests
                                         r = 1 << 30
                                 }
-                                score = r + status.Credits
+                                score = r
                         } else if prevCredits > 0 {
-                                score = prevCredits + status.Credits
+                                score = prevCredits
                         }
                         accountPool.ReenableIfCredits(sa.Account.UID, score)
                 }
@@ -847,15 +846,14 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
                 if sum.PlanType != "" {
                         entry["plan_type"] = sum.PlanType
                 }
-                // v0.12.25: also fetch the CHECK-IN WALLET (a separate upstream
-                // wallet from the subscription pack). The old code stored the
-                // pack limit into BOTH slots, so a checkin-only account's card
-                // flipped 150 → 0 on every refresh ("一刷新就归零").
+                // v0.12.25: also fetch the CHECK-IN status. v0.12.40: credits 语义
+                // 修正——它是签到奖励数额（非钱包），仅作展示与"已签"判定，不再
+                // 计入池子评分/可花余额。
                 wallet := int64(-1)
                 checkedIn, enable := false, false
                 if st, stErr := upstreamClient.CheckinStatus(a); stErr == nil {
                         wallet = st.Credits
-                        checkedIn, enable = st.CheckedIn, st.Enable
+                        checkedIn, enable = st.CheckedIn || st.DidCheckedIn, st.Enable
                 } else {
                         entry["checkin_status_error"] = stErr.Error()
                 }
@@ -864,8 +862,8 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
                         entry["checked_in"] = checkedIn
                 }
                 // Update cache + pool. e.credits stays pack-only (legacy field); the
-                // wallet lives in e.checkin.Credits. Pool score = usage remain (when
-                // known) + wallet so a checkin-only account is not treated as exhausted.
+                // reward lives in e.checkin.Credits. v0.12.40: pool score = usage
+                // remain / credits pool only — the reward config is not spendable.
                 scoreRemain := int64(0)
                 if sum.RemainKnown {
                         scoreRemain = sum.Remain
@@ -891,7 +889,9 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
                         plan:        plan,
                 })
                 if accountPool != nil {
-                        accountPool.SetCredits(sa.Account.UID, scoreRemain+max64(wallet, 0))
+                        // v0.12.40: 不再叠加奖励配置（wallet 变量名保留为历史语义，
+                        // 现含义 = 签到奖励数额）。
+                        accountPool.SetCredits(sa.Account.UID, scoreRemain)
                 }
                 results = append(results, entry)
         }

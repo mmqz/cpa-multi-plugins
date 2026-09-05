@@ -138,7 +138,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.39"
+var version = "0.12.40"
 
 var (
         hostAPI *C.cliproxy_host_api

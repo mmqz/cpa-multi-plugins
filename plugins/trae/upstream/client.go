@@ -357,8 +357,13 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 }
 
 // CheckinStatus 查询签到状态。
-// 对齐 cockpit-tools trae_account_token_injection.rs:2761 用 GET + did query param
-// （cockpit-tools 用 GET；traework2api 原版用 POST body={}，两种都被接受）。
+// v0.12.40: 对齐官方客户端契约（反编译 TraeWork CN 2.3.81345 out/main.js
+// eb()/fetchCheckinCreditsStatus()）：POST /trae/api/v2/ug/checkin_credits/status，
+// body {"req_source":2}，无 did query。响应为扁平结构：
+//   {enable, checked_in, did_checked_in, credits, extra_credits}
+// 其中 credits = 每日签到奖励数额（官方卡片 "Daily check-in: {credits} credits"），
+// 并非可花余额——此前误标"签到钱包"（v0.12.30 时代的误读）。
+// 旧 GET + did query（cockpit-tools rs:2761）在 09-04 上游收紧前可用，现已弃用。
 // 鉴权双方案（v0.12.38）：Cloud-IDE-JWT 优先，非 9074 失败回退 Bearer 一次
 // （ugCheckinSchemes/ugCheckinOnce）。
 // 返回完整字段：CheckedIn / Credits / Enable + 业务码 Code（用于 9074 限流识别）。
@@ -367,7 +372,17 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 // 9074（参与用户太多）作为 *Error{BizCode:9074} 返回，调用方可识别重试。
 type CheckinStatusResult struct {
         CheckedIn bool   `json:"checked_in"`
+        // DidCheckedIn 官方字段 did_checked_in：设备维度的"今日已签"
+        // （官方 UI 文案 "This device has checked in today. Come back tomorrow."，
+        // 反编译 TraeWork CN 2.3.81345 webcomponents 用户卡）。官方 claim 前置：
+        // checked_in===false 且 did_checked_in!==true 才可领——同账号同设备每日
+        // 仅一次，设备维度由服务端按 did 去重。
+        DidCheckedIn bool   `json:"did_checked_in"`
         Credits   int64  `json:"credits"`
+        // ExtraCredits 官方字段 extra_credits：会员/活动加码奖励（官方卡片
+        // "Member bonus: +{extraCredits} daily"）。到账总额 = credits + extra_credits。
+        // v0.12.31 "官方依次给 200 面板却是 150"悬案即源于此（150 基础 + 50 加码）。
+        ExtraCredits int64  `json:"extra_credits"`
         Enable    bool   `json:"enable"`
         Code      int32  `json:"code"` // 业务码：0=成功，9074=限流，其他=会话类失败
         Message   string `json:"message"`
@@ -392,6 +407,20 @@ const (
         UgSchemeBearer      = "Bearer"
 )
 
+// ugAppVersion 官方桌面端版本号（v0.12.40 官方签到请求头 x-app-version 携带，
+// 对齐反编译的 TraeWork CN 2.3.81345）。
+const ugAppVersion = "2.3.81345"
+
+// ugCheckinBody 签到类请求（status/claim）统一 body。v0.12.40 官方契约
+// （反编译 TraeWork CN 2.3.81345 out/main.js eb()）:
+//   data = method=="POST" ? {req_source: Dr(P) ? 2 : 1} : void 0
+//   Dr(P) = runMode=="solo-lite"（SOLO 客户端）→ req_source=2
+//   （web 端枚举 {IDE:1, Lite:2}，plain IDE 客户端发 1）。
+// 9074 真因（v0.12.40 定案）：v0.12.34-38 时代我方 claim 发空 {}，官方
+// 2025-09-04 收紧活动校验后拒绝无 req_source 的参与请求，返回通用活动错误
+// 9074（"当前参与用户太多"）；官方客户端同账号正常——与用户实测吻合。
+const ugCheckinBody = `{"req_source":2}`
+
 // ugCheckinSchemes 返回签到请求的鉴权方案优先级。
 func ugCheckinSchemes() []string {
         return []string{UgSchemeCloudIDEJWT, UgSchemeBearer}
@@ -408,6 +437,11 @@ func ugCheckinRequest(a *auth.Auth, method, url, body, scheme string) (*http.Req
                 return nil, err
         }
         ugBaseHeaders(req, a)
+        // v0.12.40: 官方签到额外携带的设备头（out/main.js fb()）。
+        req.Header.Set("x-device-brand", DeviceBrand)
+        req.Header.Set("x-device-type", "windows")
+        req.Header.Set("x-os-version", OSVersion)
+        req.Header.Set("x-app-version", ugAppVersion)
         if scheme == UgSchemeBearer {
                 req.Header.Set("Authorization", "Bearer "+a.JWT()) // 读锁快照
         } else {
@@ -438,13 +472,9 @@ func (c *Client) ugCheckinOnce(a *auth.Auth, method, url, body, scheme string) (
 }
 
 func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
-        url := c.ugBase() + EpCheckinStatus
-        if a.DeviceID != "" {
-                url += "?did=" + a.DeviceID
-        }
         var lastBiz *Error
         for _, scheme := range ugCheckinSchemes() {
-                code, msg, data, err := c.ugCheckinOnce(a, http.MethodGet, url, "", scheme)
+                code, msg, data, err := c.ugCheckinOnce(a, http.MethodPost, c.ugBase()+EpCheckinStatus, ugCheckinBody, scheme)
                 if err != nil {
                         return nil, err
                 }
@@ -466,12 +496,13 @@ func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
 }
 
 // CheckinClaim 执行签到。返回业务码 Code 用于 9074 限流识别。
-// 对齐上游 claim_trae_checkin（trae_account_token_injection.rs:2884-2889）：
-// code!=0 → 错误（领取成功后上游还会重新查一次状态，这里由调用方负责）。
-// v0.12.32: 官方客户端 claim = POST {} + Cloud-IDE-JWT + x-device-id(真实绑定 did)
-// （BlueChonk/trae-credential-reverse-engineering FINDINGS §五 实测到账，
-// trae-mate/traework2api/trae-work-checkin 同构）。响应中的 credits/add_credits/
-// reward 等数值字段作为"入账证据"带回（ClaimCredits），便于诊断"code=0 但未到账"。
+// v0.12.40: 对齐官方客户端契约（反编译 TraeWork CN 2.3.81345
+// claimCheckinCredits()）：POST /trae/api/v2/ug/checkin_credits/claim，
+// body {"req_source":2}（此前空 {}——9074 真因，见 ugCheckinBody 注释），
+// Authorization: Cloud-IDE-JWT + x-device-id（真实绑定 did）+ 设备头。
+// 响应 {code, message}，code!=0 → 错误；领取成功后由调用方重查状态。
+// 响应中的 credits/add_credits/reward 等数值字段作为"入账证据"带回
+// （ClaimCredits），便于诊断"code=0 但未到账"。
 // v0.12.35 曾改 Bearer（照搬 cockpit-tools rs:2859），实测 status 反遭
 // biz_code=1001——其 token 来自官方客户端托管会话，与自走 OAuth 的 token
 // 类别不同，Bearer 经验不可平移（详见 CheckinStatus 上方证据链）。
@@ -489,7 +520,7 @@ type CheckinClaimResult struct {
 func (c *Client) CheckinClaim(a *auth.Auth) (*CheckinClaimResult, error) {
         var lastBiz *Error
         for _, scheme := range ugCheckinSchemes() {
-                code, msg, data, err := c.ugCheckinOnce(a, http.MethodPost, c.ugBase()+EpCheckinClaim, "{}", scheme)
+                code, msg, data, err := c.ugCheckinOnce(a, http.MethodPost, c.ugBase()+EpCheckinClaim, ugCheckinBody, scheme)
                 if err != nil {
                         return nil, err
                 }
