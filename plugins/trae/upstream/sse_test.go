@@ -316,3 +316,53 @@ func TestPrepareBodyToolCallWithoutNameDropped(t *testing.T) {
 		t.Error("tool_call without name should be dropped")
 	}
 }
+
+func TestSanitizeModelNameStripsNamespaceSuffix(t *testing.T) {
+	cases := []struct{ in, variant, want string }{
+		{"Doubao-Seed-2.1-Turbo-solo", "solo", "Doubao-Seed-2.1-Turbo"},
+		{"glm-5.2", "solo", "glm-5.2"},
+		{"glm-5.2", "cn", "glm-5.2"},
+		{"gpt-5.2-intl", "cn", "gpt-5.2"},
+		{"gpt-5.2-intl", "solo", "gpt-5.2"},
+		{"  kimi-k3  ", "solo", "kimi-k3"},
+		{"", "solo", ""},
+		{"x-solo-solo", "solo", "x-solo"}, // namespacing appends exactly one suffix
+	}
+	for _, c := range cases {
+		if got := SanitizeModelName(c.in, c.variant); got != c.want {
+			t.Errorf("SanitizeModelName(%q,%q)=%q want %q", c.in, c.variant, got, c.want)
+		}
+	}
+}
+
+func TestPrepareBodyStripsSoloSuffixFromConfigName(t *testing.T) {
+	out := PrepareBody([]byte(`{"model":"Doubao-Seed-2.1-Turbo-solo","messages":[{"role":"user","content":"hi"}]}`), "solo")
+	var m map[string]any
+	json.Unmarshal(out, &m)
+	if m["config_name"] != "Doubao-Seed-2.1-Turbo" || m["model"] != "Doubao-Seed-2.1-Turbo" {
+		t.Errorf("config_name/model=%v/%v", m["config_name"], m["model"])
+	}
+}
+
+func TestPrepareBodyWhitelistsUpstreamFields(t *testing.T) {
+	in := `{"model":"glm-5.2-solo","messages":[{"role":"user","content":"hi"}],` +
+		`"temperature":0.7,"top_p":0.9,"max_tokens":1024,"stop":"END",` +
+		`"reasoning_effort":"auto","thinking":{"type":"auto"},"stream_options":{"include_usage":true},` +
+		`"user":"u1","metadata":{"a":1},"response_format":{"type":"json_object"},"service_tier":"auto"}`
+	out := PrepareBody([]byte(in), "solo")
+	var m map[string]any
+	json.Unmarshal(out, &m)
+	for _, k := range []string{"temperature", "top_p", "max_tokens", "stop"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("sampled field %s should be forwarded", k)
+		}
+	}
+	for _, k := range []string{"reasoning_effort", "thinking", "stream_options", "user", "metadata", "response_format", "service_tier"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("field %s must NOT reach upstream (whitelist)", k)
+		}
+	}
+	if m["config_name"] != "glm-5.2" || m["function"] != "solo_work_lite" || m["stream"] != true {
+		t.Errorf("core fields=%v/%v/%v", m["config_name"], m["function"], m["stream"])
+	}
+}

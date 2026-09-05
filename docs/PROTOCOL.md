@@ -143,7 +143,9 @@
   - `X-Ide-Version-Code: 20260716` (对应 0.1.52 用 `20260811`)
   - 其他 17 个 X-* 头
 - Body: `{messages, function:"inline_chat", stream:true, config_name:"{model}", model:"{model}"}`
-- SSE 事件: `metadata`, `timing_cost`, `output` (含 response + reasoning_content + tool_calls), `extra_info`, `token_usage`, `done`, `error`
+- Body 白名单 (v0.12.37): 只透传 `messages/function/stream/config_name/model` + `tools/tool_choice`（归一化后）+ 采样参数 `temperature/top_p/max_tokens/presence_penalty/frequency_penalty/seed/n/stop`；其余客户端字段（`reasoning_effort`/`thinking`/`stream_options`/`response_format`/`user`/`metadata` 等）一律丢弃——上游没有原生 thinking 参数（社区实测），agent 字段会触发 4023 "model is unknown"（参考 Ttungx/trae-solo-local-api）
+- 模型命名空间: 插件对外的模型 id 带凭据变体后缀（`-solo`/`-intl`，供宿主路由），发送上游前必须剥离——`config_name` 带后缀会被 SSE 流内 `event:error biz_code=4001 "We're sorry, the param is invalid."` 拒绝，且传输层仍算成功（v0.12.37 修复的 SOLO 全模型 4001 根因）
+- SSE 事件: `metadata`, `timing_cost`, `output` (含 response + reasoning_content + tool_calls), `extra_info`, `token_usage`, `done`, `error`（`event:error` 硬模型错误码: 4001=无效 config_name、4023=未知模型字段、1005=套餐限流）
 
 ### 配额查询 (v2)
 - `POST https://api.trae.cn/trae/api/v2/pay/ide_user_pay_status`

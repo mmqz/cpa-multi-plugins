@@ -134,7 +134,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.36"
+var version = "0.12.37"
 
 var (
         hostAPI *C.cliproxy_host_api
@@ -1770,6 +1770,12 @@ func handleExecStream(request []byte) ([]byte, error) {
                 model = peek.Model
         }
         onSoloErr := func(se *upstream.SOLOStreamError) {
+                // v0.12.37: upstream SSE error events were previously invisible
+                // server-side (only relayed to the client) — log them with the
+                // request identity so biz errors (4001 invalid config_name, 4023,
+                // 1005 plan limit...) are diagnosable from CPA logs.
+                log.Printf("chat_stream uid=%s variant=%s model=%s: upstream SSE error code=%d msg=%s",
+                a.UID, a.Variant, model, se.Code, se.Msg)
                 applyCooldown(a.UID, se.Kind())
         }
 

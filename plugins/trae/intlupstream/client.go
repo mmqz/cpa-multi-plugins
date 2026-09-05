@@ -122,7 +122,11 @@ func resolveMode(model string) (mode, strategy, modelName string) {
 	if m == "" || m == "auto" {
 		return "code", "auto", ""
 	}
-	return "code", "manual", model
+	// v0.12.37: strip the client-facing "-intl" namespace suffix
+	// (intl_main.go appends it to every advertised id). The upstream session
+	// API only knows the bare model name — a suffixed id sent verbatim as
+	// model_name creates the session with an unknown model.
+	return "code", "manual", strings.TrimSuffix(strings.TrimSpace(model), "-intl")
 }
 
 // commonParams builds the common_params JSON string for chat_sessions.

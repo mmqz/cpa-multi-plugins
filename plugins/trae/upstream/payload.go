@@ -84,20 +84,78 @@ func PrepareBody(src []byte, variant string) []byte {
 	}
 
 	model, _ := obj["model"].(string)
-	model = strings.TrimSpace(model)
+	model = SanitizeModelName(model, variant)
 	if model == "" {
 		model = DefaultConfigName
 	}
-	obj["config_name"] = model
-	obj["model"] = model
 
 	normalizeToolChoice(obj)
 	normalizeTools(obj)
-	out, err := json.Marshal(obj)
+
+	// v0.12.37: whitelist passthrough. The upstream llm_utils_chat contract is
+	// minimal — messages/function/stream/config_name/model plus the OpenAI tool
+	// and sampling fields a working community gateway (Ttungx/trae-solo-local-api)
+	// proves are tolerated ("SOLO llm_utils_chat 只稳定接受 messages、function 和
+	// config_name"; its sampling forward list is our allowlist). Everything else
+	// the client sends — reasoning_effort/thinking/stream_options/response_format/
+	// user/metadata/... — is DROPPED: the upstream has no native thinking params,
+	// and agent-specific fields have triggered stream errors (4023 "model is
+	// unknown" for agent_type/device_id/ide_version per the same source).
+	out := make(map[string]any, 16)
+	if msgs, ok := obj["messages"]; ok {
+		out["messages"] = msgs
+	}
+	out["function"] = FunctionFor(variant)
+	out["stream"] = true
+	out["config_name"] = model
+	out["model"] = model
+	if tools, ok := obj["tools"]; ok {
+		out["tools"] = tools
+	}
+	if tc, ok := obj["tool_choice"]; ok {
+		out["tool_choice"] = tc
+	}
+	for _, k := range []string{"temperature", "top_p", "max_tokens",
+		"presence_penalty", "frequency_penalty", "seed", "n"} {
+		if v, ok := obj[k].(float64); ok {
+			out[k] = v
+		}
+	}
+	switch stop := obj["stop"].(type) {
+	case string:
+		out["stop"] = stop
+	case []any:
+		out["stop"] = stop
+	}
+	b, err := json.Marshal(out)
 	if err != nil {
 		return src
 	}
-	return out
+	return b
+}
+
+// SanitizeModelName strips the plugin's client-facing credential-namespace
+// suffix from a model id before the id is sent upstream as config_name.
+//
+// main.go namespaces every advertised model id by credential variant
+// ("-solo" for SOLO credentials, "-intl" for Intl) so the host can never
+// route a chat request across credential classes. The upstream catalog only
+// knows the BARE config name ("Doubao-Seed-2.1-Turbo"): a namespaced id sent
+// verbatim was rejected inside the SSE stream with event:error biz_code=4001
+// "We're sorry, the param is invalid." — this failed EVERY SOLO-variant chat
+// call while the request log still showed the stream as successful (the
+// transport succeeded; only the model was unknown).
+//
+// Only ONE suffix occurrence is stripped (our namespacing appends exactly
+// one), so a genuine upstream model ending in "-solo" still round-trips
+// (advertised "x-solo-solo" → upstream "x-solo").
+func SanitizeModelName(model, variant string) string {
+	m := strings.TrimSpace(model)
+	if variant == "solo" {
+		m = strings.TrimSuffix(m, "-solo")
+	}
+	m = strings.TrimSuffix(m, "-intl")
+	return strings.TrimSpace(m)
 }
 
 // DefaultConfigName 默认模型（glm-5.2，实测可用）。
