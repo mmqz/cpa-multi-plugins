@@ -386,6 +386,9 @@ function card(a){
     (cooling?`<span class="badge cooling" title="${escAttr(pool.reason||"")} ${pool.until?("· until "+esc(String(pool.until).replace('T',' ').replace('Z',' UTC'))):""}">冷却中</span>`:"")+
     (exhausted?`<span class="badge exhausted">耗尽</span>`:"")+
     (checkedIn?`<span class="badge checked">今日已签</span>`:"")+
+    // v0.12.32: 官方 claim 要求 x-device-id（真实绑定 did）；凭证缺 deviceId 时
+    // 服务端可能 code=0 但静默不入账 —— 徽标告警。
+    ((a.device_id_set===false&&!isIntl)?`<span class="badge cooling" title="凭证文件缺少 deviceId，签到可能无法到账；建议用插件 OAuth 重新登录或重新导入带 deviceId 的凭证">缺设备ID</span>`:"")+
     `<span class="${planBadgeClass(plan)}">${esc(plan||"-")}</span>`;
   const btnClass=checkedIn?"done":"sec";
   const btnText=checkedIn?"已签到":"签到";
@@ -717,8 +720,13 @@ function checkinResultToast(res){
   }
   if(res.claim_code!=null||res.claim_message){
     const parts=[];
+    if(res.claim_credits!=null&&res.awarded!=null&&res.claim_credits!==res.awarded) parts.push("响应入账 "+res.claim_credits+" 积分");
     if(res.awarded!=null) parts.push("本次签到 +"+res.awarded+" 积分");
     if(res.credits!=null) parts.push("签到钱包余额 "+res.credits+" 积分");
+    // v0.12.32: code=0 但余额未增长 —— 服务端静默拒签（缺 did/风控/官方客户端已代签）。
+    if(res.awarded===0){
+      toast(name+"：签到返回成功但余额未增长","warn",(parts.join(" · ")||"")+" —— 可能未真正到账，请留意官方客户端余额");return;
+    }
     toast(name+"：签到成功","ok",parts.join(" · ")||res.claim_message||"");return;
   }
   toast(name+"：签到完成","ok",res.claim_message||"");

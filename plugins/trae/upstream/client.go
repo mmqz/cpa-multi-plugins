@@ -392,9 +392,15 @@ func (c *Client) CheckinStatus(a *auth.Auth) (*CheckinStatusResult, error) {
 // CheckinClaim 执行签到。返回业务码 Code 用于 9074 限流识别。
 // 对齐上游 claim_trae_checkin（trae_account_token_injection.rs:2884-2889）：
 // code!=0 → 错误（领取成功后上游还会重新查一次状态，这里由调用方负责）。
+// v0.12.32: 官方客户端 claim = POST {} + Cloud-IDE-JWT + x-device-id(真实绑定 did)
+// （BlueChonk/trae-credential-reverse-engineering FINDINGS §五 实测到账，
+// trae-mate/traework2api/trae-work-checkin 同构）。响应中的 credits/add_credits/
+// reward 等数值字段作为"入账证据"带回（ClaimCredits），便于诊断"code=0 但未到账"。
 type CheckinClaimResult struct {
         Code    int32  `json:"code"`
         Message string `json:"message"`
+        // ClaimCredits 服务端响应里携带的积分入账数额（best-effort 提取，nil=响应未携带）。
+        ClaimCredits *int64 `json:"-"`
 }
 
 func (c *Client) CheckinClaim(a *auth.Auth) (*CheckinClaimResult, error) {
@@ -414,7 +420,38 @@ func (c *Client) CheckinClaim(a *auth.Auth) (*CheckinClaimResult, error) {
         if resp.Code != 0 {
                 return nil, bizError(resp.Code, "签到领取失败")
         }
+        resp.ClaimCredits = pickCreditField(data)
         return &resp, nil
+}
+
+// pickCreditField 从签到 claim 响应中 best-effort 提取入账数额。
+// 已知响应只保证 code/message；官方客户端展示的 +N 积分若在响应里，
+// 会落在 credits / add_credits / reward_credits / credited 等字段（顶层或 data 包一层）。
+func pickCreditField(data []byte) *int64 {
+        var probe map[string]any
+        if err := json.Unmarshal(data, &probe); err != nil {
+                return nil
+        }
+        candidates := []string{"credits", "add_credits", "reward_credits", "credited", "award_credits", "obtain_credits"}
+        for _, prefix := range []string{"", "data"} {
+                var m map[string]any
+                if prefix == "" {
+                        m = probe
+                } else {
+                        inner, ok := probe[prefix].(map[string]any)
+                        if !ok {
+                                continue
+                        }
+                        m = inner
+                }
+                for _, k := range candidates {
+                        if v, ok := m[k].(float64); ok {
+                                n := int64(v)
+                                return &n
+                        }
+                }
+        }
+        return nil
 }
 
 // EntitlementPack represents one entry in user_entitlement_pack_list.

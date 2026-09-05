@@ -112,6 +112,11 @@ func (s *Scheduler) RunCheckinNow() {
 			}
 			status = nil
 		} else if !status.CheckedIn && status.Enable {
+			// v0.12.32: 官方 claim 需要 x-device-id 携带真实绑定 did；缺失时
+			// 服务端可能 code=0 但静默不入账（FINDINGS §四/§五）。提前告警。
+			if a.DeviceID == "" {
+				log.Printf("checkin %s: WARNING auth has no deviceId — claim may be silently dropped (x-device-id missing)", st.UID)
+			}
 			if _, err := s.cfg.Upstream.CheckinClaim(a); err != nil {
 				if isBizRateLimit(err) {
 					log.Printf("checkin %s: claim rate-limited (9074), will retry", st.UID)

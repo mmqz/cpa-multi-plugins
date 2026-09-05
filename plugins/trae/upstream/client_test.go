@@ -441,3 +441,29 @@ func TestPayStatusParsing(t *testing.T) {
 		t.Error("IsFreePlan should not match paid plans")
 	}
 }
+
+// v0.12.32: claim 响应中的入账证据字段提取 —— "code=0 但未到账"诊断链路的一部分。
+func TestPickCreditField(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want *int64
+	}{
+		{"top-level credits", `{"code":0,"credits":150}`, ptr64(150)},
+		{"nested data", `{"code":0,"data":{"add_credits":200}}`, ptr64(200)},
+		{"absent", `{"code":0,"message":"ok"}`, nil},
+		{"non-numeric", `{"code":0,"credits":"150"}`, nil},
+		{"bad json", `not-json`, nil},
+	}
+	for _, tc := range cases {
+		got := pickCreditField([]byte(tc.body))
+		if tc.want == nil && got != nil {
+			t.Errorf("%s: got %v, want nil", tc.name, *got)
+		}
+		if tc.want != nil && (got == nil || *got != *tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.name, got, *tc.want)
+		}
+	}
+}
+
+func ptr64(v int64) *int64 { return &v }

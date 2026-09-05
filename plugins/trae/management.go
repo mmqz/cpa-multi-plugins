@@ -217,6 +217,9 @@ type traeAccount struct {
         Checkin   *traeCheckin `json:"checkin,omitempty"`
         Error     string       `json:"error,omitempty"`
         Variant   string       `json:"variant,omitempty"`
+        // v0.12.32: 凭证文件是否携带 deviceId。官方 claim 要求 x-device-id 携带
+        // 真实绑定 did，缺失时服务端可能静默不入账 —— 面板徽标告警用。
+        DeviceIDSet bool `json:"device_id_set"`
 }
 
 type traeCredits struct {
@@ -289,6 +292,7 @@ func buildDashboard() map[string]any {
                 acct.UID = sa.Account.UID
                 acct.Nickname = sa.Account.Nickname
                 acct.Variant = sa.Variant
+                acct.DeviceIDSet = strings.TrimSpace(sa.Auth.DeviceID) != ""
 
                 // Cached credits / checkin (filled by scheduler + manual endpoints).
                 // v0.12.25: credits < 0 = pack quota never fetched — leave the
@@ -554,6 +558,14 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                 entry["uid"] = sa.Account.UID
                 entry["nickname"] = sa.Account.Nickname
                 a := hostAuthAsUpstream(sa)
+                // v0.12.32: 官方客户端 claim 要求 x-device-id 携带真实绑定的数字 did
+                // （BlueChonk 逆向报告 FINDINGS §四/§五；did 缺失/未绑定时服务端
+                // 可能 code=0 但静默不入账）。导入的账号文件可能缺 deviceId ——
+                // 透出诊断，别让"签到成功但不到账"隐形。
+                entry["device_id_set"] = strings.TrimSpace(a.DeviceID) != ""
+                if strings.TrimSpace(a.DeviceID) == "" {
+                        log.Printf("checkin %s: WARNING auth has no deviceId — claim may be silently dropped (x-device-id missing)", sa.Account.UID)
+                }
                 status, err := upstreamClient.CheckinStatus(a)
                 if err != nil {
                         entry["error"] = "checkin_status: " + err.Error()
@@ -575,6 +587,10 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                         } else {
                                 entry["claim_code"] = claim.Code
                                 entry["claim_message"] = claim.Message
+                                // v0.12.32: 响应中若携带入账数额，作为证据透出。
+                                if claim.ClaimCredits != nil {
+                                        entry["claim_credits"] = *claim.ClaimCredits
+                                }
                                 // 领取成功后重查状态（对齐上游）。
                                 if after, stErr := upstreamClient.CheckinStatus(a); stErr == nil {
                                         if after.Credits >= beforeCredits {
