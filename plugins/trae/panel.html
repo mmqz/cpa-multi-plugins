@@ -712,7 +712,13 @@ function renderSummary(accounts){
 }
 function checkinResultToast(res){
   const name=res.nickname||res.uid||res.auth_index||"账号";
-  if(res.error){toast(name+"：签到失败","err",res.error);return}
+  if(res.error){
+    // v0.12.33: 9074=官方瞬时限流（"参与用户太多，请稍后再试"），插件当日自动退避重试。
+    if(/9074|参与用户太多/.test(res.error)){
+      toast(name+"：签到被官方限流","warn",res.error+" —— 稍后自动重试（10 分钟起退避），也可稍后再手动点一次");return;
+    }
+    toast(name+"：签到失败","err",res.error);return;
+  }
   // v0.12.31: 奖励(res.awarded=签到前后余额差)与钱包余额(res.credits=签到后)
   // 分开显示。旧实现把签到前余额当奖励弹"+150 积分"，与官方 +200 对不上。
   if(res.already_checked_in){

@@ -20,6 +20,7 @@ package main
 import (
         _ "embed"
         "encoding/json"
+        "errors"
         "fmt"
         "log"
         "net/http"
@@ -491,6 +492,18 @@ func creditsFromCache(e *accountCacheEntry) *traeCredits {
 // (empty until handleCreditsQuery fills it).
 func (e *accountCacheEntry) usagePlan() string { return e.plan }
 
+// notifyCheckinRateLimited 把手动签到路径遇到的 9074（官方瞬时限流）交给
+// 调度器进入当日退避重试；非 9074 错误（token 失效等）不重试。
+func notifyCheckinRateLimited(err error) {
+        var ue *upstream.Error
+        if !errors.As(err, &ue) || !upstream.IsRateLimit9074(ue.BizCode) {
+                return
+        }
+        if sched != nil {
+                sched.NotifyCheckinRateLimited()
+        }
+}
+
 // handleManualCheckin triggers checkin for one (auth_index) or all accounts.
 // Body: {"auth_index":"<idx>","uid":"<uid>"} — empty / omitted triggers all.
 // v0.12.28: uid 兼底匹配。凭证文件被 migrate/heal/adopt 改名或宿主管理器
@@ -569,6 +582,7 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                 status, err := upstreamClient.CheckinStatus(a)
                 if err != nil {
                         entry["error"] = "checkin_status: " + err.Error()
+                        notifyCheckinRateLimited(err)
                         results = append(results, entry)
                         continue
                 }
@@ -584,6 +598,8 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
                         claim, err := upstreamClient.CheckinClaim(a)
                         if err != nil {
                                 entry["error"] = "checkin_claim: " + err.Error()
+                                // v0.12.33: 手动签到撞 9074 也纳入当日退避重试（与调度器同节奏）。
+                                notifyCheckinRateLimited(err)
                         } else {
                                 entry["claim_code"] = claim.Code
                                 entry["claim_message"] = claim.Message

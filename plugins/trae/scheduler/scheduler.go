@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/mmqz/cpa-multi-plugins/plugins/trae/pool"
@@ -21,9 +22,27 @@ type Config struct {
 	RefreshSkew  time.Duration // 预刷新窗口，默认 24h
 }
 
+// 9074（"当前参与用户太多，请稍后再试"）是官方瞬时限流，语义为"稍后再试"。
+// 旧实现撞 9074 后只等"下个周期"，而签到周期每天一次（CheckinHour）——
+// 等于整天放弃该账号。v0.12.33 起当日内按指数退避自动重试：
+// 10m→20m→40m→80m→2h（封顶），当日最多 maxCheckinRetries 次；
+// 出现一轮无 9074 或跨天即复位。
+const (
+	baseCheckinRetry     = 10 * time.Minute
+	maxCheckinRetryDelay = 2 * time.Hour
+	maxCheckinRetries    = 8
+)
+
 // Scheduler 调度器。
 type Scheduler struct {
 	cfg Config
+
+	runMu sync.Mutex // 串行化 RunCheckinNow（每日主循环 / 重试定时器可并发进入）
+
+	retryMu      sync.Mutex  // 保护以下重试状态
+	retryTimer   *time.Timer // 待触发的 9074 重试定时器
+	retryAttempt int         // 当日已重试次数
+	retryDay     int         // 上次调度时的 YearDay，跨天复位
 }
 
 // New 构建。
@@ -89,6 +108,11 @@ func contains(hours []int, h int) bool {
 // RunCheckinNow 立即对所有账号执行签到 + 积分刷新 + 解冻。
 // 冷却中的账号也参与（签到就是为了解冻它们）；禁用的跳过。
 func (s *Scheduler) RunCheckinNow() {
+	// v0.12.33: 每日主循环与 9074 重试定时器可能并发进入；串行化避免重复签到请求。
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+
+	rateLimited := 0
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
 			continue
@@ -106,7 +130,8 @@ func (s *Scheduler) RunCheckinNow() {
 		status, err := s.cfg.Upstream.CheckinStatus(a)
 		if err != nil {
 			if isBizRateLimit(err) {
-				log.Printf("checkin %s: rate-limited (9074), will retry next cycle", st.UID)
+				rateLimited++
+				log.Printf("checkin %s: rate-limited (9074), will auto-retry today", st.UID)
 			} else {
 				log.Printf("checkin status %s: %v", st.UID, err)
 			}
@@ -119,7 +144,8 @@ func (s *Scheduler) RunCheckinNow() {
 			}
 			if _, err := s.cfg.Upstream.CheckinClaim(a); err != nil {
 				if isBizRateLimit(err) {
-					log.Printf("checkin %s: claim rate-limited (9074), will retry", st.UID)
+					rateLimited++
+					log.Printf("checkin %s: claim rate-limited (9074), will auto-retry today", st.UID)
 				} else {
 					log.Printf("checkin claim %s: %v", st.UID, err)
 				}
@@ -161,6 +187,56 @@ func (s *Scheduler) RunCheckinNow() {
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain+wallet)
 	}
+
+	// v0.12.33: 本轮有 9074 → 当日指数退避自动重试；无 9074 → 复位并撤销挂起定时器。
+	s.scheduleCheckinRetry(rateLimited)
+}
+
+// checkinRetryDelay 返回第 attempt 次重试的退避时长：10m 起指数翻倍，2h 封顶。
+// attempt 很大时位移动溢出为负，统一归到封顶值。
+func checkinRetryDelay(attempt int) time.Duration {
+	d := baseCheckinRetry << uint(attempt)
+	if d <= 0 || d > maxCheckinRetryDelay {
+		return maxCheckinRetryDelay
+	}
+	return d
+}
+
+// scheduleCheckinRetry 依据本轮 9074 账号数安排当日自动重试。
+// rateLimited==0：复位计数并撤销挂起的重试（本轮全部成功或已签）。
+// 当日预算（maxCheckinRetries）用尽：放弃，等次日主循环再试。
+func (s *Scheduler) scheduleCheckinRetry(rateLimited int) {
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	if rateLimited == 0 {
+		s.retryAttempt = 0
+		if s.retryTimer != nil {
+			s.retryTimer.Stop()
+			s.retryTimer = nil
+		}
+		return
+	}
+	if yday := time.Now().YearDay(); s.retryDay != yday {
+		s.retryDay = yday
+		s.retryAttempt = 0
+	}
+	if s.retryAttempt >= maxCheckinRetries {
+		log.Printf("checkin: %d account(s) still rate-limited (9074), daily retry budget exhausted; next try at daily checkin hour", rateLimited)
+		return
+	}
+	delay := checkinRetryDelay(s.retryAttempt)
+	s.retryAttempt++
+	if s.retryTimer != nil {
+		s.retryTimer.Stop()
+	}
+	log.Printf("checkin: %d account(s) rate-limited (9074), auto-retry in %s (attempt %d/%d)", rateLimited, delay, s.retryAttempt, maxCheckinRetries)
+	s.retryTimer = time.AfterFunc(delay, s.RunCheckinNow)
+}
+
+// NotifyCheckinRateLimited 供手动签到路径（management）复用：手动 claim/status
+// 撞上 9074 时，同样进入当日退避重试节奏，无需用户反复手点。
+func (s *Scheduler) NotifyCheckinRateLimited() {
+	s.scheduleCheckinRetry(1)
 }
 
 // isBizRateLimit 报告 err 是否为上游 9074 业务限流（签到重试语义）。
