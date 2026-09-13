@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.11
+
+### Fix context loss in multi-turn chat & long prompts
+
+- **Check message role**: `rewriteSystemInPlace` and `rewriteSystemForUpstream`
+  now strictly check `role == "system"`. Previously, they scanned all messages
+  including user, assistant, and tool messages, corrupting conversation history.
+- **Remove 2000-byte wholesale replacement**: System prompt content is no longer
+  wiped out and replaced with `neutralPrompt` when exceeding 2000 bytes. Upstream
+  officially supports large contexts (tested up to 100KB+ with HTTP 200).
+- **Targeted template sanitization**: Preserved sensitive keyword replacement
+  (e.g., `"CLI for Claude."` → `"CLI tool for Claude."`) with regex matching,
+  reliably dodging Tencent's WAF (11128 error) without destroying prompt context
+  or instructions.
+- Tests: Added unit tests verifying user/assistant messages and multi-turn context
+  remain 100% untouched.
+
 ## 0.9.10
 
 ### Fix bridged HTTP status decode — dynamic discovery always saw "status 0" (repo v0.12.49)
