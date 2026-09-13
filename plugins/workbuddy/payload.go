@@ -134,9 +134,9 @@ func normalizeToolsInPlace(obj map[string]any) bool {
 
 // rewriteSystemInPlace is the in-place form of rewriteSystemForUpstream.
 // It does three things:
-//  1. For each system message: if length > maxSystemPromptBytes or matches
-//     agentPattern, replace content wholesale with neutralPrompt. Otherwise,
-//     apply sanitizeBlockedTemplates (single-word substitutions).
+//  1. For system messages only: apply sanitizeBlockedTemplates to dodge Tencent's
+//     exact-match blocklist (e.g. Claude Code identity phrase). Non-system messages
+//     (user, assistant, tool) are never modified so context is preserved.
 //  2. Strip reasoning_effort "none"/"off" (Tencent rejects them); mirror
 //     other values to reasoning_summary="auto" (OmniRoute codebuddy-cn.ts).
 //  3. forceMaxThinking for hy3/hy4-family models.
@@ -146,6 +146,10 @@ func rewriteSystemInPlace(obj map[string]any) bool {
         for _, m := range messages {
                 msg, ok := m.(map[string]any)
                 if !ok {
+                        continue
+                }
+                role, _ := msg["role"].(string)
+                if !strings.EqualFold(strings.TrimSpace(role), "system") {
                         continue
                 }
                 if rewriteContentField(msg) {
@@ -370,12 +374,12 @@ func normalizeToolsForUpstream(payload []byte) []byte {
         return out
 }
 
-// rewriteSystemForUpstream neutralizes Claude Code template phrases that
-// Tencent CodeBuddy's content filter blocklists verbatim — the agent identity
-// line ("You are Claude Code, Anthropic's official CLI for Claude.") and the
-// git injection ("Main branch (you will usually use this for PRs)"). Each
+// rewriteSystemForUpstream neutralizes Claude Code template phrases in system
+// messages that Tencent CodeBuddy's content filter blocklists verbatim — the agent
+// identity line ("You are Claude Code, Anthropic's official CLI for Claude.") and
+// the git injection ("Main branch (you will usually use this for PRs)"). Each
 // rewrite is a single-word change so the prompt's meaning is preserved while
-// dodging the exact-match filter.
+// dodging the exact-match filter. Non-system messages are left untouched.
 func rewriteSystemForUpstream(payload []byte) []byte {
         if len(payload) == 0 {
                 return payload
@@ -389,6 +393,10 @@ func rewriteSystemForUpstream(payload []byte) []byte {
         for _, m := range messages {
                 msg, ok := m.(map[string]any)
                 if !ok {
+                        continue
+                }
+                role, _ := msg["role"].(string)
+                if !strings.EqualFold(strings.TrimSpace(role), "system") {
                         continue
                 }
                 if rewriteContentField(msg) {
@@ -485,15 +493,17 @@ func rewriteContentField(msg map[string]any) bool {
         return false
 }
 
-// sanitizeContentText decides between wholesale replacement (neutralPrompt)
-// and template-level single-word substitution. Mirrors OmniRoute codebuddy-cn.ts
-// AGENT_PATTERN + length check.
+// sanitizeContentText applies targeted template-level sanitization to avoid
+// upstream WAF blocks while preserving 100% of the original prompt instructions
+// and context.
 func sanitizeContentText(text string) string {
-        if len(text) > maxSystemPromptBytes || agentPattern.MatchString(text) {
-                return neutralPrompt
-        }
         return sanitizeBlockedTemplates(text)
 }
+
+var (
+        reClaudeCodeCli = regexp.MustCompile(`(?i)anthropic(?:'s)?\s+official\s+cli\s+for\s+claude`)
+        reMainBranchPr  = regexp.MustCompile(`(?i)main\s+branch\s+\(you\s+will\s+usually\s+use\s+this\s+for\s+prs\)`)
+)
 
 func sanitizeBlockedTemplates(s string) string {
         s = strings.ReplaceAll(s,
@@ -502,6 +512,8 @@ func sanitizeBlockedTemplates(s string) string {
         s = strings.ReplaceAll(s,
                 "Main branch (you will usually use this for PRs)",
                 "Default branch (you will usually use this for PRs)")
+        s = reClaudeCodeCli.ReplaceAllString(s, "Anthropic's official CLI tool for Claude")
+        s = reMainBranchPr.ReplaceAllString(s, "Default branch (you will usually use this for PRs)")
         return s
 }
 
