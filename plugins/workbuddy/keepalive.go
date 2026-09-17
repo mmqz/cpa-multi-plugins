@@ -147,7 +147,12 @@ func refreshOneAuth(authIndex, authID string) (string, error) {
 	return "refreshed", nil
 }
 
-// persistAuthTokens writes the updated credential back through the host API.
+// persistAuthTokens writes the updated credential back through the host API,
+// merging into the existing physical document so extra top-level fields
+// written by the management panel (e.g. proxy_url, disabled, note, logo) are
+// preserved. A naive json.Marshal(sa) rebuilds the doc from the storedAuth
+// struct alone and silently drops every unknown field on each token refresh —
+// which is exactly how a saved proxy_url "disappears after a while".
 // The host's file watcher reloads it; we deliberately do NOT dual-write the
 // physical path (same rule as hostAuthPersist).
 func persistAuthTokens(authIndex string, sa *storedAuth) error {
@@ -159,11 +164,37 @@ func persistAuthTokens(authIndex string, sa *storedAuth) error {
 	if name == "" {
 		name = authFileNameFor(sa)
 	}
-	raw, err := json.Marshal(sa)
+	raw, err := mergeStoredAuthIntoDoc(phys.JSON, sa)
 	if err != nil {
 		return err
 	}
 	return hostAuthSaveJSON(name, raw)
+}
+
+// mergeStoredAuthIntoDoc re-marshals the current credential into the existing
+// on-disk document (phys.JSON) without discarding unknown top-level fields.
+// It overwrites only the auth/account objects the plugin owns; any extra
+// panel-managed keys (proxy_url, disabled, and other future fields) survive
+// untouched.
+func mergeStoredAuthIntoDoc(physJSON []byte, sa *storedAuth) ([]byte, error) {
+	doc := map[string]any{}
+	if len(physJSON) > 0 {
+		if err := json.Unmarshal(physJSON, &doc); err != nil {
+			return nil, err
+		}
+	}
+	saRaw, err := json.Marshal(sa)
+	if err != nil {
+		return nil, err
+	}
+	var saMap map[string]any
+	if err := json.Unmarshal(saRaw, &saMap); err != nil {
+		return nil, err
+	}
+	for k, v := range saMap {
+		doc[k] = v // overwrite auth/account with refreshed values; keep the rest
+	}
+	return json.Marshal(doc)
 }
 
 // markSessionDead flags an auth disabled via the host's standard `disabled`
