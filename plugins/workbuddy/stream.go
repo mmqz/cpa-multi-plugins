@@ -456,6 +456,13 @@ func stripDataPrefix(s string) string {
 	for strings.HasPrefix(s, "data:") {
 		s = strings.TrimSpace(strings.TrimPrefix(s, "data:"))
 	}
+	// SSE comment frames (": keep-alive" / ": heartbeat") are legal upstream
+	// keep-alives but must never be re-emitted as "data: ..." events: strict
+	// clients JSON-parse every data: line and "data: : heartbeat" crashes them
+	// with "Unexpected token ':'". Skip any leftover leading-colon line.
+	if strings.HasPrefix(s, ":") {
+		return ""
+	}
 	return s
 }
 
