@@ -54,6 +54,38 @@ func TestPromotionExcludesNonChatModels(t *testing.T) {
 	}
 }
 
+// TestMergeFreeModels locks the free-model guarantee: a discovery payload that
+// omits a still-free promo (upstream table lags the launch) must still
+// advertise it, while an entry already present is left untouched.
+func TestMergeFreeModels(t *testing.T) {
+	base := []pluginapi.ModelInfo{
+		{ID: "gpt-5.6-sol", OwnedBy: providerName},
+	}
+	got := mergeFreeModels(base)
+	ids := discoveryIDs(got)
+	if len(got) != 3 {
+		t.Fatalf("want gpt-5.6-sol + 2 free models, got %v", ids)
+	}
+	if got[0].ID != "gpt-5.6-sol" {
+		t.Fatalf("paid discovery entry must stay first, got %v", ids)
+	}
+	seen := map[string]bool{}
+	for _, m := range got[1:] {
+		seen[m.ID] = true
+		if m.OwnedBy != providerName {
+			t.Fatalf("merged free model %s must own_by provider, got %+v", m.ID, m)
+		}
+	}
+	if !seen["deepseek-v4-flash"] || !seen["deepseek-v4.1-flash"] {
+		t.Fatalf("both free models must be present, got %v", ids)
+	}
+	// Already-present free model must not be duplicated.
+	dedup := mergeFreeModels([]pluginapi.ModelInfo{{ID: "deepseek-v4.1-flash"}})
+	if len(dedup) != 2 {
+		t.Fatalf("existing free model must not duplicate, got %v", discoveryIDs(dedup))
+	}
+}
+
 func TestDiscoverToInfoCapabilities(t *testing.T) {
 	// v3 generation field names + vision + effort levels.
 	m := discoveredModel{

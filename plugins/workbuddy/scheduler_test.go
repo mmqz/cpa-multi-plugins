@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -254,6 +255,138 @@ func TestSchedulerPick_SkipsDisabledCandidates(t *testing.T) {
 	resp2 := parsePickResponse(t, raw2)
 	if resp2.Handled {
 		t.Fatalf("all disabled should defer, got %+v", resp2)
+	}
+}
+
+func resetFreeRoulette(t *testing.T) {
+	t.Helper()
+	freeRouletteMu.Lock()
+	freeRoulette = &wbrr{mu: sync.Mutex{}}
+	freeRouletteMu.Unlock()
+	t.Cleanup(func() {
+		freeRouletteMu.Lock()
+		freeRoulette = &wbrr{mu: sync.Mutex{}}
+		freeRouletteMu.Unlock()
+	})
+}
+
+// Free models bypass credits entirely: an exhausted account may still receive
+// traffic (promo models cost no paid credits), and the picker spreads across
+// all enabled accounts.
+func TestSchedulerPick_FreeModel_SpreadsAcrossAccounts(t *testing.T) {
+	resetActiveAuth(t)
+	resetFreeRoulette(t)
+	// The exhausted account has no credits at all — should still be eligible.
+	accountCache.Store("wb-exhausted", &accountCacheEntry{
+		credits: &creditsSummary{TotalRemain: 0, TotalUsed: 500, TotalSize: 500},
+	})
+	accountCache.Store("wb-ok", &accountCacheEntry{
+		credits: &creditsSummary{TotalRemain: 300, TotalSize: 300},
+	})
+	defer func() {
+		accountCache.Delete("wb-exhausted")
+		accountCache.Delete("wb-ok")
+	}()
+
+	counts := map[string]int{}
+	for i := 0; i < 6; i++ {
+		raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
+			Model:    "deepseek-v4.1-flash",
+			Provider: providerName,
+			Candidates: []pluginapi.SchedulerAuthCandidate{
+				{ID: "wb-exhausted", Provider: providerName},
+				{ID: "wb-ok", Provider: providerName},
+				{ID: "wb-empty", Provider: providerName},
+			},
+		}))
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		resp := parsePickResponse(t, raw)
+		if !resp.Handled {
+			t.Fatalf("free model should be handled, got %+v", resp)
+		}
+		counts[resp.AuthID]++
+	}
+	// Three accounts: round-robin means each appears twice across 6 picks.
+	for _, id := range []string{"wb-exhausted", "wb-ok", "wb-empty"} {
+		if counts[id] != 2 {
+			t.Fatalf("round-robin: %s should be picked 2/6, got %d (%v)", id, counts[id], counts)
+		}
+	}
+}
+
+// Paid models keep the credits-aware picker: an exhausted account must not be
+// used while a funded candidate exists.
+func TestSchedulerPick_PaidModel_SkipsExhausted(t *testing.T) {
+	resetActiveAuth(t)
+	accountCache.Store("wb-exhausted", &accountCacheEntry{
+		credits: &creditsSummary{TotalRemain: 0, TotalUsed: 100, TotalSize: 100},
+	})
+	accountCache.Store("wb-ok", &accountCacheEntry{
+		credits: &creditsSummary{TotalRemain: 300, TotalSize: 300},
+	})
+	defer func() {
+		accountCache.Delete("wb-exhausted")
+		accountCache.Delete("wb-ok")
+	}()
+
+	raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
+		Model:    "gpt-5.6-sol",
+		Provider: providerName,
+		Candidates: []pluginapi.SchedulerAuthCandidate{
+			{ID: "wb-exhausted", Provider: providerName},
+			{ID: "wb-ok", Provider: providerName},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	resp := parsePickResponse(t, raw)
+	if !resp.Handled || resp.AuthID != "wb-ok" {
+		t.Fatalf("paid model wants wb-ok (only funded), got %+v", resp)
+	}
+}
+
+// Non-workbuddy candidates still defer, even for a free model id.
+func TestSchedulerPick_FreeModel_NonWorkbuddyDefers(t *testing.T) {
+	resetActiveAuth(t)
+	resetFreeRoulette(t)
+	raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
+		Model:    "deepseek-v4.1-flash",
+		Provider: "antigravity",
+		Candidates: []pluginapi.SchedulerAuthCandidate{
+			{ID: "ag", Provider: "antigravity"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	resp := parsePickResponse(t, raw)
+	if resp.Handled {
+		t.Fatal("non-workbuddy free-model request should defer")
+	}
+}
+
+// unknown free-model candidate list rebuilds the roulette once and keeps
+// rotating deterministically afterward.
+func TestFreeRoulette_RebuildOnChange(t *testing.T) {
+	r := &wbrr{}
+	if got := r.pick(nil); got != "" {
+		t.Fatalf("expected empty pick, got %q", got)
+	}
+	if got := r.pick([]string{"a", "b", "c"}); got != "a" {
+		t.Fatalf("first pick wants a, got %q", got)
+	}
+	if got := r.pick([]string{"a", "b", "c"}); got != "b" {
+		t.Fatalf("second pick wants b, got %q", got)
+	}
+	// List changed → rebuilt from scratch.
+	if got := r.pick([]string{"x", "y"}); got != "x" {
+		t.Fatalf("rebuilt pick wants x, got %q", got)
+	}
+	if got := r.pick([]string{"x", "y"}); got != "y" {
+		t.Fatalf("next rebuilt pick wants y, got %q", got)
 	}
 }
 

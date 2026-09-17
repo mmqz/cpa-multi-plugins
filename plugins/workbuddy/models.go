@@ -222,76 +222,78 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 		return pinned
 	}
 	if accessToken == "" {
-		st := staticModelsForRealm(realm)
+		st := mergedFreeModels(realm)
 		noteRealmSource(realm, "static (no token in storage)", len(st))
 		return st
 	}
-	if models, ok := cachedDynamicModels(realm); ok {
-		return models
+	if cached, ok := cachedDynamicModels(realm); ok {
+		return cached
 	}
 	dyn, err := discoverModelsFn(accessToken, realm, uid)
 	if err != nil {
 		noteRealmError(realm, err.Error())
-		return staticModelsForRealm(realm)
+		return mergedFreeModels(realm)
 	}
 	if len(dyn) == 0 {
 		noteRealmError(realm, "discovery payload had no user-facing models")
-		return staticModelsForRealm(realm)
+		return mergedFreeModels(realm)
 	}
-	dyn = mergeExternalPromoModels(realm, dyn)
+	dyn = mergeFreeModelsForRealm(dyn, realm)
 	storeDynamicModels(realm, dyn)
 	log.Printf("models: realm=%s discovery ok: %d model(s)", realm, len(dyn))
 	return dyn
 }
 
-// externalPromoModelIDs are models the external (Global/Intl) realms carry
-// even though discovery's per-account enterprise list may lag. DeepSeek
-// V4.1 Flash launched 2026-09-10 with WorkBuddy/CodeBuddy as official launch
-// partner and is FREE for two weeks (deepseek.com news260910); the promo
-// covers the international realms too, but it does not always appear in the
-// enterprise model list of every registered plan at login time, so it is
-// merged into the advertised external catalog (deduped) to keep it
-// selectable instead of being silently hidden behind the dynamic list.
-var externalPromoModelIDs = []string{"deepseek-v4.1-flash"}
-
-// mergeExternalPromoModels appends the always-on external promo models to a
-// dynamically discovered realm catalog, skipping IDs already present. Only
-// applies to the external realms; CN discovery is untouched.
-func mergeExternalPromoModels(realm string, dyn []pluginapi.ModelInfo) []pluginapi.ModelInfo {
-	if realm != "global" && realm != "intl" {
-		return dyn
-	}
-	seen := make(map[string]bool, len(dyn))
-	for _, m := range dyn {
-		seen[strings.ToLower(m.ID)] = true
-	}
-	out := append([]pluginapi.ModelInfo(nil), dyn...)
-	for _, id := range externalPromoModelIDs {
-		if seen[id] {
-			continue
-		}
-		if m, ok := staticModelByID(id); ok {
-			out = append(out, m)
-			seen[id] = true
-		}
-	}
-	return out
+// mergeFreeModels guarantees every free-trial model appears in the advertised
+// list even when the account's discovery payload lags behind a promotional
+// launch (e.g. deepseek-v4.1-flash free since 2026-09-10). A free model
+// costs no credits, so advertising it is safe on accounts whose table omits
+// it; without this, the missing entry makes the gateway answer model_not_found.
+// Discovery stays authoritative for paid models: entries already present are
+// left untouched (their metadata wins), only absent free ids are appended.
+//
+// mergedFreeModels is the same guarantee applied to the static fallback
+// catalog. Every realm's static table must surface the free-trial ids too,
+// otherwise a discovery outage above the realm table alone (e.g.
+// global/hy4-preview) collapses the advertised list and the host registers a
+// thin, inconsistent per-auth model list. mergeFreeModelsForRealm keeps the
+// merge realm-bounded: the CN/global free promos must never leak onto an Intl
+// account (upstream refuses them with 11102).
+func mergedFreeModels(realm string) []pluginapi.ModelInfo {
+	return mergeFreeModelsForRealm(staticModelsForRealm(realm), realm)
 }
 
-// staticModelByID returns the ModelInfo for a known upstream model ID by
-// searching the CN and external static catalogs.
-func staticModelByID(id string) (pluginapi.ModelInfo, bool) {
-	for _, m := range wbModels() {
-		if strings.EqualFold(m.ID, id) {
-			return m, true
+// mergeFreeModelsForRealm merges only the free-trial ids that are valid for
+// the realm. Intl accounts (codebuddy.ai) must never be handed a CN promo
+// model; the dynamic-discovery path shares this guard so a stale Intl table
+// can't advertise a model the upstream account cannot serve.
+func mergeFreeModelsForRealm(models []pluginapi.ModelInfo, realm string) []pluginapi.ModelInfo {
+	if realm == "intl" {
+		return models
+	}
+	return mergeFreeModels(models)
+}
+
+func mergeFreeModels(models []pluginapi.ModelInfo) []pluginapi.ModelInfo {
+	seen := make(map[string]bool, len(models)+len(freeModels))
+	for _, m := range models {
+		if m.ID != "" {
+			seen[strings.ToLower(m.ID)] = true
 		}
 	}
-	for _, m := range staticModelsGlobal() {
-		if strings.EqualFold(m.ID, id) {
-			return m, true
+	for _, id := range freeModelIDs() {
+		if seen[strings.ToLower(id)] {
+			continue
 		}
+		seen[strings.ToLower(id)] = true
+		models = append(models, pluginapi.ModelInfo{
+			ID:                         id,
+			Name:                       id,
+			OwnedBy:                    providerName,
+			SupportedGenerationMethods: []string{"chat"},
+		})
 	}
-	return pluginapi.ModelInfo{}, false
+	return models
 }
 
 // realmModelsState is the dashboard-facing snapshot of one realm's model
@@ -320,14 +322,29 @@ func noteRealmSource(realm, source string, count int) {
 // per-realm throttle: immediately on a NEW message, otherwise at most once a
 // minute (model.for_auth can fire per models query, and silent failure is
 // exactly what made thin/stale model lists undiagnosable).
+//
+// A transient failure must NOT wipe the last successful discovery. The host
+// re-runs model.for_auth per auth over time; blanking models here makes
+// different auths register different lists at different instants, which the
+// host then turns into a shrunken candidate pool for routing (one account
+// seen as the only supporter of a model). Only when nothing was ever cached
+// do we fall over to the static catalog.
 func noteRealmError(realm, msg string) {
 	now := time.Now()
 	dynamicModelsCache.Lock()
 	entry := dynamicModelsCache.realms[realm]
-	fallback := staticModelsForRealm(realm)
-	entry.models = nil
-	entry.source = "static (discovery failed)"
-	entry.srcCount = len(fallback)
+	fallback := mergedFreeModels(realm)
+	// Keep a previously discovered model list: a transient discovery failure
+	// does not make those models invalid, and clearing them would leave host
+	// per-auth registrations divergent (the exact inconsistency that shrank
+	// the candidate pool to one account). On the FIRST failure — nothing
+	// cached yet — we record the static-fallback state so the dashboard shows
+	// where the list came from while we serve the merged static catalog.
+	if len(entry.models) == 0 && entry.fetched.IsZero() {
+		entry.source = "static (discovery failed)"
+		entry.srcCount = len(fallback)
+		entry.fetched = now // mark so a later failure stays "static" until discovery succeeds
+	}
 	entry.lastErr = msg
 	entry.lastErrAt = now
 	shouldLog := entry.lastLogAt.IsZero() || now.Sub(entry.lastLogAt) >= time.Minute
@@ -337,7 +354,7 @@ func noteRealmError(realm, msg string) {
 	dynamicModelsCache.realms[realm] = entry
 	dynamicModelsCache.Unlock()
 	if shouldLog {
-		log.Printf("models: realm=%s discovery failed (%s) — serving static catalog (%d model(s)) until next successful discovery", realm, msg, len(fallback))
+		log.Printf("models: realm=%s discovery failed (%s) — serving previously cached list (or static catalog if none) until next successful discovery", realm, msg)
 	}
 }
 
@@ -1252,12 +1269,17 @@ func handleModelForAuth(raw []byte) ([]byte, error) {
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
 	}
-	// Always return the plugin's canonical provider key. The host skips any
-	// response whose Provider doesn't match the auth's provider, so echoing
+	// Always return provider_registered_key. The host skips any
+	// response whose Provider doesn't match the auth's ProviderID, so echoing
 	// req.AuthProvider back would silently drop the model list whenever the
 	// auth file carries a non-canonical provider string.
 	cacheModelAliases(req.Host)
 	models := fetchDynamicModelsFromStorage(req.StorageJSON)
 	models = filterExcludedModels(models, req.Host)
+	ids := make([]string, 0, len(models))
+	for _, m := range models {
+		ids = append(ids, m.ID)
+	}
+	log.Printf("models: model.for_auth auth=%q provider=%q count=%d ids=%v", req.AuthID, req.AuthProvider, len(models), ids)
 	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: models})
 }

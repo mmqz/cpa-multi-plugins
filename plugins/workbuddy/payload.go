@@ -57,7 +57,8 @@ func prepareUpstreamBody(payload, original []byte, sa *storedAuth, upstreamModel
 	normalizeToolsInPlace(obj)
 
 	// 3. normalizeRoles: map developer/function/tool role to system before
-	// upstream role-whitelist validation. The upstream whitelists roles and
+	// the rest of the pipeline, so the developer-role system instruction is
+	// also subject to the WAF rewrite below. The upstream whitelists roles and
 	// rejects unknown ones (e.g. developer, the OpenAI alias for system) with
 	// HTTP 400 code=11128 "Illegal API invocation from an unapproved channel";
 	// modern harnesses (DeepSeek Harness / Claude Code) send developer as the
@@ -68,18 +69,17 @@ func prepareUpstreamBody(payload, original []byte, sa *storedAuth, upstreamModel
 	// 4. rewriteSystem: strip blocked Claude Code template phrases + force thinking.
 	rewriteSystemInPlace(obj)
 
-	// 4. ensureSystemMessage: inject minimal system msg for Global only.
+	// 5. ensureSystemMessage: inject minimal system msg for Global only.
 	ensureSystemMessageInPlace(obj, sa)
 
-	// 5. rewriteModel: swap client model name to upstream model id.
+	// 6. rewriteModel: swap client model name to upstream model id.
 	rewriteModelInPlace(obj, upstreamModel)
 
-	// 6. injectReasoning: fold historical assistant reasoning_content into
+	// 7. injectReasoning: fold historical assistant reasoning_content into
 	// content as <thought> blocks, because upstream silently drops the
 	// non-standard reasoning_content field on multi-turn history and the
 	// model would otherwise lose short-term memory (issue #5).
 	injectReasoningInPlace(obj)
-
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return src
