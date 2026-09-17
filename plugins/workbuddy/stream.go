@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -68,7 +69,7 @@ func streamHeaders() http.Header {
 // the outbound call and host transport policy applies. The host bridge emits
 // arbitrary 32KB chunks, so we adapt to io.Reader and keep the bufio.Scanner
 // SSE line framing unchanged.
-func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID string, sa *storedAuth) {
+func pumpUpstreamStream(body []byte, chatEPs []string, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID string, sa *storedAuth) {
 	// Always close the host stream exactly once on every exit path.
 	closed := false
 	closeOnce := func() {
@@ -83,54 +84,73 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		defer cancel()
 	}
 
-	stream, statusCode, _, err := hostHTTPDoStream(httpReq)
-	if err != nil {
-		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
-		streamEmitError(streamID, fmt.Sprintf("http_error: %v", err))
-		return
-	}
-	defer stream.Close()
-	if statusCode >= 400 {
-		// Drain the error body via the same bridge so the message is complete.
-		errPayload, _ := io.ReadAll(newHostStreamReader(stream))
-		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(errPayload))
-		if authUID != "" {
-			go reconcileByUID(authUID, statusCode, string(errPayload))
-		}
-		streamEmitError(streamID, translateChatUpstreamError(statusCode, string(errPayload), sa).Error())
-		return
-	}
-	collector := &sseUsageCollector{}
-	scanner := bufio.NewScanner(newHostStreamReader(stream))
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		content := stripDataPrefix(scanner.Text())
-		if content == "" || content == "[DONE]" {
-			continue
-		}
-		collector.feed(content)
-		cleaned := cleanChunkJSON(content)
-		if cleaned == "" {
-			continue
-		}
-		if sseFramed {
-			cleaned = "data: " + cleaned
-		}
-		if err := streamEmit(streamID, []byte(cleaned)); err != nil {
-			// Client disconnected / host closed stream — abort; do not report success.
-			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
+	// Global (console-channel) accounts try /console/chat/completions first and
+	// fall back to /v2/chat/completions only on a 404/405 path fork.
+	for attempt, chatEP := range chatEPs {
+		httpReq, err := http.NewRequest(http.MethodPost, chatEP, bytes.NewReader(body))
+		if err != nil {
+			streamEmitError(streamID, err.Error())
 			return
 		}
-	}
-	// A mid-stream read failure means the client received a truncated stream:
-	// surface it as an error frame and record the attempt as failed.
-	if err := scanner.Err(); err != nil {
-		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, err.Error())
-		streamEmitError(streamID, fmt.Sprintf("upstream stream read error: %v", err))
+		backendHeaders(httpReq, sa)
+		logDumpChatOutbound(chatEP, httpReq, body)
+		stream, statusCode, _, err := hostHTTPDoStream(httpReq)
+		if err != nil {
+			publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
+			streamEmitError(streamID, fmt.Sprintf("http_error: %v", err))
+			return
+		}
+		reader := newHostStreamReader(stream)
+		if statusCode >= 400 {
+			// Drain the error body via the same bridge so the message is complete.
+			errPayload, _ := io.ReadAll(reader)
+			stream.Close()
+			publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(errPayload))
+			if attempt < len(chatEPs)-1 && chatFallbackStatus(statusCode) {
+				log.Printf("workbuddy stream: %s %d -> next endpoint", chatEP, statusCode)
+				continue
+			}
+			if authUID != "" {
+				go reconcileByUID(authUID, statusCode, string(errPayload))
+			}
+			streamEmitError(streamID, translateChatUpstreamError(statusCode, string(errPayload), sa).Error())
+			return
+		}
+		defer stream.Close()
+		collector := &sseUsageCollector{}
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+		for scanner.Scan() {
+			content := stripDataPrefix(scanner.Text())
+			if content == "" || content == "[DONE]" {
+				continue
+			}
+			collector.feed(content)
+			cleaned := cleanChunkJSON(content)
+			if cleaned == "" {
+				continue
+			}
+			if sseFramed {
+				cleaned = "data: " + cleaned
+			}
+			if err := streamEmit(streamID, []byte(cleaned)); err != nil {
+				// Client disconnected / host closed stream — abort; do not report success.
+				publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
+				return
+			}
+		}
+		// A mid-stream read failure means the client received a truncated stream:
+		// surface it as an error frame and record the attempt as failed.
+		if err := scanner.Err(); err != nil {
+			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, err.Error())
+			streamEmitError(streamID, fmt.Sprintf("upstream stream read error: %v", err))
+			return
+		}
+		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), false, 0, "")
+		invalidateAccountCredits(authID, authUID)
 		return
 	}
-	publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), false, 0, "")
-	invalidateAccountCredits(authID, authUID)
+	streamEmitError(streamID, "upstream chat: no endpoint attempted")
 }
 
 // collectUpstreamStream is the synchronous fallback (no async stream id): drain
@@ -138,38 +158,41 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 // non-nil, observes raw upstream chunks for usage extraction. statusCode is the
 // upstream HTTP status (0 for transport-level failures).
 func collectUpstreamStream(body []byte, sa *storedAuth, sseFramed bool, collector *sseUsageCollector) ([]pluginapi.ExecutorStreamChunk, int, error) {
-	httpReq, err := http.NewRequest(http.MethodPost, endpointChatFor(sa), bytes.NewReader(body))
-	if err != nil {
-		return nil, 0, err
-	}
-	backendHeaders(httpReq, sa)
-	// Compliance: route via host.http.do_stream so request-log captures the call.
-	stream, statusCode, _, err := hostHTTPDoStream(httpReq)
-	if err != nil {
-		return nil, 0, fmt.Errorf("http_error: %w", err)
-	}
-	defer stream.Close()
-	reader := newHostStreamReader(stream)
-	if statusCode >= 400 {
-		errPayload, _ := io.ReadAll(reader)
-		if sa != nil && sa.Account.UID != "" {
-			go reconcileByUID(sa.Account.UID, statusCode, string(errPayload))
+	body = clampGlobalReasoningEffort(body, sa)
+	for attempt, chatEP := range chatEndpointCandidates(sa) {
+		httpReq, err := http.NewRequest(http.MethodPost, chatEP, bytes.NewReader(body))
+		if err != nil {
+			return nil, 0, err
 		}
-		return nil, statusCode, translateChatUpstreamError(statusCode, string(errPayload), sa)
+		backendHeaders(httpReq, sa)
+		logDumpChatOutbound(chatEP, httpReq, body)
+		// Compliance: route via host.http.do_stream so request-log captures the call.
+		stream, statusCode, _, err := hostHTTPDoStream(httpReq)
+		if err != nil {
+			return nil, 0, fmt.Errorf("http_error: %w", err)
+		}
+		reader := newHostStreamReader(stream)
+		if statusCode >= 400 {
+			errPayload, _ := io.ReadAll(reader)
+			stream.Close()
+			if attempt < len(chatEndpointCandidates(sa))-1 && chatFallbackStatus(statusCode) {
+				continue
+			}
+			if sa != nil && sa.Account.UID != "" {
+				go reconcileByUID(sa.Account.UID, statusCode, string(errPayload))
+			}
+			return nil, statusCode, translateChatUpstreamError(statusCode, string(errPayload), sa)
+		}
+		stream.Close()
+		chunks, errAgg := aggregateSSEWithCollector(reader, sseFramed, collector)
+		if errAgg != nil {
+			return chunks, statusCode, errAgg
+		}
+		return chunks, statusCode, nil
 	}
-	chunks, errAgg := aggregateSSEWithCollector(reader, sseFramed, collector)
-	if errAgg != nil {
-		return chunks, statusCode, errAgg
-	}
-	return chunks, statusCode, nil
+	return nil, 0, fmt.Errorf("upstream chat: no endpoint attempted")
 }
 
-// clientNeedsSSEFrame reports whether chunk payloads must carry their own
-// "data: " SSE framing. CPA's chat-completions passthrough adds the prefix
-// itself, but every cross-format response translator (claude/gemini/codex/...)
-// only consumes payloads already framed as "data: " lines. The host hands the
-// plugin the inbound request path in Metadata, so we frame chunks ourselves for
-// any entry path other than the native OpenAI chat-completions one.
 func clientNeedsSSEFrame(metadata map[string]any) bool {
 	path, _ := metadata["request_path"].(string)
 	switch strings.ToLower(strings.TrimSpace(path)) {

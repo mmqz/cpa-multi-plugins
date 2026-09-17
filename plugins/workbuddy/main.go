@@ -60,9 +60,12 @@ import "C"
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -91,6 +94,14 @@ const (
 	originReferer       = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
 	originRefererIntl   = "https://www.codebuddy.ai"
+	// WorkBuddy desktop client fingerprint (mirrors Sliverkiss/workbuddy2api's
+	// injectAttribution + defaultWorkBuddyUAFor). The global gateway's security
+	// gate rejects requests that do not carry the official desktop shape with
+	// 400 code 11128 "Illegal API invocation from an unapproved channel" — for
+	// EVERY model, regardless of reasoning depth or login platform. Replicating
+	// the desktop client's UA + header family is the approved-channel identity.
+	desktopVersionWB = "5.5.4"
+	desktopCLIWB     = "2.137.1"
 
 	// CN endpoint aliases (login / chat / models). upstreamBaseCN is the only
 	// CN base; Global has its own upstreamBaseGlobal. No "upstreamBase" legacy
@@ -345,18 +356,18 @@ func wbRegistration() registration {
 			GitHubRepository: "https://github.com/Sliverkiss/cpa-plugin",
 			Logo:             pluginLogoURL,
 			ConfigFields: []pluginapi.ConfigField{
-				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 09:00 and 21:00 local time for CN accounts (default true)."},
-				{Name: "lifecycle_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Auto disable CN / delete Global when credits exhausted; re-enable CN after check-in restores credits (default true)."},
-				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily access-token refresh at 22:00 local time to prevent Keycloak offline-session expiry (default true)."},
-				{Name: "login_platform", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"CLI", "ide"}, Description: "Client variant used for NEW logins: CLI (WorkBuddy, default) or ide (CodeBuddy IDE). Existing accounts keep the platform recorded at login/import time."},
-				{Name: "login_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl"}, Description: "Realm for NEW logins: cn (copilot.tencent.com, default) or intl (codebuddy.ai, IDE client; merged codebuddy-intl plugin). Global (workbuddy.ai) accounts are added via panel credential import."},
-				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning. NOTE: for realm-scoped pinning use models_cn / models_global / models_intl below."},
-				{Name: "models_cn", Type: pluginapi.ConfigFieldTypeString, Description: "Leave empty (recommended): each CN account then supports exactly what copilot.tencent.com returns for its credential token (5-min cache). Optional comma-separated upstream model IDs to pin/override the CN model output."},
-				{Name: "models_global", Type: pluginapi.ConfigFieldTypeString, Description: "Leave empty (recommended): each Global account then supports exactly what workbuddy.ai returns for its credential token (5-min cache). Optional comma-separated upstream model IDs to pin/override the Global model output."},
-				{Name: "models_intl", Type: pluginapi.ConfigFieldTypeString, Description: "Leave empty (recommended): each Intl account then supports exactly what codebuddy.ai returns for its credential token (5-min cache) - no pre-filled guessing, so unsupported models are never advertised or routed. Optional comma-separated upstream model IDs to pin/override the Intl model output."},
-				{Name: "scheduler_mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{schedulerModeOff, schedulerModeCredits}, Description: "Multi-account selection: off (defer to built-in, default) or credits (pick highest remaining). WARNING: when off + lifecycle_auto=false, exhausted accounts may still be routed — enable lifecycle_auto or set scheduler_mode=credits."},
-				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional override of CPAMP usage import URL (default http://cpa-manager-plus:18317/v0/management/usage/import; also env USAGE_REPORT_URL)."},
-				{Name: "usage_report_key", Type: pluginapi.ConfigFieldTypeString, Description: "Optional CPAMP admin key override. Prefer auto-detect from env CPAMP_ADMIN_KEY / USAGE_REPORT_KEY or secret file /run/secrets/cpamp_admin_key."},
+				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "【自动签到】启用 CN 账号每日自动签到：本地时间 09:00 与 21:00 各一次（默认开启）。"},
+				{Name: "lifecycle_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "【自动运营】自动管理生命周期：CN 余额耗尽自动禁用、Global 余额耗尽自动删除；CN 签到恢复积分后自动重新启用（默认开启）。"},
+				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "【令牌保活】每天 22:00 自动刷新访问令牌，避免 Keycloak 离线会话过期导致失效（默认开启）。"},
+				{Name: "login_platform", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"CLI", "ide"}, Description: "【登录形态】新登录采用的客户端形态：CLI（WorkBuddy，默认）或 ide（CodeBuddy IDE）。已存在的账号沿用登录/导入时记录的形态，不受此字段影响。"},
+				{Name: "login_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl", "global"}, Description: "【账号区域】新登录的账号归属区域：cn（copilot.tencent.com，默认）、intl（codebuddy.ai，IDE 客户端；与 codebuddy-intl 插件合并）或 global（workbuddy.ai）。Global 使用同一套 CLI 登录协议对接 workbuddy.ai；登录后插件会自动完成境外注册激活，并领取一次性试用积分包（幂等）。"},
+				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "【模型列表】可选模型列表。每个条目可包含 id、name、alias、context、max_tokens、enabled、reasoning 字段。注意：要按区域固定模型，请使用下方的 models_cn / models_global / models_intl。"},
+				{Name: "models_cn", Type: pluginapi.ConfigFieldTypeString, Description: "【CN 模型】留空（推荐）：每个 CN 账号会按 copilot.tencent.com 对其凭证 Token 实际返回的模型来展示（5 分钟缓存）。也可填入逗号分隔的上游模型 ID，用于固定或覆盖 CN 模型的输出。"},
+				{Name: "models_global", Type: pluginapi.ConfigFieldTypeString, Description: "【Global 模型】留空（推荐）：每个 Global 账号会按 workbuddy.ai 对其凭证 Token 实际返回的模型来展示（5 分钟缓存）。也可填入逗号分隔的上游模型 ID，用于固定或覆盖 Global 模型的输出。"},
+				{Name: "models_intl", Type: pluginapi.ConfigFieldTypeString, Description: "【Intl 模型】留空（推荐）：每个 Intl 账号会按 codebuddy.ai 对其凭证 Token 实际返回的模型来展示（5 分钟缓存），不预填猜测值，避免把不支持的模型暴露给客户端。也可填入逗号分隔的上游模型 ID，用于固定或覆盖 Intl 模型的输出。"},
+				{Name: "scheduler_mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{schedulerModeOff, schedulerModeCredits}, Description: "【调度策略】多账号选择策略：allowed（交给内置默认路由，默认）或 credits（优先选择剩余量最多的账号）。警告：当设为 allowed 且 lifecycle_auto=false 时，仍可能路由到余额已耗尽的账号——请开启 lifecycle_auto 或改用 credits。"},
+				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "【用量上报地址】用量上报导入地址的可选覆盖值（默认 http://cpa-manager-plus:18317/v0/management/usage/import；也可用环境变量 USAGE_REPORT_URL 指定）。"},
+				{Name: "usage_report_key", Type: pluginapi.ConfigFieldTypeString, Description: "【管理密钥】CPAMP 管理员密钥的可选覆盖值的可选覆盖值。优先自动检测环境变量 CPAMP_ADMIN_KEY / USAGE_REPORT_KEY 或密钥文件 /run/secrets/cpamp_admin_key。"},
 			},
 		},
 		Capabilities: registrationCapability{
@@ -572,6 +583,34 @@ func endpointChatFor(sa *storedAuth) string {
 	return upstreamBaseFor(sa) + "/v2/chat/completions"
 }
 
+// chatEndpointCandidates returns the chat completion paths to try, in order,
+// for the request's account.
+//
+// Global (workbuddy.ai) accounts hold a "console" OAuth session: the web /
+// desktop client is authenticated against the console channel, so its chat
+// must go to the console-domain endpoint /console/chat/completions — sending
+// it to the CLI-channel /v2/chat/completions makes the gate answer 400
+// {"code":11128,"msg":"Illegal API invocation from an unapproved channel"}
+// for EVERY model (verified live against a workbuddy.global account, 2026-09).
+// The old/new API path fork means the console path may 404/405 on some
+// gateways; the fallback follows the reference workbuddy2api (PLAN R9):
+// [console, v2], stop at any other status.
+func chatEndpointCandidates(sa *storedAuth) []string {
+	if isGlobalDomain(sa.Auth.Domain) {
+		return []string{
+			upstreamBaseGlobal + "/console/chat/completions",
+			upstreamBaseFor(sa) + "/v2/chat/completions",
+		}
+	}
+	return []string{endpointChatFor(sa)}
+}
+
+// chatFallbackStatus reports whether an upstream chat status should try the
+// next candidate endpoint (the 404/405 old-vs-new path fork).
+func chatFallbackStatus(status int) bool {
+	return status == http.StatusNotFound || status == http.StatusMethodNotAllowed
+}
+
 func endpointTokenRefreshFor(sa *storedAuth) string {
 	return upstreamBaseFor(sa) + "/v2/plugin/auth/token/refresh"
 }
@@ -616,6 +655,126 @@ func backendHeaders(req *http.Request, sa *storedAuth) {
 	origin := originRefererFor(sa)
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
+	// Global workbuddy.ai chat must present the official desktop identity
+	// (11128 channel gate) — see applyGlobalWorkbuddyIdentity below.
+	applyGlobalWorkbuddyIdentity(req, sa)
+}
+
+// newRequestID32 returns a 32-char lowercase hex string (crypto-rand derived),
+// matching the official client's message/request id format used by the
+// X-Conversation-* and B3 tracing header family.
+func newRequestID32() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failure — fall back to a hex-shape id (B3 needs 16/32 hex).
+		now := time.Now().UnixNano()
+		return fmt.Sprintf("%016x%016x", now, uint64(now)^0x9e3779b97f4a7c15)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// applyGlobalWorkbuddyIdentity stamps GLOBAL (workbuddy.ai) chat requests with
+// the official WorkBuddy desktop fingerprint that the upstream business gate
+// approves; without it every model — regardless of reasoning depth or login
+// platform — is rejected 400 code 11128 "Illegal API invocation from an
+// unapproved channel". Only the global realm is rewritten: CN keeps its CLI
+// identity and intl its codebuddy-IDE profile, preserving their approvals.
+func applyGlobalWorkbuddyIdentity(req *http.Request, sa *storedAuth) {
+	if sa == nil || !isGlobalDomain(sa.Auth.Domain) {
+		return
+	}
+	// Desktop client UA (workbuddy2api defaultWorkBuddyUAFor, global form).
+	req.Header.Set("User-Agent", "WorkBuddy/"+desktopVersionWB+" WorkBuddy AI/"+desktopVersionWB+" CLI/"+desktopCLIWB)
+	// Attribution family (workbuddy2api injectAttribution).
+	req.Header.Set("X-Agent-Purpose", "conversation")
+	req.Header.Set("X-IDE-Name", "WorkBuddy")
+	req.Header.Set("X-IDE-Type", "WorkBuddy")
+	req.Header.Set("X-IDE-Version", desktopVersionWB)
+	req.Header.Set("X-Product", "WorkBuddy")
+	// Conversation/trace family (official client stamps these per round).
+	convReq := newRequestID32()
+	msgID := convReq // one message per upstream call (SSE is folded to one completion)
+	trace := convReq
+	b3Trace := convReq
+	if !validB3Hex(b3Trace) {
+		b3Trace = msgID
+	}
+	req.Header.Set("X-Conversation-Request-ID", convReq)
+	req.Header.Set("X-Conversation-Message-ID", msgID)
+	req.Header.Set("X-Request-ID", msgID)
+	req.Header.Set("X-Root-Request-ID", convReq)
+	req.Header.Set("X-Trace-ID", trace)
+	req.Header.Set("X-B3-TraceId", b3Trace)
+	req.Header.Set("X-B3-SpanId", msgID[:len(msgID)/2])
+	req.Header.Set("X-B3-Sampled", "1")
+}
+
+// validB3Hex reports whether s is a B3-compatible trace id (16 or 32 hex).
+func validB3Hex(s string) bool {
+	if len(s) != 16 && len(s) != 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// logDumpChatOutbound prints a one-line, credential-redacted trace of an
+// outbound chat request so we can see which path/headers the plugin actually
+// uses. NEVER logs the Authorization header or the message body.
+func logDumpChatOutbound(chatEP string, req *http.Request, body []byte) {
+	model := "-"
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err == nil {
+		if s, ok := m["model"].(string); ok {
+			model = s
+		}
+	}
+	hk := func(k string) string {
+		if v := req.Header.Get(k); v != "" {
+			return k + "=" + v
+		}
+		return k + "=∅"
+	}
+	log.Printf("wb-chat outbound: url=%s model=%s | %s %s %s %s %s %s %s",
+		chatEP, model,
+		hk("User-Agent"), hk("Origin"), hk("X-Domain"), hk("X-User-Id"),
+		hk("X-Agent-Purpose"), hk("X-IDE-Type"), hk("X-Product"))
+}
+
+// clampGlobalReasoningEffort aligns the chat body for the global
+// (workbuddy.ai) console channel, mirroring workbuddy2api's effort clamp:
+// the realm only accepts reasoning_effort="high" (no low/max tier — sending
+// low/max upstream returns 4xx), so any non-"high" value is clamped to "high".
+// The global console-channel system-message guarantee is handled separately by
+// ensureSystemMessageInPlace in prepareUpstreamBody (the same guard as
+// wb2api's ensureConsoleSystem). Non-global / unparseable bodies return as-is.
+func clampGlobalReasoningEffort(body []byte, sa *storedAuth) []byte {
+	if len(body) == 0 || sa == nil || !isGlobalDomain(sa.Auth.Domain) {
+		return body
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	if e, ok := obj["reasoning_effort"]; ok {
+		if s, ok2 := e.(string); !ok2 || (s != "" && !strings.EqualFold(s, "high")) {
+			obj["reasoning_effort"] = "high"
+		}
+	}
+	// Drop thinking-level styles not valid on this realm.
+	for _, k := range []string{"thinking_level", "budget_tokens"} {
+		delete(obj, k)
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 // -----------------------------------------------------------------------------
@@ -764,32 +923,45 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	// prepareUpstreamBody does forceStream + normalizeTools + rewriteSystem +
 	// ensureSystemMessage + rewriteModel in ONE unmarshal/marshal pass.
 	body := prepareUpstreamBody(req.Payload, req.OriginalRequest, sa, upstreamModel)
-	httpReq, err := http.NewRequest(http.MethodPost, endpointChatFor(sa), bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	backendHeaders(httpReq, sa)
-	// Compliance: route via host.http.do_stream so request-log captures the
-	// outbound call. Read entire body via the bridge, then fold SSE → completion.
-	stream, statusCode, _, err := hostHTTPDoStream(httpReq)
-	if err != nil {
-		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
-		return nil, fmt.Errorf("http_error: %w", err)
-	}
-	defer stream.Close()
-	reader := newHostStreamReader(stream)
-	if statusCode >= 400 {
-		payload, _ := io.ReadAll(reader)
-		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
-		reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
-		// v0.12.18: 11102 model-catalog rejections become a bilingual,
-		// realm-aware actionable error; other failures keep the raw shape.
-		return nil, translateChatUpstreamError(statusCode, string(payload), sa)
-	}
-	completion, err := aggregateCompletion(reader, req.Model)
-	if err != nil {
-		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
-		return nil, err
+	body = clampGlobalReasoningEffort(body, sa)
+	// Global (console-channel) accounts must call /console/chat/completions;
+	// 404/405 falls back to /v2/chat/completions. Other realms use /v2 only.
+	var completion []byte
+	for attempt, chatEP := range chatEndpointCandidates(sa) {
+		httpReq, err := http.NewRequest(http.MethodPost, chatEP, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		backendHeaders(httpReq, sa)
+		logDumpChatOutbound(chatEP, httpReq, body)
+		// Compliance: route via host.http.do_stream so request-log captures the
+		// outbound call. Read entire body via the bridge, then fold SSE → completion.
+		stream, statusCode, _, err := hostHTTPDoStream(httpReq)
+		if err != nil {
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
+			return nil, fmt.Errorf("http_error: %w", err)
+		}
+		reader := newHostStreamReader(stream)
+		if statusCode >= 400 {
+			payload, _ := io.ReadAll(reader)
+			stream.Close()
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
+			if attempt < len(chatEndpointCandidates(sa))-1 && chatFallbackStatus(statusCode) {
+				log.Printf("workbuddy chat: %s %d -> next endpoint", chatEP, statusCode)
+				continue
+			}
+			reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
+			// v0.12.18: 11102 model-catalog rejections become a bilingual,
+			// realm-aware actionable error; other failures keep the raw shape.
+			return nil, translateChatUpstreamError(statusCode, string(payload), sa)
+		}
+		completion, err = aggregateCompletion(reader, req.Model)
+		stream.Close()
+		if err != nil {
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
+			return nil, err
+		}
+		break
 	}
 	publishUsage(req.Model, upstreamModel, authUID, started, usageDetailFromCompletion(completion), false, 0, "")
 	invalidateAccountCredits(req.AuthID, authUID)
@@ -825,6 +997,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	}
 	// Single-pass JSON rewrite (see handleExecExecute for the non-stream path).
 	body = prepareUpstreamBody(body, nil, sa, upstreamModel)
+	body = clampGlobalReasoningEffort(body, sa)
 
 	headers := streamHeaders()
 	sseFramed := clientNeedsSSEFrame(req.Metadata)
@@ -848,15 +1021,8 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	// client disconnects — otherwise the pump keeps reading a dead upstream until
 	// sharedHTTPClient's 120s timeout, holding a pool slot the whole time.
 	ctx, cancel := context.WithCancel(context.Background())
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointChatFor(sa), bytes.NewReader(body))
-	if err != nil {
-		cancel()
-		streamEmitError(req.StreamID, err.Error())
-		streamClose(req.StreamID)
-		return okEnvelope(streamResponse{Headers: headers})
-	}
-	backendHeaders(httpReq, sa)
-	go pumpUpstreamStream(httpReq, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, sa)
+	_ = ctx // pump builds its own per-endpoint requests; cancel below only guards it
+	go pumpUpstreamStream(body, chatEndpointCandidates(sa), cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, sa)
 	return okEnvelope(streamResponse{Headers: headers})
 }
 

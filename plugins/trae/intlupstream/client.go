@@ -46,16 +46,6 @@ const (
 
 	// Default base URL (Web SOLO remote API)
 	DefaultBase = "https://core-normal.trae.ai/api/remote/v1"
-
-	// DefaultWebOrigin is the web client origin sent as Origin/Referer on
-	// every chat-session call. Trae's web client moved from solo.trae.ai to
-	// work.trae.ai (SOLO now lives under the TraeWork product surface) and
-	// the backend validates Origin/Referer against the JWT session's real
-	// origin — a stale value yields a clean 401 even with a fresh token
-	// (same root cause as OmniRoute #12190, 2026-09 confirmed). Overridable
-	// per account via Auth.RefererOrigin for credentials still bound to
-	// the legacy host.
-	DefaultWebOrigin = "https://work.trae.ai"
 )
 
 // Auth holds Trae Intl credentials.
@@ -80,11 +70,6 @@ type Auth struct {
 	Region       string // "US-East"
 	AppLanguage  string // "en"
 	AppVersion   string // "1.0.0.1229"
-
-	// RefererOrigin optionally overrides the Origin/Referer web origin
-	// (DefaultWebOrigin when empty). Providers mirroring an auth file that
-	// was captured against the legacy solo.trae.ai host can pin it here.
-	RefererOrigin string
 }
 
 // Client is the Trae Intl upstream client.
@@ -112,11 +97,6 @@ func New() *Client {
 }
 
 // buildHeaders constructs the Web SOLO remote headers.
-//
-// v0.12.47: Origin/Referer now default to https://work.trae.ai — the backend
-// rejects chat-session calls whose origin does not match the JWT session's
-// real origin with a bare 401 (checkin/billing endpoints do not validate
-// them, which is why check-in kept working while chat broke).
 func buildHeaders(a *Auth) http.Header {
 	h := http.Header{}
 	h.Set("Authorization", "Cloud-IDE-JWT "+a.AccessToken)
@@ -124,9 +104,7 @@ func buildHeaders(a *Auth) http.Header {
 	h.Set("X-Trae-Client-Type", "web")
 	h.Set("X-Preferenced-Language", nonEmpty(a.AppLanguage, "en"))
 	h.Set("x-user-region", nonEmpty(a.Region, "US"))
-	origin := strings.TrimRight(nonEmpty(a.RefererOrigin, DefaultWebOrigin), "/")
-	h.Set("Origin", origin)
-	h.Set("Referer", origin+"/")
+	h.Set("Referer", "https://solo.trae.ai/")
 	h.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
 	return h
 }

@@ -145,8 +145,8 @@ func handleClaimTrial(req pluginapi.ManagementRequest) map[string]any {
 		if err != nil {
 			return map[string]any{"auth_index": authIndex, "error": err.Error()}
 		}
-		if !isGlobalDomain(sa.Auth.Domain) {
-			return map[string]any{"auth_index": authIndex, "error": "专家加油包仅适用于国际版账号"}
+		if !isGlobalDomain(sa.Auth.Domain) && !isIntlDomain(sa.Auth.Domain) {
+			return map[string]any{"auth_index": authIndex, "error": "专家加油包仅适用于外区账号（workbuddy.ai global / codebuddy.ai intl）"}
 		}
 		res, err := performTrialCall(sa)
 		out := map[string]any{"auth_index": authIndex, "nickname": sa.Account.Nickname}

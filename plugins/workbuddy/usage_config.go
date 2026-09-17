@@ -28,8 +28,8 @@ var (
 	loginPlatformMu sync.RWMutex
 
 	// loginRegion selects the upstream realm for NEW logins: "cn"
-	// (copilot.tencent.com, default) or "intl" (codebuddy.ai, IDE client;
-	// merged codebuddy-intl plugin v0.11.0).
+	// (copilot.tencent.com, default), "intl" (codebuddy.ai, IDE client;
+	// merged codebuddy-intl plugin v0.11.0) or "global" (workbuddy.ai).
 	loginRegion   = regionCN
 	loginRegionMu sync.RWMutex
 
@@ -147,6 +147,8 @@ func configure(raw []byte) {
 					v = strings.Trim(v, "\"'")
 					if strings.EqualFold(v, "intl") {
 						nextLoginRegion = regionIntl
+					} else if strings.EqualFold(v, "global") {
+						nextLoginRegion = regionGlobal
 					}
 				}
 				if strings.HasPrefix(line, "token_keepalive:") {

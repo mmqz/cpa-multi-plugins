@@ -54,18 +54,38 @@ func wbModels() []pluginapi.ModelInfo {
 // models_intl config pins; a false positive (model listed but not registered
 // upstream) is a hard upstream 400 code 11102 "model [...] service info not
 // found". So the non-CN catalogs only carry models with direct upstream
-// evidence, and CN brand models (deepseek-v4-*, glm-*, kimi-*, minimax-*,
-// hy3*) stay out of them even though they dominate the CN catalog.
+// evidence: deepseek-v4-pro/-flash (non-4.1) and minimax-* stay out even
+// though they dominate the CN catalog, while hy3/glm/kimi appear in the
+// external ones below because the live /v2 enterprise endpoints list them
+// there, and deepseek-v4.1-flash is included per the 2026-09-10 official
+// launch promotion (free 2 weeks, covers international realms too).
 //
-// Evidence for intl/global hy4-preview: Tencent's 2026-08-28 Hy4 Preview
-// launch covers WorkBuddy/CodeBuddy CN AND international editions (official
-// announcement; upstream API id "hy4-preview"). Community sessions on the
-// intl CLI additionally show claude/gpt/gemini families, but their exact
-// upstream IDs could not be verified without a live intl token — add them
-// via the models_intl / models_global config pins instead of guessing here.
+// Evidence: the external (Global/Intl) REAL user-facing catalog was captured
+// live from the workbuddy.ai/v2 and codebuddy.ai/v2 enterprise endpoints
+// (GET .../v2/enterprises/personal/models, HTTP 200) alongside the reference
+// workbuddy2api project's static external list. The ids below are exactly
+// what those external realms advertise — they are the actual model engines
+// (OpenAI gpt-5.x family, Gemini, GLM, Kimi, Hunyuan, DeepSeek) rather than
+// the IDE display-only tier slots (default-model/fast-model/...), which stay
+// out of this STATIC fallback because they have a history of upstream 11102
+// on some plans. Dynamic discovery still surfaces the tier slots live when
+// the upstream itself returns them.
 func staticModelsGlobal() []pluginapi.ModelInfo {
 	return []pluginapi.ModelInfo{
 		{ID: "hy4-preview", Name: "Hy4 Preview", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "hy3", Name: "Hy3", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "deepseek-v4.1-flash", Name: "DeepSeek V4.1 Flash", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "gpt-5.6-sol", Name: "GPT-5.6 Sol", ContextLength: 304000, MaxCompletionTokens: 56000, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", ContextLength: 304000, MaxCompletionTokens: 56000, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "gpt-5.6-luna", Name: "GPT-5.6 Luna", ContextLength: 304000, MaxCompletionTokens: 56000, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "gpt-5.5", Name: "GPT-5.5", ContextLength: 272000, MaxCompletionTokens: 32800, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "gpt-5.4", Name: "GPT-5.4", ContextLength: 272000, MaxCompletionTokens: 32800, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "gpt-5.3-codex", Name: "GPT-5.3 Codex", ContextLength: 256000, MaxCompletionTokens: 28000, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "gemini-3.5-flash", Name: "Gemini 3.5 Flash", ContextLength: 1000000, MaxCompletionTokens: 65536, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "glm-5.3", Name: "GLM-5.3", ContextLength: 131072, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "glm-5.2", Name: "GLM-5.2", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "kimi-k3", Name: "Kimi K3", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
+		{ID: "kimi-k2.6", Name: "Kimi K2.6", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 	}
 }
 
@@ -218,9 +238,60 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 		noteRealmError(realm, "discovery payload had no user-facing models")
 		return staticModelsForRealm(realm)
 	}
+	dyn = mergeExternalPromoModels(realm, dyn)
 	storeDynamicModels(realm, dyn)
 	log.Printf("models: realm=%s discovery ok: %d model(s)", realm, len(dyn))
 	return dyn
+}
+
+// externalPromoModelIDs are models the external (Global/Intl) realms carry
+// even though discovery's per-account enterprise list may lag. DeepSeek
+// V4.1 Flash launched 2026-09-10 with WorkBuddy/CodeBuddy as official launch
+// partner and is FREE for two weeks (deepseek.com news260910); the promo
+// covers the international realms too, but it does not always appear in the
+// enterprise model list of every registered plan at login time, so it is
+// merged into the advertised external catalog (deduped) to keep it
+// selectable instead of being silently hidden behind the dynamic list.
+var externalPromoModelIDs = []string{"deepseek-v4.1-flash"}
+
+// mergeExternalPromoModels appends the always-on external promo models to a
+// dynamically discovered realm catalog, skipping IDs already present. Only
+// applies to the external realms; CN discovery is untouched.
+func mergeExternalPromoModels(realm string, dyn []pluginapi.ModelInfo) []pluginapi.ModelInfo {
+	if realm != "global" && realm != "intl" {
+		return dyn
+	}
+	seen := make(map[string]bool, len(dyn))
+	for _, m := range dyn {
+		seen[strings.ToLower(m.ID)] = true
+	}
+	out := append([]pluginapi.ModelInfo(nil), dyn...)
+	for _, id := range externalPromoModelIDs {
+		if seen[id] {
+			continue
+		}
+		if m, ok := staticModelByID(id); ok {
+			out = append(out, m)
+			seen[id] = true
+		}
+	}
+	return out
+}
+
+// staticModelByID returns the ModelInfo for a known upstream model ID by
+// searching the CN and external static catalogs.
+func staticModelByID(id string) (pluginapi.ModelInfo, bool) {
+	for _, m := range wbModels() {
+		if strings.EqualFold(m.ID, id) {
+			return m, true
+		}
+	}
+	for _, m := range staticModelsGlobal() {
+		if strings.EqualFold(m.ID, id) {
+			return m, true
+		}
+	}
+	return pluginapi.ModelInfo{}, false
 }
 
 // realmModelsState is the dashboard-facing snapshot of one realm's model
@@ -430,6 +501,30 @@ func modelsEndpointFor(realm string) (modelsURL, origin string) {
 	}
 }
 
+// modelsEndpointCandidates returns the ordered enterprise-catalog URLs to try
+// per realm. Following the external (Global/Intl) findings from the reference
+// workbuddy2api project, the /v2/enterprises/personal/models family is
+// probed FIRST for the external realms — the /console family returns HTTP 500
+// (openresty/apigate) on those realms even though the account's credentials
+// are valid, which leaves discovery on the narrow /v3/config tier-slot names
+// only. CN keeps the /console path (its live shape).
+func modelsEndpointCandidates(realm string) []string {
+	switch realm {
+	case "global":
+		return []string{
+			upstreamBaseGlobal + "/v2/enterprises/personal/models",
+			upstreamBaseGlobal + "/console/enterprises/personal/models",
+		}
+	case "intl":
+		return []string{
+			upstreamBaseIntl + "/v2/enterprises/personal/models",
+			upstreamBaseIntl + "/console/enterprises/personal/models",
+		}
+	default:
+		return []string{endpointModels}
+	}
+}
+
 // callModelsAPI resolves a realm's live model catalog. v0.9.12 dual probe
 // (mirrors workbuddy2api-panel FetchModels):
 //   - enterprise: GET /console/enterprises/personal/models — the account's
@@ -501,10 +596,38 @@ func callModelsAPI(accessToken string, realm ...string) ([]pluginapi.ModelInfo, 
 	return out, nil
 }
 
-// callEnterpriseModelsAPI GETs /console/enterprises/personal/models and
-// builds the ordered list (cli agent base + promoted entries).
+// callEnterpriseModelsAPI GETs the realm's enterprise model catalog and
+// builds the ordered list (cli agent base + promoted entries). External
+// realms (global/intl) probe the /v2/enterprises/personal/models family
+// first, falling back to the /console family — the /console path serves a
+// 500 (openresty) on external realms, which previously left discovery stuck
+// on the narrow /v3/config tier names.
 func callEnterpriseModelsAPI(ctx context.Context, accessToken, realm string) ([]pluginapi.ModelInfo, error) {
-	modelsURL, origin := modelsEndpointFor(realm)
+	candidates := modelsEndpointCandidates(realm)
+	origin := originReferer
+	switch realm {
+	case "global":
+		origin = originRefererGlobal
+	case "intl":
+		origin = originRefererIntl
+	}
+	var lastErr error
+	for _, modelsURL := range candidates {
+		out, err := fetchEnterpriseEndpointOnce(ctx, accessToken, realm, modelsURL, origin)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(out) > 0 {
+			return out, nil
+		}
+	}
+	return nil, lastErr
+}
+
+// fetchEnterpriseEndpointOnce performs a single enterprise-model GET and
+// parses the {code,data{models,agents}} payload into discovery entries.
+func fetchEnterpriseEndpointOnce(ctx context.Context, accessToken, realm, modelsURL, origin string) ([]pluginapi.ModelInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
 	if err != nil {
 		return nil, err

@@ -89,10 +89,28 @@ func modelHintForRealm(realm string) string {
 	return fmt.Sprintf("%s: %s", label, strings.Join(ids, ", "))
 }
 
+// isUnapprovedChannel reports whether an upstream >=400 chat payload is the
+// security-policy rejection (code 11128 "Illegal API invocation from an
+// unapproved channel"). It is channel/token-level, NOT model-level: the same
+// account+token gets it for every model, because the session token was issued
+// to a channel upstream does not approve for /v2/chat/completions (observed
+// the OAuth azp "console" — the web/browser client — while the API gate wants
+// a CLI/IDE channel token). Neither headers nor the reasoning depth change
+// this; only logging in through an approved channel does.
+func isModelChannelBlocked(statusCode int, payload string) bool {
+	var shape upstreamErrorShape
+	if err := json.Unmarshal([]byte(payload), &shape); err == nil && shape.Code == 11128 {
+		return true
+	}
+	low := strings.ToLower(payload)
+	return strings.Contains(low, "11128") && strings.Contains(low, "unapproved channel")
+}
+
 // translateChatUpstreamError converts one upstream chat failure into the
-// plugin error. 11102 rejections get a bilingual actionable message; every
-// other failure keeps the historical "upstream <status>: <payload>" shape so
-// existing log parsers and client behavior stay unchanged.
+// plugin error. 11102 rejections get a bilingual actionable message; 11128
+// channel blocks get a bilingual actionable message pointing at the login
+// channel; every other failure keeps the historical "upstream <status>:
+// <payload>" shape so existing log parsers and client behavior stay unchanged.
 func translateChatUpstreamError(statusCode int, payload string, sa *storedAuth) error {
 	if isModelNotRegistered(statusCode, payload) {
 		realm := "cn"
@@ -104,6 +122,14 @@ func translateChatUpstreamError(statusCode int, payload string, sa *storedAuth) 
 				" // Model not registered on the %s upstream; pick a model from its catalog and retry. %s | raw: %s",
 			realmDisplayName(realm), realmDisplayName(realm), modelHintForRealm(realm),
 			truncateRedacted(payload, 200))
+	}
+	if isModelChannelBlocked(statusCode, payload) {
+		return fmt.Errorf(
+			"上游拒绝调用：账号登录渠道未获API批准（code 11128 Illegal API invocation from an unapproved channel）。"+
+				"该凭证是按“浏览器/console 渠道”签发的（所有模型一视同仁被拦），换模型无效；"+
+				"请在插件面板把 login_platform 设为 ide 后重新登录获取 API 渠道凭证，或改用已通过渠道签发的账号。"+
+				" // Upstream blocked this session token's channel (%s); log in via an approved client (IDE) instead of relying on a web/console session, and retry. | raw: %s",
+			realmDisplayName(accountRegion(sa)), truncateRedacted(payload, 200))
 	}
 	return fmt.Errorf("upstream %d: %s", statusCode, truncateRedacted(payload, 200))
 }

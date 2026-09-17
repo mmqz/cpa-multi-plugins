@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"strings"
@@ -91,10 +92,20 @@ func loginHeadersFor(req *http.Request, region string) {
 // authStateHeaders returns the header func for the auth/state request
 // (nil keeps the historical default: doJSON falls back to loginHeaders).
 func authStateHeaders(region string) func(*http.Request) {
-	if region != regionIntl {
+	switch region {
+	case regionIntl:
+		return func(r *http.Request) { loginHeadersFor(r, region) }
+	case regionGlobal:
+		return func(r *http.Request) {
+			loginHeaders(r)
+			// Global (workbuddy.ai) keeps its own gateway origin/referer —
+			// parity with workbuddy2api login.sh for the global realm.
+			r.Header.Set("Origin", originRefererGlobal)
+			r.Header.Set("Referer", originRefererGlobal+"/")
+		}
+	default:
 		return nil
 	}
-	return func(r *http.Request) { loginHeadersFor(r, region) }
 }
 
 func handleStartLogin(raw []byte) ([]byte, error) {
@@ -110,16 +121,27 @@ func startLoginWithRegion(raw []byte, region string) ([]byte, error) {
 	platform := currentLoginPlatform()
 	headers := authStateHeaders(region)
 	stateBase := endpointAuthStateBase
-	if region == regionIntl {
+	switch region {
+	case regionIntl:
 		// The codebuddy.ai login entry is the IDE client only (merged
 		// codebuddy-intl plugin behavior).
 		platform = "ide"
+		stateBase = upstreamBaseForRegion(region) + "/v2/plugin/auth/state?platform="
+	case regionGlobal:
+		// Global (workbuddy.ai) uses the same CLI auth protocol as CN with
+		// the base swapped — mirrors workbuddy2api login.sh --realm=global
+		// (POST {globalBase}/v2/plugin/auth/state?platform=CLI). The platform
+		// honors login_platform so an IDE-channel login is possible: upstream
+		// then issues an IDE OAuth token (different azp from the web "console"
+		// token) which some API gates approve for chat.
+		platform = currentLoginPlatform()
 		stateBase = upstreamBaseForRegion(region) + "/v2/plugin/auth/state?platform="
 	}
 	data, _, err := doJSON(client, http.MethodPost, stateBase+platform, headers, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return nil, fmt.Errorf("auth state failed: %w", err)
 	}
+	log.Printf("login state: region=%s base=%s platform=%s", region, stateBase, platform)
 	var st authStateData
 	_ = json.Unmarshal(data, &st)
 	if st.State == "" || st.AuthURL == "" {
@@ -162,9 +184,18 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 	// token first and only fetch account once we hold a bearer.
 	tokenBase := endpointAuthToken
 	var tokenHeaders func(*http.Request)
-	if lc.region == regionIntl {
+	if lc.region == regionIntl || lc.region == regionGlobal {
 		tokenBase = upstreamBaseForRegion(lc.region) + "/v2/plugin/auth/token?state="
-		tokenHeaders = func(r *http.Request) { loginHeadersFor(r, lc.region) }
+		switch lc.region {
+		case regionIntl:
+			tokenHeaders = func(r *http.Request) { loginHeadersFor(r, lc.region) }
+		case regionGlobal:
+			tokenHeaders = func(r *http.Request) {
+				loginHeaders(r)
+				r.Header.Set("Origin", originRefererGlobal)
+				r.Header.Set("Referer", originRefererGlobal+"/")
+			}
+		}
 	}
 	tokRaw, status, errTok := doJSON(lc.client, http.MethodGet, tokenBase+state, tokenHeaders, nil)
 	if errTok != nil {
@@ -194,11 +225,21 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 		r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 	}
 	acctBase := endpointLoginAcct
-	if lc.region == regionIntl {
+	if lc.region == regionIntl || lc.region == regionGlobal {
 		acctBase = upstreamBaseForRegion(lc.region) + "/v2/plugin/login/account?state="
-		acctHeaders = func(r *http.Request) {
-			loginHeadersFor(r, lc.region)
-			r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+		switch lc.region {
+		case regionIntl:
+			acctHeaders = func(r *http.Request) {
+				loginHeadersFor(r, lc.region)
+				r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+			}
+		case regionGlobal:
+			acctHeaders = func(r *http.Request) {
+				loginHeaders(r)
+				r.Header.Set("Origin", originRefererGlobal)
+				r.Header.Set("Referer", originRefererGlobal+"/")
+				r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+			}
 		}
 	}
 	if acctRaw, _, errAcct := doJSON(lc.client, http.MethodGet, acctBase+state, acctHeaders, nil); errAcct == nil {
@@ -218,16 +259,27 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 			Nickname:     acct.Nickname,
 		},
 	}
-	// Pin the realm for Intl logins whose token response omitted the domain
-	// (gateway routing depends on it).
+	// Pin the realm for Intl/Global logins whose token response omitted the
+	// domain (gateway routing depends on it).
 	if lc.region == regionIntl && strings.TrimSpace(sa.Auth.Domain) == "" {
 		sa.Auth.Domain = "codebuddy.ai"
 	}
+	if lc.region == regionGlobal && strings.TrimSpace(sa.Auth.Domain) == "" {
+		sa.Auth.Domain = "workbuddy.ai"
+	}
 	// Pin the region explicitly (v0.12.15): credential-manager notes and
 	// labels resolve via accountRegion; domain sniffing is only a legacy
-	// fallback. Global accounts never go through login (panel import).
+	// fallback. Global now supports login too (previously panel import only).
 	sa.Auth.Region = lc.region
 	loginStates.Delete(state)
+	// Post-login auto-claim for Global accounts, mirroring workbuddy2api
+	// login.sh: activate the overseas register (idempotent) then claim the
+	// one-time trial pack (idempotent, code 14051 = already claimed). Runs
+	// best-effort in the background so it never blocks the login response.
+	if lc.region == regionGlobal {
+		saCopy := *sa
+		go func() { performGlobalPostLogin(saCopy) }()
+	}
 	return okEnvelope(pluginapi.AuthLoginPollResponse{
 		Status: pluginapi.AuthLoginStatusSuccess,
 		Auth:   toAuthData(sa),

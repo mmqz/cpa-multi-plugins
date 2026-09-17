@@ -6,9 +6,9 @@
 package main
 
 import (
-        "encoding/json"
-        "regexp"
-        "strings"
+	"encoding/json"
+	"regexp"
+	"strings"
 )
 
 // neutralPrompt is the substitute for over-long or agent-identity system
@@ -38,98 +38,221 @@ const toolDescriptionByteLimit = 65536
 // on every chat completion). The 4 legacy helpers remain for tests and other
 // call sites that need them individually.
 func prepareUpstreamBody(payload, original []byte, sa *storedAuth, upstreamModel string) []byte {
-        src := payload
-        if len(src) == 0 {
-                src = original
-        }
-        if len(src) == 0 {
-                return src
-        }
-        var obj map[string]any
-        if json.Unmarshal(src, &obj) != nil {
-                return src
-        }
+	src := payload
+	if len(src) == 0 {
+		src = original
+	}
+	if len(src) == 0 {
+		return src
+	}
+	var obj map[string]any
+	if json.Unmarshal(src, &obj) != nil {
+		return src
+	}
 
-        // 1. forceStream: CodeBuddy rejects non-stream requests.
-        obj["stream"] = true
+	// 1. forceStream: CodeBuddy rejects non-stream requests.
+	obj["stream"] = true
 
-        // 2. normalizeTools: tool_choice object form → string; "none" suppresses tools.
-        normalizeToolsInPlace(obj)
+	// 2. normalizeTools: tool_choice object form → string; "none" suppresses tools.
+	normalizeToolsInPlace(obj)
 
-        // 3. rewriteSystem: strip blocked Claude Code template phrases + force thinking.
-        rewriteSystemInPlace(obj)
+	// 3. normalizeRoles: map developer/function/tool role to system before
+	// upstream role-whitelist validation. The upstream whitelists roles and
+	// rejects unknown ones (e.g. developer, the OpenAI alias for system) with
+	// HTTP 400 code=11128 "Illegal API invocation from an unapproved channel";
+	// modern harnesses (DeepSeek Harness / Claude Code) send developer as the
+	// first message role, which would otherwise break every request. Mirrors
+	// workbuddy2api's normalizeRoles() behavior.
+	normalizeRolesInPlace(obj)
 
-        // 4. ensureSystemMessage: inject minimal system msg for Global only.
-        ensureSystemMessageInPlace(obj, sa)
+	// 4. rewriteSystem: strip blocked Claude Code template phrases + force thinking.
+	rewriteSystemInPlace(obj)
 
-        // 5. rewriteModel: swap client model name to upstream model id.
-        rewriteModelInPlace(obj, upstreamModel)
+	// 4. ensureSystemMessage: inject minimal system msg for Global only.
+	ensureSystemMessageInPlace(obj, sa)
 
-        out, err := json.Marshal(obj)
-        if err != nil {
-                return src
-        }
-        return out
+	// 5. rewriteModel: swap client model name to upstream model id.
+	rewriteModelInPlace(obj, upstreamModel)
+
+	// 6. injectReasoning: fold historical assistant reasoning_content into
+	// content as <thought> blocks, because upstream silently drops the
+	// non-standard reasoning_content field on multi-turn history and the
+	// model would otherwise lose short-term memory (issue #5).
+	injectReasoningInPlace(obj)
+
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return src
+	}
+	return out
+}
+
+// normalizeRolesInPlace rewrites non-whitelisted message roles to roles the
+// upstream accepts.
+//
+// WorkBuddy/CodeBuddy's request deserializer whitelists roles (system / user
+// / assistant / tool) and rejects anything else with HTTP 400 code=11128
+// "Illegal API invocation from an unapproved channel". Modern OpenAI-style
+// harnesses prefix the conversation with a "developer" message (the alias for
+// system per the OpenAI spec); forwarding it verbatim trips the whitelist and
+// the failure is misreported as an account-channel problem. Map developer →
+// system. Return true when any message was modified.
+func normalizeRolesInPlace(obj map[string]any) bool {
+	messages, _ := obj["messages"].([]any)
+	changed := false
+	for _, m := range messages {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := msg["role"].(string)
+		if !strings.EqualFold(strings.TrimSpace(role), "developer") {
+			continue
+		}
+		msg["role"] = "system"
+		changed = true
+	}
+	return changed
+}
+
+// injectReasoningInPlace folds reasoning_content carried on historical
+// assistant messages into their content as a <thought> block. CodeBuddy's
+// upstream /v2/chat/completions deserializer whitelists fields and silently
+// drops reasoning_content, so downstream reasoning never reaches the model on
+// subsequent turns. Injecting it into content keeps self-attention able to
+// recall the previous step. Returns true when any message was modified.
+func injectReasoningInPlace(obj map[string]any) bool {
+	messages, ok := obj["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		return false
+	}
+	changed := false
+	for _, m := range messages {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := msg["role"].(string)
+		if !strings.EqualFold(strings.TrimSpace(role), "assistant") {
+			continue
+		}
+		reasoning := reasoningTextFromMessage(msg)
+		if reasoning == "" {
+			continue
+		}
+		if prependThoughtInPlace(msg, "<thought>\n"+reasoning+"\n</thought>") {
+			changed = true
+		}
+	}
+	return changed
+}
+
+// reasoningTextFromMessage returns the first non-empty reasoning text carried
+// on a message, from either reasoning_content or reasoning fields.
+func reasoningTextFromMessage(msg map[string]any) string {
+	if rc, ok := msg["reasoning_content"].(string); ok && strings.TrimSpace(rc) != "" {
+		return strings.TrimSpace(rc)
+	}
+	if r, ok := msg["reasoning"].(string); ok && strings.TrimSpace(r) != "" {
+		return strings.TrimSpace(r)
+	}
+	return ""
+}
+
+// prependThoughtInPlace prepends thoughtBlock to a message's content when not
+// already present. Handles plain string content and OpenAI-style content
+// parts. Returns true when the message content was modified.
+func prependThoughtInPlace(msg map[string]any, thoughtBlock string) bool {
+	switch c := msg["content"].(type) {
+	case string:
+		if strings.HasPrefix(strings.TrimSpace(c), "<thought>") {
+			return false
+		}
+		if strings.TrimSpace(c) == "" {
+			msg["content"] = thoughtBlock
+		} else {
+			msg["content"] = thoughtBlock + "\n\n" + c
+		}
+		return true
+	case []any:
+		if len(c) == 0 {
+			return false
+		}
+		first, ok := c[0].(map[string]any)
+		if !ok {
+			return false
+		}
+		txt, ok := first["text"].(string)
+		if !ok {
+			return false
+		}
+		if strings.HasPrefix(strings.TrimSpace(txt), "<thought>") {
+			return false
+		}
+		first["text"] = thoughtBlock + "\n\n" + txt
+		return true
+	}
+	return false
 }
 
 // normalizeToolsInPlace is the in-place form of normalizeToolsForUpstream.
 // Returns true when obj was modified.
 func normalizeToolsInPlace(obj map[string]any) bool {
-        changed := false
-        suppressTools := func() {
-                if _, ok := obj["tools"]; ok {
-                        delete(obj, "tools")
-                        changed = true
-                }
-                if _, ok := obj["functions"]; ok {
-                        delete(obj, "functions")
-                        changed = true
-                }
-        }
-        if tc, present := obj["tool_choice"]; present {
-                switch v := tc.(type) {
-                case string:
-                        if strings.EqualFold(strings.TrimSpace(v), "none") {
-                                delete(obj, "tool_choice")
-                                suppressTools()
-                                changed = true
-                        }
-                case map[string]any:
-                        typ, _ := v["type"].(string)
-                        typ = strings.ToLower(strings.TrimSpace(typ))
-                        switch typ {
-                        case "none":
-                                delete(obj, "tool_choice")
-                                suppressTools()
-                                changed = true
-                        case "auto", "required":
-                                obj["tool_choice"] = typ
-                                changed = true
-                        case "function":
-                                name := ""
-                                if fn, ok := v["function"].(map[string]any); ok {
-                                        name, _ = fn["name"].(string)
-                                }
-                                if name == "" {
-                                        name, _ = v["name"].(string)
-                                }
-                                name = strings.TrimSpace(name)
-                                if name != "" {
-                                        obj["tool_choice"] = name
-                                } else {
-                                        obj["tool_choice"] = "auto"
-                                }
-                                changed = true
-                        default:
-                                delete(obj, "tool_choice")
-                                changed = true
-                        }
-                default:
-                        delete(obj, "tool_choice")
-                        changed = true
-                }
-        }
-        return changed
+	changed := false
+	suppressTools := func() {
+		if _, ok := obj["tools"]; ok {
+			delete(obj, "tools")
+			changed = true
+		}
+		if _, ok := obj["functions"]; ok {
+			delete(obj, "functions")
+			changed = true
+		}
+	}
+	if tc, present := obj["tool_choice"]; present {
+		switch v := tc.(type) {
+		case string:
+			if strings.EqualFold(strings.TrimSpace(v), "none") {
+				delete(obj, "tool_choice")
+				suppressTools()
+				changed = true
+			}
+		case map[string]any:
+			typ, _ := v["type"].(string)
+			typ = strings.ToLower(strings.TrimSpace(typ))
+			switch typ {
+			case "none":
+				delete(obj, "tool_choice")
+				suppressTools()
+				changed = true
+			case "auto", "required":
+				obj["tool_choice"] = typ
+				changed = true
+			case "function":
+				name := ""
+				if fn, ok := v["function"].(map[string]any); ok {
+					name, _ = fn["name"].(string)
+				}
+				if name == "" {
+					name, _ = v["name"].(string)
+				}
+				name = strings.TrimSpace(name)
+				if name != "" {
+					obj["tool_choice"] = name
+				} else {
+					obj["tool_choice"] = "auto"
+				}
+				changed = true
+			default:
+				delete(obj, "tool_choice")
+				changed = true
+			}
+		default:
+			delete(obj, "tool_choice")
+			changed = true
+		}
+	}
+	return changed
 }
 
 // rewriteSystemInPlace is the in-place form of rewriteSystemForUpstream.
@@ -141,27 +264,27 @@ func normalizeToolsInPlace(obj map[string]any) bool {
 //     other values to reasoning_summary="auto" (OmniRoute codebuddy-cn.ts).
 //  3. forceMaxThinking for hy3/hy4-family models.
 func rewriteSystemInPlace(obj map[string]any) bool {
-        messages, _ := obj["messages"].([]any)
-        changed := false
-        for _, m := range messages {
-                msg, ok := m.(map[string]any)
-                if !ok {
-                        continue
-                }
-                if rewriteContentField(msg) {
-                        changed = true
-                }
-        }
-        if mirrorReasoningEffort(obj) {
-                changed = true
-        }
-        if forceMaxThinking(obj) {
-                changed = true
-        }
-        if compactToolDescriptions(obj) {
-                changed = true
-        }
-        return changed
+	messages, _ := obj["messages"].([]any)
+	changed := false
+	for _, m := range messages {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if rewriteContentField(msg) {
+			changed = true
+		}
+	}
+	if mirrorReasoningEffort(obj) {
+		changed = true
+	}
+	if forceMaxThinking(obj) {
+		changed = true
+	}
+	if compactToolDescriptions(obj) {
+		changed = true
+	}
+	return changed
 }
 
 // mirrorReasoningEffort implements OmniRoute codebuddy-cn.ts reasoning_effort
@@ -170,113 +293,113 @@ func rewriteSystemInPlace(obj map[string]any) bool {
 //   - other value → set reasoning_summary="auto" (mirror)
 //   - absent → no-op (forcing reasoning triggers content filter)
 func mirrorReasoningEffort(obj map[string]any) bool {
-        eff, ok := obj["reasoning_effort"].(string)
-        if !ok {
-                return false
-        }
-        effLower := strings.ToLower(strings.TrimSpace(eff))
-        if effLower == "none" || effLower == "off" {
-                delete(obj, "reasoning_effort")
-                return true
-        }
-        if effLower != "" {
-                obj["reasoning_summary"] = "auto"
-                return true
-        }
-        return false
+	eff, ok := obj["reasoning_effort"].(string)
+	if !ok {
+		return false
+	}
+	effLower := strings.ToLower(strings.TrimSpace(eff))
+	if effLower == "none" || effLower == "off" {
+		delete(obj, "reasoning_effort")
+		return true
+	}
+	if effLower != "" {
+		obj["reasoning_summary"] = "auto"
+		return true
+	}
+	return false
 }
 
 // compactToolDescriptions strips tool.function.description when the serialized
 // tools array exceeds toolDescriptionByteLimit (64KB). Tencent's body-size
 // filter rejects large tool descriptions. Mirrors OmniRoute codebuddy-cn.ts.
 func compactToolDescriptions(obj map[string]any) bool {
-        tools, ok := obj["tools"].([]any)
-        if !ok || len(tools) == 0 {
-                return false
-        }
-        serialized, err := json.Marshal(tools)
-        if err != nil {
-                return false
-        }
-        if len(serialized) < toolDescriptionByteLimit {
-                return false
-        }
-        changed := false
-        for _, t := range tools {
-                tool, ok := t.(map[string]any)
-                if !ok {
-                        continue
-                }
-                fn, ok := tool["function"].(map[string]any)
-                if !ok {
-                        continue
-                }
-                if _, hasDesc := fn["description"]; hasDesc {
-                        delete(fn, "description")
-                        changed = true
-                }
-        }
-        return changed
+	tools, ok := obj["tools"].([]any)
+	if !ok || len(tools) == 0 {
+		return false
+	}
+	serialized, err := json.Marshal(tools)
+	if err != nil {
+		return false
+	}
+	if len(serialized) < toolDescriptionByteLimit {
+		return false
+	}
+	changed := false
+	for _, t := range tools {
+		tool, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := tool["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, hasDesc := fn["description"]; hasDesc {
+			delete(fn, "description")
+			changed = true
+		}
+	}
+	return changed
 }
 
 // ensureSystemMessageInPlace is the in-place form of ensureSystemMessage.
 // Returns true when obj was modified.
 func ensureSystemMessageInPlace(obj map[string]any, sa *storedAuth) bool {
-        if sa == nil || !isGlobalDomain(sa.Auth.Domain) {
-                return false
-        }
-        messages, ok := obj["messages"].([]any)
-        if !ok || len(messages) == 0 {
-                return false
-        }
-        for _, m := range messages {
-                msg, ok := m.(map[string]any)
-                if !ok {
-                        continue
-                }
-                if role, _ := msg["role"].(string); strings.EqualFold(role, "system") {
-                        return false
-                }
-        }
-        systemMsg := map[string]any{
-                "role":    "system",
-                "content": "You are a helpful assistant.",
-        }
-        obj["messages"] = append([]any{systemMsg}, messages...)
-        return true
+	if sa == nil || !isGlobalDomain(sa.Auth.Domain) {
+		return false
+	}
+	messages, ok := obj["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		return false
+	}
+	for _, m := range messages {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); strings.EqualFold(role, "system") {
+			return false
+		}
+	}
+	systemMsg := map[string]any{
+		"role":    "system",
+		"content": "You are a helpful assistant.",
+	}
+	obj["messages"] = append([]any{systemMsg}, messages...)
+	return true
 }
 
 // rewriteModelInPlace swaps obj["model"] to upstreamModel when non-empty.
 // Mirrors rewriteModelInBody's behavior (case-insensitive compare); returns
 // true when modified.
 func rewriteModelInPlace(obj map[string]any, upstreamModel string) bool {
-        upstreamModel = strings.TrimSpace(upstreamModel)
-        if upstreamModel == "" {
-                return false
-        }
-        cur, _ := obj["model"].(string)
-        if strings.EqualFold(strings.TrimSpace(cur), upstreamModel) {
-                return false
-        }
-        obj["model"] = upstreamModel
-        return true
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	if upstreamModel == "" {
+		return false
+	}
+	cur, _ := obj["model"].(string)
+	if strings.EqualFold(strings.TrimSpace(cur), upstreamModel) {
+		return false
+	}
+	obj["model"] = upstreamModel
+	return true
 }
 
 func forceStreamBody(payload, original []byte) []byte {
-        src := payload
-        if len(src) == 0 {
-                src = original
-        }
-        var obj map[string]any
-        if json.Unmarshal(src, &obj) != nil {
-                return src
-        }
-        obj["stream"] = true
-        out, err := json.Marshal(obj)
-        if err != nil {
-                return src
-        }
-        return out
+	src := payload
+	if len(src) == 0 {
+		src = original
+	}
+	var obj map[string]any
+	if json.Unmarshal(src, &obj) != nil {
+		return src
+	}
+	obj["stream"] = true
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return src
+	}
+	return out
 }
 
 // normalizeToolsForUpstream adapts OpenAI tools / tool_choice fields to
@@ -293,81 +416,81 @@ func forceStreamBody(payload, original []byte) []byte {
 //
 // String values auto / required / <function name> are left untouched.
 func normalizeToolsForUpstream(payload []byte) []byte {
-        if len(payload) == 0 {
-                return payload
-        }
-        var obj map[string]any
-        if json.Unmarshal(payload, &obj) != nil {
-                return payload
-        }
-        changed := false
+	if len(payload) == 0 {
+		return payload
+	}
+	var obj map[string]any
+	if json.Unmarshal(payload, &obj) != nil {
+		return payload
+	}
+	changed := false
 
-        suppressTools := func() {
-                if _, ok := obj["tools"]; ok {
-                        delete(obj, "tools")
-                        changed = true
-                }
-                if _, ok := obj["functions"]; ok {
-                        delete(obj, "functions")
-                        changed = true
-                }
-        }
+	suppressTools := func() {
+		if _, ok := obj["tools"]; ok {
+			delete(obj, "tools")
+			changed = true
+		}
+		if _, ok := obj["functions"]; ok {
+			delete(obj, "functions")
+			changed = true
+		}
+	}
 
-        if tc, present := obj["tool_choice"]; present {
-                switch v := tc.(type) {
-                case string:
-                        if strings.EqualFold(strings.TrimSpace(v), "none") {
-                                delete(obj, "tool_choice")
-                                suppressTools()
-                                changed = true
-                        }
-                case map[string]any:
-                        typ, _ := v["type"].(string)
-                        typ = strings.ToLower(strings.TrimSpace(typ))
-                        switch typ {
-                        case "none":
-                                delete(obj, "tool_choice")
-                                suppressTools()
-                                changed = true
-                        case "auto", "required":
-                                obj["tool_choice"] = typ
-                                changed = true
-                        case "function":
-                                name := ""
-                                if fn, ok := v["function"].(map[string]any); ok {
-                                        name, _ = fn["name"].(string)
-                                }
-                                if name == "" {
-                                        name, _ = v["name"].(string)
-                                }
-                                name = strings.TrimSpace(name)
-                                if name != "" {
-                                        obj["tool_choice"] = name
-                                } else {
-                                        // Object force without a name: fall back to auto instead of 400.
-                                        obj["tool_choice"] = "auto"
-                                }
-                                changed = true
-                        default:
-                                // Unknown object shape → drop rather than forward a 400.
-                                delete(obj, "tool_choice")
-                                changed = true
-                        }
-                default:
-                        // null / array / number — drop to keep upstream happy.
-                        delete(obj, "tool_choice")
-                        changed = true
-                }
-        }
+	if tc, present := obj["tool_choice"]; present {
+		switch v := tc.(type) {
+		case string:
+			if strings.EqualFold(strings.TrimSpace(v), "none") {
+				delete(obj, "tool_choice")
+				suppressTools()
+				changed = true
+			}
+		case map[string]any:
+			typ, _ := v["type"].(string)
+			typ = strings.ToLower(strings.TrimSpace(typ))
+			switch typ {
+			case "none":
+				delete(obj, "tool_choice")
+				suppressTools()
+				changed = true
+			case "auto", "required":
+				obj["tool_choice"] = typ
+				changed = true
+			case "function":
+				name := ""
+				if fn, ok := v["function"].(map[string]any); ok {
+					name, _ = fn["name"].(string)
+				}
+				if name == "" {
+					name, _ = v["name"].(string)
+				}
+				name = strings.TrimSpace(name)
+				if name != "" {
+					obj["tool_choice"] = name
+				} else {
+					// Object force without a name: fall back to auto instead of 400.
+					obj["tool_choice"] = "auto"
+				}
+				changed = true
+			default:
+				// Unknown object shape → drop rather than forward a 400.
+				delete(obj, "tool_choice")
+				changed = true
+			}
+		default:
+			// null / array / number — drop to keep upstream happy.
+			delete(obj, "tool_choice")
+			changed = true
+		}
+	}
 
-        if !changed {
-                return payload
-        }
-        out, err := json.Marshal(obj)
-        if err != nil {
-                return payload
-        }
-        return out
+	if !changed {
+		return payload
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return payload
+	}
+	return out
 }
 
 // rewriteSystemForUpstream neutralizes Claude Code template phrases that
@@ -377,35 +500,35 @@ func normalizeToolsForUpstream(payload []byte) []byte {
 // rewrite is a single-word change so the prompt's meaning is preserved while
 // dodging the exact-match filter.
 func rewriteSystemForUpstream(payload []byte) []byte {
-        if len(payload) == 0 {
-                return payload
-        }
-        var obj map[string]any
-        if json.Unmarshal(payload, &obj) != nil {
-                return payload
-        }
-        messages, _ := obj["messages"].([]any)
-        changed := false
-        for _, m := range messages {
-                msg, ok := m.(map[string]any)
-                if !ok {
-                        continue
-                }
-                if rewriteContentField(msg) {
-                        changed = true
-                }
-        }
-        if forceMaxThinking(obj) {
-                changed = true
-        }
-        if !changed {
-                return payload
-        }
-        out, err := json.Marshal(obj)
-        if err != nil {
-                return payload
-        }
-        return out
+	if len(payload) == 0 {
+		return payload
+	}
+	var obj map[string]any
+	if json.Unmarshal(payload, &obj) != nil {
+		return payload
+	}
+	messages, _ := obj["messages"].([]any)
+	changed := false
+	for _, m := range messages {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if rewriteContentField(msg) {
+			changed = true
+		}
+	}
+	if forceMaxThinking(obj) {
+		changed = true
+	}
+	if !changed {
+		return payload
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return payload
+	}
+	return out
 }
 
 // ensureSystemMessage injects a minimal system message if none is present.
@@ -414,40 +537,40 @@ func rewriteSystemForUpstream(payload []byte) []byte {
 // does not require a system message but tolerates one. Inserting a
 // harmless system message unifies both paths.
 func ensureSystemMessage(payload []byte, sa *storedAuth) []byte {
-        if len(payload) == 0 {
-                return payload
-        }
-        // Only inject for Global; CN doesn't need it and we minimize diff.
-        if sa == nil || !isGlobalDomain(sa.Auth.Domain) {
-                return payload
-        }
-        var obj map[string]any
-        if json.Unmarshal(payload, &obj) != nil {
-                return payload
-        }
-        messages, ok := obj["messages"].([]any)
-        if !ok || len(messages) == 0 {
-                return payload
-        }
-        for _, m := range messages {
-                msg, ok := m.(map[string]any)
-                if !ok {
-                        continue
-                }
-                if role, _ := msg["role"].(string); strings.EqualFold(role, "system") {
-                        return payload // already has system message
-                }
-        }
-        systemMsg := map[string]any{
-                "role":    "system",
-                "content": "You are a helpful assistant.",
-        }
-        obj["messages"] = append([]any{systemMsg}, messages...)
-        out, err := json.Marshal(obj)
-        if err != nil {
-                return payload
-        }
-        return out
+	if len(payload) == 0 {
+		return payload
+	}
+	// Only inject for Global; CN doesn't need it and we minimize diff.
+	if sa == nil || !isGlobalDomain(sa.Auth.Domain) {
+		return payload
+	}
+	var obj map[string]any
+	if json.Unmarshal(payload, &obj) != nil {
+		return payload
+	}
+	messages, ok := obj["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		return payload
+	}
+	for _, m := range messages {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); strings.EqualFold(role, "system") {
+			return payload // already has system message
+		}
+	}
+	systemMsg := map[string]any{
+		"role":    "system",
+		"content": "You are a helpful assistant.",
+	}
+	obj["messages"] = append([]any{systemMsg}, messages...)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return payload
+	}
+	return out
 }
 
 // rewriteContentField sanitizes blocked templates in one message's content,
@@ -460,49 +583,49 @@ func ensureSystemMessage(payload []byte, sa *storedAuth) []byte {
 //
 // Returns true if the message was modified.
 func rewriteContentField(msg map[string]any) bool {
-        switch c := msg["content"].(type) {
-        case string:
-                if r := sanitizeContentText(c); r != c {
-                        msg["content"] = r
-                        return true
-                }
-        case []any:
-                modified := false
-                for _, p := range c {
-                        part, ok := p.(map[string]any)
-                        if !ok {
-                                continue
-                        }
-                        if t, ok := part["text"].(string); ok {
-                                if r := sanitizeContentText(t); r != t {
-                                        part["text"] = r
-                                        modified = true
-                                }
-                        }
-                }
-                return modified
-        }
-        return false
+	switch c := msg["content"].(type) {
+	case string:
+		if r := sanitizeContentText(c); r != c {
+			msg["content"] = r
+			return true
+		}
+	case []any:
+		modified := false
+		for _, p := range c {
+			part, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, ok := part["text"].(string); ok {
+				if r := sanitizeContentText(t); r != t {
+					part["text"] = r
+					modified = true
+				}
+			}
+		}
+		return modified
+	}
+	return false
 }
 
 // sanitizeContentText decides between wholesale replacement (neutralPrompt)
 // and template-level single-word substitution. Mirrors OmniRoute codebuddy-cn.ts
 // AGENT_PATTERN + length check.
 func sanitizeContentText(text string) string {
-        if len(text) > maxSystemPromptBytes || agentPattern.MatchString(text) {
-                return neutralPrompt
-        }
-        return sanitizeBlockedTemplates(text)
+	if len(text) > maxSystemPromptBytes || agentPattern.MatchString(text) {
+		return neutralPrompt
+	}
+	return sanitizeBlockedTemplates(text)
 }
 
 func sanitizeBlockedTemplates(s string) string {
-        s = strings.ReplaceAll(s,
-                "You are Claude Code, Anthropic's official CLI for Claude.",
-                "You are Claude Code, Anthropic's official CLI tool for Claude.")
-        s = strings.ReplaceAll(s,
-                "Main branch (you will usually use this for PRs)",
-                "Default branch (you will usually use this for PRs)")
-        return s
+	s = strings.ReplaceAll(s,
+		"You are Claude Code, Anthropic's official CLI for Claude.",
+		"You are Claude Code, Anthropic's official CLI tool for Claude.")
+	s = strings.ReplaceAll(s,
+		"Main branch (you will usually use this for PRs)",
+		"Default branch (you will usually use this for PRs)")
+	return s
 }
 
 // forceMaxThinking pins reasoning_effort to "high" for hy3/hy4-family models
@@ -512,61 +635,61 @@ func sanitizeBlockedTemplates(s string) string {
 // case-insensitive because this runs before rewriteModelInPlace swaps the
 // client-facing model name for the upstream ID. Returns true if changed.
 func forceMaxThinking(obj map[string]any) bool {
-        model, _ := obj["model"].(string)
-        lm := strings.ToLower(model)
-        if !strings.HasPrefix(lm, "hy3") && !strings.HasPrefix(lm, "hy4") {
-                return false
-        }
-        if eff, _ := obj["reasoning_effort"].(string); eff == "high" {
-                return false
-        }
-        obj["reasoning_effort"] = "high"
-        return true
+	model, _ := obj["model"].(string)
+	lm := strings.ToLower(model)
+	if !strings.HasPrefix(lm, "hy3") && !strings.HasPrefix(lm, "hy4") {
+		return false
+	}
+	if eff, _ := obj["reasoning_effort"].(string); eff == "high" {
+		return false
+	}
+	obj["reasoning_effort"] = "high"
+	return true
 }
 
 // rewriteModelInBody replaces the "model" field of a chat-completions body
 // with the resolved upstream model ID.
 func rewriteModelInBody(body []byte, upstreamModel string) []byte {
-        if len(body) == 0 || strings.TrimSpace(upstreamModel) == "" {
-                return body
-        }
-        var obj map[string]any
-        if json.Unmarshal(body, &obj) != nil {
-                return body
-        }
-        cur, _ := obj["model"].(string)
-        if strings.EqualFold(strings.TrimSpace(cur), strings.TrimSpace(upstreamModel)) {
-                return body
-        }
-        obj["model"] = upstreamModel
-        out, err := json.Marshal(obj)
-        if err != nil {
-                return body
-        }
-        return out
+	if len(body) == 0 || strings.TrimSpace(upstreamModel) == "" {
+		return body
+	}
+	var obj map[string]any
+	if json.Unmarshal(body, &obj) != nil {
+		return body
+	}
+	cur, _ := obj["model"].(string)
+	if strings.EqualFold(strings.TrimSpace(cur), strings.TrimSpace(upstreamModel)) {
+		return body
+	}
+	obj["model"] = upstreamModel
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 func isEmptyValue(v any) bool {
-        switch x := v.(type) {
-        case nil:
-                return true
-        case string:
-                return x == ""
-        case []any:
-                return len(x) == 0
-        case map[string]any:
-                if len(x) == 0 {
-                        return true
-                }
-                // Legacy function_call shell: {"name":"","arguments":""} is the
-                // upstream's terminal-chunk artifact, not a real call — treat as empty
-                // when every value is itself empty.
-                for _, val := range x {
-                        if !isEmptyValue(val) {
-                                return false
-                        }
-                }
-                return true
-        }
-        return false
+	switch x := v.(type) {
+	case nil:
+		return true
+	case string:
+		return x == ""
+	case []any:
+		return len(x) == 0
+	case map[string]any:
+		if len(x) == 0 {
+			return true
+		}
+		// Legacy function_call shell: {"name":"","arguments":""} is the
+		// upstream's terminal-chunk artifact, not a real call — treat as empty
+		// when every value is itself empty.
+		for _, val := range x {
+			if !isEmptyValue(val) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
