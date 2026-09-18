@@ -21,11 +21,6 @@ const neutralPrompt = "You are a helpful AI assistant that helps with software e
 // Ported verbatim from OmniRoute/open-sse/executors/codebuddy-cn.ts (MIT).
 var agentPattern = regexp.MustCompile(`(?i)you are claude code|claude.?code.+official.+cli|anthropic.+official.+cli|anxthxropic.+official.+cli|you are (?:cursor|windsurf|cline|aider|continue|copilot|cody)|you are an? (?:ai )?(?:coding |code )?agent|cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)|claude.?code.+issues|give feedback.+claude.?code|you are .{0,30}(?:powerful )?ai agent|orchestration capabilities|OhMyOpenCode|<agent-identity>|<Role>|<Behavior_Instructions>`)
 
-// maxSystemPromptBytes is the byte-length threshold above which a system prompt
-// is replaced wholesale with neutralPrompt. Tencent's filter rejects very long
-// system prompts even when they don't match agentPattern. Mirrors OmniRoute.
-const maxSystemPromptBytes = 2000
-
 // toolDescriptionByteLimit is the threshold above which all tool descriptions
 // are stripped to avoid Tencent's 64KB body-size filter. Mirrors OmniRoute.
 const toolDescriptionByteLimit = 65536
@@ -56,30 +51,30 @@ func prepareUpstreamBody(payload, original []byte, sa *storedAuth, upstreamModel
 	// 2. normalizeTools: tool_choice object form → string; "none" suppresses tools.
 	normalizeToolsInPlace(obj)
 
-	// 3. normalizeRoles: map developer/function/tool role to system before
-	// the rest of the pipeline, so the developer-role system instruction is
-	// also subject to the WAF rewrite below. The upstream whitelists roles and
-	// rejects unknown ones (e.g. developer, the OpenAI alias for system) with
-	// HTTP 400 code=11128 "Illegal API invocation from an unapproved channel";
-	// modern harnesses (DeepSeek Harness / Claude Code) send developer as the
-	// first message role, which would otherwise break every request. Mirrors
-	// workbuddy2api's normalizeRoles() behavior.
+	// 3. normalizeRoles: the workbuddy upstream rejects requests whose
+	// messages carry a "developer" role with 11128 "Illegal API invocation
+	// from an unapproved channel" (deepseek-harness and other OpenAI-compat
+	// clients send developer-role system instructions). Rewrite it to
+	// "system" so the channel check passes. Done before rewriteSystem so a
+	// developer-role system prompt is also subject to the WAF neutralization.
 	normalizeRolesInPlace(obj)
 
-	// 4. rewriteSystem: strip blocked Claude Code template phrases + force thinking.
+	// 4. rewriteSystem: neutralize agent identities in system-role messages +
+	// force thinking.
 	rewriteSystemInPlace(obj)
 
-	// 5. ensureSystemMessage: inject minimal system msg for Global only.
+	// 5. injectReasoning: fold a prior assistant turn's reasoning_content back
+	// into its content as a <thought> block (issue #5). The upstream drops the
+	// non-standard reasoning_content field, losing the model's chain-of-thought
+	// memory across turns; inline tags survive and restore self-attention.
+	injectReasoningInPlace(obj)
+
+	// 6. ensureSystemMessage: inject minimal system message for Global only.
 	ensureSystemMessageInPlace(obj, sa)
 
-	// 6. rewriteModel: swap client model name to upstream model id.
+	// 7. rewriteModel: swap client model name to upstream model id.
 	rewriteModelInPlace(obj, upstreamModel)
 
-	// 7. injectReasoning: fold historical assistant reasoning_content into
-	// content as <thought> blocks, because upstream silently drops the
-	// non-standard reasoning_content field on multi-turn history and the
-	// model would otherwise lose short-term memory (issue #5).
-	injectReasoningInPlace(obj)
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return src
@@ -178,6 +173,8 @@ func prependThoughtInPlace(msg map[string]any, thoughtBlock string) bool {
 		if len(c) == 0 {
 			return false
 		}
+		// Multimodal (array-of-parts) content: prepend a text part carrying the
+		// thought block before the first part. No text part exists → leave it.
 		first, ok := c[0].(map[string]any)
 		if !ok {
 			return false
@@ -189,7 +186,7 @@ func prependThoughtInPlace(msg map[string]any, thoughtBlock string) bool {
 		if strings.HasPrefix(strings.TrimSpace(txt), "<thought>") {
 			return false
 		}
-		first["text"] = thoughtBlock + "\n\n" + txt
+		msg["content"] = append([]any{map[string]any{"type": "text", "text": thoughtBlock}}, c...)
 		return true
 	}
 	return false
@@ -257,9 +254,12 @@ func normalizeToolsInPlace(obj map[string]any) bool {
 
 // rewriteSystemInPlace is the in-place form of rewriteSystemForUpstream.
 // It does three things:
-//  1. For each system message: if length > maxSystemPromptBytes or matches
-//     agentPattern, replace content wholesale with neutralPrompt. Otherwise,
-//     apply sanitizeBlockedTemplates (single-word substitutions).
+//  1. For system messages ONLY: if the text carries an agent-identity marker
+//     (agentPattern) or a blocked template, neutralize it. Only system-role
+//     messages are subject to the content rewrite; user/assistant/tool content
+//     — including long past turns — must reach the upstream untouched or the
+//     model loses context (issue #3: the old length-based wholesale wipe erased
+//     multi-turn history).
 //  2. Strip reasoning_effort "none"/"off" (Tencent rejects them); mirror
 //     other values to reasoning_summary="auto" (OmniRoute codebuddy-cn.ts).
 //  3. forceMaxThinking for hy3/hy4-family models.
@@ -269,6 +269,13 @@ func rewriteSystemInPlace(obj map[string]any) bool {
 	for _, m := range messages {
 		msg, ok := m.(map[string]any)
 		if !ok {
+			continue
+		}
+		// Only the system-role message is the system prompt. Everything else
+		// — including assistant replies longer than any byte limit — is model
+		// context and must pass through unchanged.
+		role, _ := msg["role"].(string)
+		if !strings.EqualFold(strings.TrimSpace(role), "system") {
 			continue
 		}
 		if rewriteContentField(msg) {
@@ -514,6 +521,13 @@ func rewriteSystemForUpstream(payload []byte) []byte {
 		if !ok {
 			continue
 		}
+		// Same role gate as rewriteSystemInPlace: only the system-role message
+		// is the system prompt. Long user/assistant history is model context
+		// and must not be rewritten away.
+		role, _ := msg["role"].(string)
+		if !strings.EqualFold(strings.TrimSpace(role), "system") {
+			continue
+		}
 		if rewriteContentField(msg) {
 			changed = true
 		}
@@ -576,10 +590,10 @@ func ensureSystemMessage(payload []byte, sa *storedAuth) []byte {
 // rewriteContentField sanitizes blocked templates in one message's content,
 // handling both plain-string and OpenAI multimodal (array of parts) shapes.
 //
-// Per OmniRoute codebuddy-cn.ts:
-//   - If content length > maxSystemPromptBytes (2000) OR matches agentPattern,
-//     replace content wholesale with neutralPrompt.
-//   - Otherwise, apply sanitizeBlockedTemplates (single-word substitutions).
+// Only a matched agent identity (agentPattern) is replaced wholesale with
+// neutralPrompt; ordinary content — however long — gets only single-word
+// template substitutions (sanitizeBlockedTemplates). The historic
+// length-based wipe that erased >2000-byte turns is gone (issue #3).
 //
 // Returns true if the message was modified.
 func rewriteContentField(msg map[string]any) bool {
@@ -608,11 +622,14 @@ func rewriteContentField(msg map[string]any) bool {
 	return false
 }
 
-// sanitizeContentText decides between wholesale replacement (neutralPrompt)
-// and template-level single-word substitution. Mirrors OmniRoute codebuddy-cn.ts
-// AGENT_PATTERN + length check.
+// sanitizeContentText neutralizes blocked agent-identity phrases and WAF-hit
+// templates. A long prompt is NOT automatically replaced wholesale: the
+// upstream serves long system prompts/multi-turn history fine (issue #3 —
+// the old >2000-byte wipe erased assistant replies and long user input,
+// producing model "amnesia"). Only a matched agent identity is replaced by
+// the neutral prompt, so the WAF-blocklisted phrase cannot reach upstream.
 func sanitizeContentText(text string) string {
-	if len(text) > maxSystemPromptBytes || agentPattern.MatchString(text) {
+	if agentPattern.MatchString(text) {
 		return neutralPrompt
 	}
 	return sanitizeBlockedTemplates(text)

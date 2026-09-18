@@ -73,19 +73,6 @@ func wbModels() []pluginapi.ModelInfo {
 func staticModelsGlobal() []pluginapi.ModelInfo {
 	return []pluginapi.ModelInfo{
 		{ID: "hy4-preview", Name: "Hy4 Preview", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "hy3", Name: "Hy3", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "deepseek-v4.1-flash", Name: "DeepSeek V4.1 Flash", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "gpt-5.6-sol", Name: "GPT-5.6 Sol", ContextLength: 304000, MaxCompletionTokens: 56000, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", ContextLength: 304000, MaxCompletionTokens: 56000, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "gpt-5.6-luna", Name: "GPT-5.6 Luna", ContextLength: 304000, MaxCompletionTokens: 56000, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "gpt-5.5", Name: "GPT-5.5", ContextLength: 272000, MaxCompletionTokens: 32800, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "gpt-5.4", Name: "GPT-5.4", ContextLength: 272000, MaxCompletionTokens: 32800, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "gpt-5.3-codex", Name: "GPT-5.3 Codex", ContextLength: 256000, MaxCompletionTokens: 28000, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "gemini-3.5-flash", Name: "Gemini 3.5 Flash", ContextLength: 1000000, MaxCompletionTokens: 65536, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "glm-5.3", Name: "GLM-5.3", ContextLength: 131072, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "glm-5.2", Name: "GLM-5.2", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "kimi-k3", Name: "Kimi K3", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "kimi-k2.6", Name: "Kimi K2.6", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 	}
 }
 
