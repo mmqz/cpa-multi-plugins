@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -245,4 +246,56 @@ func LoadDir(dir string) ([]*Auth, error) {
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+// TokenIssuedAt 从 JWT accessToken 的 payload 解出签发时间 iat（Unix 秒）。
+// TRAE 的 payload 形如 {data:{...},exp,iat}，iat 在顶层；解不出返回 false，
+// 调用方回落到仅按 ExpiresAt 判（与旧版行为一致）。
+func TokenIssuedAt(jwtRaw string) (time.Time, bool) {
+	parts := strings.Split(strings.TrimSpace(jwtRaw), ".")
+	if len(parts) < 2 || parts[1] == "" {
+		return time.Time{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		// 部分实现用标准 base64：再试一次 padded 变体
+		raw, err = base64.StdEncoding.DecodeString(parts[1])
+		if err != nil {
+			return time.Time{}, false
+		}
+	}
+	var payload struct {
+		Iat int64 `json:"iat"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil || payload.Iat <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(payload.Iat, 0), true
+}
+
+// issuedRotateMax 主动轮换上限：accessToken 距签发超过该时长就刷新轮换，
+// 不等临到期（对齐 dsh-router-traework 23d06cb / REFRESH_MAX_ISSUED_MS，
+// 2026-09-16）。动机：上游可能服务端吊销旧凭据（JWT 远未到期仍 401，
+// refresh 报会话不存在——codebuddy 2026-06 批实测）；TRAE token 有效期
+// 实测 14 天，取 15 天略大于有效期 = 自然刷新后签发龄归零，本上限主要
+// 兜「长期不用、临到期刷新从未发生」的凭据，让断链尽早暴露。
+const issuedRotateMax = 15 * 24 * time.Hour
+
+// IssuedTooLong 报告当前 accessToken 距签发是否超过 issuedRotateMax（自带读锁，
+// 适合外部无锁环境调用）。
+func (a *Auth) IssuedTooLong() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return IssuedTooLongLocked(a.AccessToken)
+}
+
+// IssuedTooLongLocked 是持锁环境版本：调用方必须已持有 a.mu（写或读锁），
+// 直读字段不再加锁——upstream.RefreshTokenIfNeeded 在写锁内调用它，
+// 若再走 RLock 会与写锁自死锁（Go RWMutex 同 goroutine 写锁内 RLock 会阻塞）。
+func IssuedTooLongLocked(jwtRaw string) bool {
+	iat, ok := TokenIssuedAt(jwtRaw)
+	if !ok {
+		return false
+	}
+	return time.Since(iat) >= issuedRotateMax
 }

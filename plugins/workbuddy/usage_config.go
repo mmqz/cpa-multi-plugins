@@ -22,6 +22,13 @@ var (
 	checkinAuto   = true // enabled by default
 	checkinAutoMu sync.RWMutex
 
+	// tasksAuto gates the growth-center daily bonus loop (task center, v0.9.13):
+	// activity report / makeup / accept / buddy travel / streak redeem /
+	// lottery / reward claims. Rides the same 09:00/21:00 ticks as check-in
+	// (only fires when checkin_auto is also on, since that owns the tick).
+	tasksAuto   = true // enabled by default
+	tasksAutoMu sync.RWMutex
+
 	// loginPlatform selects the client variant used for NEW logins:
 	// "CLI" (workbuddy) or "ide" (CodeBuddy IDE). Configured via
 	// config_yaml login_platform: and read at auth.login_start time.
@@ -95,6 +102,7 @@ func configure(raw []byte) {
 	nextLifecycleAuto := true
 	nextSchedulerMode := schedulerModeOff // reset to default on reconfigure
 	nextKeepaliveAuto := true
+	nextTasksAuto := true
 	nextMgmtKey := ""
 	nextLoginPlatform := "CLI"
 	nextLoginRegion := regionCN
@@ -158,6 +166,10 @@ func configure(raw []byte) {
 					v = strings.Trim(v, "\"'")
 					nextKeepaliveAuto = v == "true" || v == "1" || v == "yes" || v == "on"
 				}
+				if strings.HasPrefix(line, "tasks_auto:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "tasks_auto:"))
+					nextTasksAuto = v == "true" || v == "1" || v == "yes" || v == "on"
+				}
 				if strings.HasPrefix(line, "models_cn:") {
 					if ids := parsePinnedModelList(strings.TrimPrefix(line, "models_cn:")); len(ids) > 0 {
 						nextPinned["cn"] = ids
@@ -186,6 +198,10 @@ func configure(raw []byte) {
 	checkinAutoMu.Lock()
 	checkinAuto = nextCheckinAuto
 	checkinAutoMu.Unlock()
+
+	tasksAutoMu.Lock()
+	tasksAuto = nextTasksAuto
+	tasksAutoMu.Unlock()
 
 	loginPlatformMu.Lock()
 	loginPlatform = nextLoginPlatform

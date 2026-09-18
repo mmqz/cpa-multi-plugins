@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -155,6 +156,17 @@ func processAutoCheckinAccount(f pluginapi.HostAuthFileEntry, doCheckin bool) {
 							accountCache.Store(f.ID, &fresh)
 						}
 					}
+				}
+			}
+		}
+		// v0.9.13: growth-center daily bonus loop rides the check-in tick
+		// (task center: report / makeup / accept / travel / redeem / lottery /
+		// claim). Gated by tasks_auto; failures are absorbed into its own
+		// summary and never affect the checkin flow above.
+		if tasksAutoEnabled() {
+			if res := tasksDailyBonus(sa); res != nil {
+				for _, line := range res.Lines {
+					log.Printf("tasks %s: %s", f.AuthIndex, line)
 				}
 			}
 		}

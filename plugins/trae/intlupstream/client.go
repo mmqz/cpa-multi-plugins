@@ -15,6 +15,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -46,6 +47,16 @@ const (
 
 	// Default base URL (Web SOLO remote API)
 	DefaultBase = "https://core-normal.trae.ai/api/remote/v1"
+
+	// DefaultWebOrigin is the web client origin sent as Origin/Referer on
+	// every chat-session call. Trae's web client moved from solo.trae.ai to
+	// work.trae.ai (SOLO now lives under the TraeWork product surface) and
+	// the backend validates Origin/Referer against the JWT session's real
+	// origin — a stale value yields a clean 401 even with a fresh token
+	// (same root cause as OmniRoute #12190, 2026-09 confirmed). Overridable
+	// per account via Auth.RefererOrigin for credentials still bound to
+	// the legacy host.
+	DefaultWebOrigin = "https://work.trae.ai"
 )
 
 // Auth holds Trae Intl credentials.
@@ -70,6 +81,17 @@ type Auth struct {
 	Region       string // "US-East"
 	AppLanguage  string // "en"
 	AppVersion   string // "1.0.0.1229"
+
+	// RefererOrigin optionally overrides the Origin/Referer web origin
+	// (DefaultWebOrigin when empty). Providers mirroring an auth file that
+	// was captured against the legacy solo.trae.ai host can pin it here.
+	RefererOrigin string
+
+	// Timezone optionally sets the x-trae-user-timezone header (OmniRoute
+	// #13255 forwards psd.userTimezone alongside the Referer/Origin refresh
+	// — both halves together stopped imported connections failing with 401).
+	// Empty = header omitted, matching upstream's conditional send.
+	Timezone string
 }
 
 // Client is the Trae Intl upstream client.
@@ -97,6 +119,14 @@ func New() *Client {
 }
 
 // buildHeaders constructs the Web SOLO remote headers.
+//
+// v0.12.47: Origin/Referer now default to https://work.trae.ai — the backend
+// rejects chat-session calls whose origin does not match the JWT session's
+// real origin with a bare 401 (checkin/billing endpoints do not validate
+// them, which is why check-in kept working while chat broke).
+// v0.12.48: forward x-trae-user-timezone when the auth file carries one —
+// OmniRoute #13255 ships the timezone header as the second half of the 401
+// fix ("refresh Trae's stale Referer/Origin and forward user timezone").
 func buildHeaders(a *Auth) http.Header {
 	h := http.Header{}
 	h.Set("Authorization", "Cloud-IDE-JWT "+a.AccessToken)
@@ -104,7 +134,12 @@ func buildHeaders(a *Auth) http.Header {
 	h.Set("X-Trae-Client-Type", "web")
 	h.Set("X-Preferenced-Language", nonEmpty(a.AppLanguage, "en"))
 	h.Set("x-user-region", nonEmpty(a.Region, "US"))
-	h.Set("Referer", "https://solo.trae.ai/")
+	origin := strings.TrimRight(nonEmpty(a.RefererOrigin, DefaultWebOrigin), "/")
+	h.Set("Origin", origin)
+	h.Set("Referer", origin+"/")
+	if tz := strings.TrimSpace(a.Timezone); tz != "" {
+		h.Set("x-trae-user-timezone", tz)
+	}
 	h.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
 	return h
 }
@@ -714,11 +749,52 @@ func (a *Auth) NeedsRefresh(within time.Duration) bool {
 // RefreshTokenIfNeeded refreshes the token only if it will expire within `within`.
 // Returns true if a refresh actually happened.
 func (c *Client) RefreshTokenIfNeeded(a *Auth, within time.Duration) (bool, error) {
-	if !a.NeedsRefresh(within) {
+	// v0.12.49: near-expiry check plus issuance-age check — see issuedRotateMax.
+	if !a.NeedsRefresh(within) && !issuedTooLong(a.AccessToken) {
 		return false, nil
 	}
 	if err := c.RefreshToken(a); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// tokenIssuedAt parses the `iat` (unix seconds) out of a JWT accessToken
+// payload ({data:{...},exp,iat}); ok=false when absent/unparseable — callers
+// then fall back to the expiresAt-only rule (legacy behaviour).
+func tokenIssuedAt(jwtRaw string) (time.Time, bool) {
+	parts := strings.Split(strings.TrimSpace(jwtRaw), ".")
+	if len(parts) < 2 || parts[1] == "" {
+		return time.Time{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		if raw, err = base64.StdEncoding.DecodeString(parts[1]); err != nil {
+			return time.Time{}, false
+		}
+	}
+	var payload struct {
+		Iat int64 `json:"iat"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil || payload.Iat <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(payload.Iat, 0), true
+}
+
+// issuedRotateMax mirrors the CN side (dsh-router-traework 23d06cb): refresh
+// proactively once the token is 15 days past issuance — the backend may
+// revoke long-lived credentials server-side before expiry, and an unused
+// credential never hits the near-expiry window, so a broken refresh chain
+// would otherwise surface only as a hard session_dead later.
+const issuedRotateMax = 15 * 24 * time.Hour
+
+// issuedTooLong reports whether the token's issuance age exceeds the
+// proactive rotation cap.
+func issuedTooLong(jwtRaw string) bool {
+	iat, ok := tokenIssuedAt(jwtRaw)
+	if !ok {
+		return false
+	}
+	return time.Since(iat) >= issuedRotateMax
 }

@@ -344,7 +344,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.12"
+var version = "0.9.13"
 
 func wbRegistration() registration {
 	return registration{
@@ -356,19 +356,20 @@ func wbRegistration() registration {
 			GitHubRepository: "https://github.com/Sliverkiss/cpa-plugin",
 			Logo:             pluginLogoURL,
 			ConfigFields: []pluginapi.ConfigField{
-				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "【自动签到】启用 CN 账号每日自动签到：本地时间 09:00 与 21:00 各一次（默认开启）。"},
-				{Name: "lifecycle_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "【自动运营】自动管理生命周期：CN 余额耗尽自动禁用、Global 余额耗尽自动删除；CN 签到恢复积分后自动重新启用（默认开启）。"},
-				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "【令牌保活】每天 22:00 自动刷新访问令牌，避免 Keycloak 离线会话过期导致失效（默认开启）。"},
-				{Name: "login_platform", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"CLI", "ide"}, Description: "【登录形态】新登录采用的客户端形态：CLI（WorkBuddy，默认）或 ide（CodeBuddy IDE）。已存在的账号沿用登录/导入时记录的形态，不受此字段影响。"},
-				{Name: "login_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl", "global"}, Description: "【账号区域】新登录的账号归属区域：cn（copilot.tencent.com，默认）、intl（codebuddy.ai，IDE 客户端；与 codebuddy-intl 插件合并）或 global（workbuddy.ai）。Global 使用同一套 CLI 登录协议对接 workbuddy.ai；登录后插件会自动完成境外注册激活，并领取一次性试用积分包（幂等）。"},
-				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "【模型列表】可选模型列表。每个条目可包含 id、name、alias、context、max_tokens、enabled、reasoning 字段。注意：要按区域固定模型，请使用下方的 models_cn / models_global / models_intl。"},
-				{Name: "models_cn", Type: pluginapi.ConfigFieldTypeString, Description: "【CN 模型】留空（推荐）：每个 CN 账号会按 copilot.tencent.com 对其凭证 Token 实际返回的模型来展示（5 分钟缓存）。也可填入逗号分隔的上游模型 ID，用于固定或覆盖 CN 模型的输出。"},
-				{Name: "models_global", Type: pluginapi.ConfigFieldTypeString, Description: "【Global 模型】留空（推荐）：每个 Global 账号会按 workbuddy.ai 对其凭证 Token 实际返回的模型来展示（5 分钟缓存）。也可填入逗号分隔的上游模型 ID，用于固定或覆盖 Global 模型的输出。"},
-				{Name: "models_intl", Type: pluginapi.ConfigFieldTypeString, Description: "【Intl 模型】留空（推荐）：每个 Intl 账号会按 codebuddy.ai 对其凭证 Token 实际返回的模型来展示（5 分钟缓存），不预填猜测值，避免把不支持的模型暴露给客户端。也可填入逗号分隔的上游模型 ID，用于配置或覆盖 Intl 模型的输出。"},
-				{Name: "free_promos", Type: pluginapi.ConfigFieldTypeString, Description: "【免费模型窗口】覆盖免费模型及其免费截止日（含当天）。格式：逗号分隔的 model=YYYY-MM-DD（也可只写 model 表示无限期免费）。覆盖叠加在内置清单上；缺省时内置 dp4.1-flash / hy4-preview 至 2026-09-25、deepseek-v4-flash 无限期免费。示例：deepseek-v4.1-flash=2026-09-25,hy4-preview=2026-10-01" },
-				{Name: "scheduler_mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{schedulerModeOff, schedulerModeCredits}, Description: "【调度策略】多账号选择策略：allowed（交给内置默认路由，默认）或 credits（优先选择剩余量最多的账号）。警告：当设为 allowed 且 lifecycle_auto=false 时，仍可能路由到余额已耗尽的账号——请开启 lifecycle_auto 或改用 credits。"},
-				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "【用量上报地址】用量上报导入地址的可选覆盖值（默认 http://cpa-manager-plus:18317/v0/management/usage/import；也可用环境变量 USAGE_REPORT_URL 指定）。"},
-				{Name: "usage_report_key", Type: pluginapi.ConfigFieldTypeString, Description: "【管理密钥】CPAMP 管理员密钥的可选覆盖值的可选覆盖值。优先自动检测环境变量 CPAMP_ADMIN_KEY / USAGE_REPORT_KEY 或密钥文件 /run/secrets/cpamp_admin_key。"},
+				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 09:00 and 21:00 local time for CN accounts (default true)."},
+				{Name: "tasks_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Growth-center daily bonus loop for CN accounts after each auto check-in tick: activity report, makeup card, task accept/claim, buddy travel, streak redeem, lottery (default true). Manual run via POST /tasks/run regardless of this toggle."},
+				{Name: "lifecycle_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Auto disable CN / delete Global when credits exhausted; re-enable CN after check-in restores credits (default true)."},
+				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily access-token refresh at 22:00 local time to prevent Keycloak offline-session expiry (default true)."},
+				{Name: "login_platform", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"CLI", "ide"}, Description: "Client variant used for NEW logins: CLI (WorkBuddy, default) or ide (CodeBuddy IDE). Existing accounts keep the platform recorded at login/import time."},
+				{Name: "login_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl", "global"}, Description: "Realm for NEW logins: cn (copilot.tencent.com, default), intl (codebuddy.ai, IDE client) or global (workbuddy.ai, web console). Global accounts are added via panel credential import or IDE login."},
+				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional static model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning. NOTE: for realm-scoped pinning use models_cn / models_global / models_intl below."},
+				{Name: "models_cn", Type: pluginapi.ConfigFieldTypeString, Description: "Leave empty (recommended): each CN account then supports exactly what copilot.tencent.com returns for its credential token (5-min cache). Optional comma-separated upstream model IDs to pin/override the CN model output."},
+				{Name: "models_global", Type: pluginapi.ConfigFieldTypeString, Description: "Leave empty (recommended): each Global account then supports exactly what workbuddy.ai returns for its credential token (5-min cache). Optional comma-separated upstream model IDs to pin/override the Global model output."},
+				{Name: "models_intl", Type: pluginapi.ConfigFieldTypeString, Description: "Leave empty (recommended): each Intl account then supports exactly what codebuddy.ai returns for its credential token (5-min cache) - no pre-filled guesses, so unsupported models are never advertised or routed. Optional comma-separated upstream model IDs to pin/override the Intl model output."},
+				{Name: "free_promos", Type: pluginapi.ConfigFieldTypeString, Description: "【免费模型窗口】Override free-model windows (inclusive end). Format: comma-separated model=YYYY-MM-DD (bare model = unbounded free). Merges onto the built-in slate: dp4.1-flash / hy4-preview to 2026-09-25, deepseek-v4-flash unbounded. e.g. free_promos: deepseek-v4.1-flash=2026-09-25,hy4-preview=2026-10-01"},
+				{Name: "scheduler_mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{schedulerModeOff, schedulerModeCredits}, Description: "Multi-account selection: off (defer to built-in, default) or credits (pick highest remaining). WARNING: when off + lifecycle_auto=false, exhausted accounts may still be routed — enable lifecycle_auto or set scheduler_mode=credits."},
+				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional override of CPAMP usage import URL (default http://cpa-manager-plus:18317/v0/management/usage/import; also env USAGE_REPORT_URL)."},
+				{Name: "usage_report_key", Type: pluginapi.ConfigFieldTypeString, Description: "Optional CPAMP admin key override. Prefer auto-detect from env CPAMP_ADMIN_KEY / USAGE_REPORT_KEY or secret file /run/secrets/cpamp_admin_key."},
 			},
 		},
 		Capabilities: registrationCapability{

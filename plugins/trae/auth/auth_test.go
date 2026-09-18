@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -170,4 +172,47 @@ func TestNeedsRefreshLocked(t *testing.T) {
 	if !need {
 		t.Error("expired token should need refresh under lock")
 	}
+}
+
+// v0.12.49: JWT iat 签发龄解析 + 15 天主动轮换判定（对齐 dsh-router-traework
+// 23d06cb）。上游可能服务端吊销旧凭据（JWT 未到期仍 401），仅靠临到期判
+// 会让长期不用的凭据在断链时暴露过晚。
+func TestTokenIssuedAt(t *testing.T) {
+	now := int64(1789692207)
+	tok := "hdr." + b64url(t, map[string]any{"data": map[string]any{"uid": "u"}, "exp": now + 100, "iat": now}) + ".sig"
+	got, ok := TokenIssuedAt(tok)
+	if !ok || got.Unix() != now {
+		t.Errorf("TokenIssuedAt = %v, %v; want %d, true", got, ok, now)
+	}
+	if _, ok := TokenIssuedAt("garbage"); ok {
+		t.Error("garbage token should not parse")
+	}
+	if _, ok := TokenIssuedAt(""); ok {
+		t.Error("empty token should not parse")
+	}
+}
+
+func TestIssuedTooLongLocked(t *testing.T) {
+	old := "h." + b64url(t, map[string]any{"iat": time.Now().Add(-16 * 24 * time.Hour).Unix()}) + ".s"
+	fresh := "h." + b64url(t, map[string]any{"iat": time.Now().Add(-2 * 24 * time.Hour).Unix()}) + ".s"
+	noIat := "h." + b64url(t, map[string]any{"exp": 1}) + ".s"
+	if !IssuedTooLongLocked(old) {
+		t.Error("16d-old iat should trigger rotation")
+	}
+	if IssuedTooLongLocked(fresh) {
+		t.Error("2d-old iat should not trigger rotation")
+	}
+	if IssuedTooLongLocked(noIat) || IssuedTooLongLocked("junk") {
+		t.Error("missing iat must fall back to false (expiresAt-only rule)")
+	}
+}
+
+// b64url 测试辅助：标准 base64url 编码（无 padding）。
+func b64url(t *testing.T, v any) string {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
 }

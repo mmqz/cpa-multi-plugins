@@ -45,3 +45,7 @@ plugins/qoder-intl/qoder-intl
 plugins/qoder/qoder
 plugins/trae/trae
 plugins/workbuddy/workbuddy
+
+# Local probe tools (kept out of the repo by convention — dev-only helpers)
+plugins/trae/modelsprobe
+plugins/trae/tools/

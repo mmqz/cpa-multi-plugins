@@ -184,6 +184,7 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     <button class="sec" id="importBtn" onclick="openImportModal()">导入凭证</button>
     <button id="refreshBtn" onclick="load(true,this)">刷新数据</button>
     <button class="sec" onclick="checkinAll(this)">全部签到</button>
+    <button class="sec" onclick="tasksRunAll(this)" title="CN 任务中心：活跃上报 / 补签 / 接受任务 / 猫旅行 / 连登兑换 / 抽奖 / 领奖">全部任务</button>
     <button class="sec" onclick="claimTrialAll(this)" title="仅 Global · 一次性">全部领取</button>
     <label class="toggle" title="仅 CN 账号 09:00 / 21:00"><input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)"> 自动签到(CN)</label>
     <span class="toggle" id="svtime"></span>
@@ -324,11 +325,43 @@ function bindCardActions(root){
       const act=ev.currentTarget.dataset.action;
       const idx=ev.currentTarget.dataset.authIndex;
       if(act==="checkin") checkin(idx, ev.currentTarget);
+      else if(act==="tasks") tasksRun(idx, ev.currentTarget);
       else if(act==="claim") claimTrial(idx, ev.currentTarget);
       else if(act==="select") selectAuth(idx, ev.currentTarget);
       else if(act==="refresh") refreshCredits(idx, ev.currentTarget);
     });
   });
+}
+// Task center (v0.9.13): growth-center daily loop — report / makeup /
+// accept / travel / redeem / lottery / claim. Per-account button + run-all.
+async function tasksRun(idx, btn){
+  busy(btn,true);
+  try{
+    const d=await api("/tasks/run",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth_index:idx})});
+    if(d.error){toast("任务中心失败","err",d.error);return}
+    const r=(d.results||[])[0]||{};
+    if(r.skipped){toast((r.nickname||idx)+"：任务中心","warn",r.reason==="non-cn"?"仅 CN 账号支持任务中心":"已跳过");return}
+    if(r.error){toast((r.nickname||idx)+"：任务中心失败","err",r.error);return}
+    const lines=r.lines||[];
+    toast((r.nickname||idx)+"：任务中心完成","ok",lines.slice(0,6).join("；")+(lines.length>6?" …(共 "+lines.length+" 项)":""));
+  }catch(e){toast("任务中心请求失败","err",e.message)}
+  finally{busy(btn,false)}
+}
+async function tasksRunAll(btn){
+  busy(btn,true);
+  try{
+    const d=await api("/tasks/run",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    if(d.error){toast("批量任务失败","err",d.error);return}
+    const s=d.summary||{};
+    const ok=Number(s.success||0), skip=Number(s.skipped||0), fail=Number(s.fail||0);
+    const rewards=[];
+    (d.results||[]).forEach(r=>{
+      (r.lines||[]).forEach(l=>{ if(/\+\d+/.test(l)) rewards.push((r.nickname||"")+" "+l); });
+    });
+    const title="批量任务中心："+ok+" 完成"+(skip?" / "+skip+" 跳过":"")+(fail?" / "+fail+" 失败":"");
+    toast(title, fail?"err":"ok", rewards.slice(0,8).join("；")+(rewards.length>8?" …(共 "+rewards.length+" 项)":""));
+  }catch(e){toast("批量任务请求失败","err",e.message)}
+  finally{busy(btn,false)}
 }
 // Model-source line (v0.9.9): tells the user WHERE this realm's model list
 // came from — dynamic discovery, config pin, or the static fallback — and, on
@@ -369,6 +402,9 @@ function card(a){
     const btnText=checked?"已签到":"签到";
     const btnDisabled=checked?" disabled=\"disabled\"":"";
     actionHTML=`<button class="${btnClass}" data-action="checkin" data-auth-index="${esc(a.auth_index)}"${btnDisabled}>${btnText}</button>`;
+    if(!isIntl){
+      actionHTML+=`<button class="sec" data-action="tasks" data-auth-index="${esc(a.auth_index)}" title="任务中心：活跃上报 / 补签 / 领奖 / 猫旅行 / 连登兑换 / 抽奖">任务</button>`;
+    }
   }
   const selectBtn=selected
     ? `<button class="done" disabled="disabled">使用中</button>`

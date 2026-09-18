@@ -146,6 +146,10 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodGet, Path: base + "/accounts", Description: "List WorkBuddy accounts with credits, plan and check-in status."},
 			{Method: http.MethodPost, Path: base + "/refresh", Description: "Force refresh quota/cache for all accounts."},
 			{Method: http.MethodPost, Path: base + "/checkin", Description: "Manually check in one account (auth_index) or all."},
+			{Method: http.MethodGet, Path: base + "/tasks", Description: "Growth-center scan (CN only): streak, travel status, claimable tasks per account."},
+			{Method: http.MethodPost, Path: base + "/tasks/run", Description: "Run the growth-center daily bonus loop for one account (auth_index) or all CN accounts: report, makeup, accept, travel, redeem, lottery, claim."},
+			{Method: http.MethodGet, Path: base + "/tasks", Description: "Growth-center scan (CN only): streak, travel status, claimable tasks per account."},
+			{Method: http.MethodPost, Path: base + "/tasks/run", Description: "Run the growth-center daily bonus loop for one account (auth_index) or all CN accounts: report, makeup, accept, travel, redeem, lottery, claim."},
 			{Method: http.MethodPost, Path: base + "/checkin/config", Description: "Toggle auto check-in (enabled: true/false)."},
 			{Method: http.MethodGet, Path: base + "/credits", Description: "Get real-time credits for one (auth_index query) or all accounts."},
 			{Method: http.MethodPost, Path: base + "/import", Description: "Import WorkBuddy credential JSON (nested or flat) into host auth store."},
@@ -199,6 +203,14 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleManualCheckin(req)))
 	case req.Method == http.MethodPost && path == base+"/checkin/config":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCheckinConfig(req)))
+	case req.Method == http.MethodGet && path == base+"/tasks":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleTasksQuery(req)))
+	case req.Method == http.MethodPost && path == base+"/tasks/run":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleTasksRun(req)))
+	case req.Method == http.MethodGet && path == base+"/tasks":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleTasksQuery(req)))
+	case req.Method == http.MethodPost && path == base+"/tasks/run":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleTasksRun(req)))
 	case req.Method == http.MethodGet && path == base+"/credits":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCreditsQuery(req)))
 	case req.Method == http.MethodPost && path == base+"/import":

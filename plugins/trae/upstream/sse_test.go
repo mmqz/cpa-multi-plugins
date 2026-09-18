@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -364,5 +365,61 @@ func TestPrepareBodyWhitelistsUpstreamFields(t *testing.T) {
 	}
 	if m["config_name"] != "glm-5.2" || m["function"] != "solo_work_lite" || m["stream"] != true {
 		t.Errorf("core fields=%v/%v/%v", m["config_name"], m["function"], m["stream"])
+	}
+}
+
+// v0.12.48: 流内 4008 "Your requests have exceeded the quota" 必须归
+// plan_limit（与 1005 同表）——此前归 ErrClient（60s 短冷却），坏号留在
+// 池里反复撞墙。dsh-router-traework 2026-09-08 三账号实测：这个配额与
+// 积分余额是两回事，面板还有 200 积分的号也会中招。
+func TestSOLOStreamError4008IsPlanLimit(t *testing.T) {
+	if k := (&SOLOStreamError{Code: 4008, Msg: "Your requests have exceeded the quota"}).Kind(); k != ErrPlanLimit {
+		t.Errorf("4008 kind = %v, want plan_limit", k)
+	}
+	if k := (&SOLOStreamError{Code: 1005, Msg: "plan"}).Kind(); k != ErrPlanLimit {
+		t.Errorf("1005 kind = %v, want plan_limit", k)
+	}
+	if k := (&SOLOStreamError{Code: 4001, Msg: "param invalid"}).Kind(); k != ErrClient {
+		t.Errorf("4001 kind = %v, want client", k)
+	}
+}
+
+// v0.12.48: 客户端未显式指定 max_tokens 时默认 1M —— 上游会把输出截在
+// 128k（dsh-router-traework cfc7572，2026-09-15）。显式值原样透传。
+func TestPrepareBodyDefaultsMaxTokens(t *testing.T) {
+	out := PrepareBody([]byte(`{"model":"glm-5.2-solo","messages":[{"role":"user","content":"hi"}]}`), "solo")
+	var m map[string]any
+	json.Unmarshal(out, &m)
+	if v, ok := m["max_tokens"].(float64); !ok || v != 1000000 {
+		t.Errorf("default max_tokens = %v, want 1000000", m["max_tokens"])
+	}
+
+	out2 := PrepareBody([]byte(`{"model":"glm-5.2-solo","messages":[{"role":"user","content":"hi"}],"max_tokens":4096}`), "solo")
+	var m2 map[string]any
+	json.Unmarshal(out2, &m2)
+	if v, ok := m2["max_tokens"].(float64); !ok || v != 4096 {
+		t.Errorf("explicit max_tokens = %v, want 4096 (passthrough)", m2["max_tokens"])
+	}
+}
+
+// v0.12.49: reasoning_effort 非 auto/none/off 时透传上游（dsh-router 生产
+// 实证上游容忍）；auto/none/off 不显式下发，与真实客户端一致。v0.12.37
+// 白名单曾整体丢弃它。
+func TestPrepareBodyForwardsReasoningEffort(t *testing.T) {
+	out := PrepareBody([]byte(`{"model":"glm-5.2-solo","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`), "solo")
+	var m map[string]any
+	json.Unmarshal(out, &m)
+	if m["reasoning_effort"] != "high" {
+		t.Errorf("reasoning_effort = %v, want high (forwarded)", m["reasoning_effort"])
+	}
+
+	for _, lv := range []string{"auto", "none", "off"} {
+		in := fmt.Sprintf(`{"model":"glm-5.2-solo","messages":[{"role":"user","content":"hi"}],"reasoning_effort":%q}`, lv)
+		out := PrepareBody([]byte(in), "solo")
+		var m map[string]any
+		json.Unmarshal(out, &m)
+		if _, ok := m["reasoning_effort"]; ok {
+			t.Errorf("reasoning_effort=%q must not be sent upstream", lv)
+		}
 	}
 }

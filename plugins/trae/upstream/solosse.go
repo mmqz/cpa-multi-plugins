@@ -56,9 +56,17 @@ func (e *SOLOStreamError) Error() string {
 	return fmt.Sprintf("solo error code=%d msg=%s", e.Code, e.Msg)
 }
 
-// Kind 将 SSE 流内错误分类。1005 → ErrPlanLimit；其余归 ErrClient。
+// soloPlanLimitCodes 流内业务码 → plan_limit 语义集合。
+// v0.12.48: 补 4008 —— 上游对「该账号没有这个模型的配额」发 HTTP 200 +
+// 流内 code=4008 "Your requests have exceeded the quota"（dsh-router-traework
+// 2026-09-08 三账号实测：面板还有 200 积分的号也中招，这个配额与积分余额
+// 是两回事）。此前 4008 归 ErrClient（60s 短冷却、不累计禁用），坏号留在
+// 池里反复撞墙。对齐 dsh-router-traework PLAN_LIMIT_CODES（2026-09-15）。
+var soloPlanLimitCodes = map[int64]struct{}{1005: {}, 4008: {}}
+
+// Kind 将 SSE 流内错误分类。1005/4008 → ErrPlanLimit；其余归 ErrClient。
 func (e *SOLOStreamError) Kind() ErrKind {
-	if e.Code == 1005 {
+	if _, ok := soloPlanLimitCodes[e.Code]; ok {
 		return ErrPlanLimit
 	}
 	return ErrClient

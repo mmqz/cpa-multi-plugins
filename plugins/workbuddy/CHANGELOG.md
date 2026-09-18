@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.9.13
+
+### Growth-center task loop (repo v0.12.55)
+
+Task 17 implementation — the CN growth center (成长中心) the wb2api panel
+automates since mid-September, ported to the plugin's host-bridge plumbing
+(`growth.go` client + `taskcenter.go` orchestration, endpoints verified
+upstream by the wb2api project):
+
+- **Task center API**: `GET /v0/management/plugins/workbuddy/tasks` — read-only
+  scan (streak days, makeup cards, travel state, claimable tasks per account);
+  `POST .../tasks/run` — run the daily loop for one account (`auth_index`) or
+  every CN account (sem=4, per-account checkin lock reuse).
+- **Daily loop order matters** (each step best-effort, failures logged into the
+  per-account summary): activity report (lights streak + unlocks first_buddy)
+  → makeup card for yesterday → gift/compensation → accept pending tasks
+  (upstream counts progress only for accepted tasks) → buddy travel state
+  machine (adopt / depart location 4 / claim by record_id) → streak tier
+  redeem (7d/14d/28d, 403 = locked skip) → lottery drain → claim every
+  claimable task reward.
+- **Three upstream domains**: growth endpoints live on copilot.tencent.com
+  (tasks carry a /v2 prefix, travel/streak do not); the chat-activity report
+  and gift/compensation claims on www.codebuddy.cn; and the task reward claim
+  ONLY on www.workbuddy.cn with web Origin/Referer + x-client-platform: web —
+  the same path on the CLI domain 400s ("task not completed").
+- **Realm gating**: CN accounts only (global has no growth center upstream;
+  intl has never exposed one — wb2api gates global out with the same
+  reasoning). Non-CN accounts show a clean skip in scan/run results.
+- **Scheduler ride-along**: the loop runs after each auto check-in tick
+  (09:00/21:00) when `tasks_auto` is on (default true, new plugin config
+  field); manual run via the panel buttons works regardless.
+- **Panel**: 全部任务 toolbar button + per-CN-account 任务 button with result
+  toasts; reward lines (+N 分) aggregated across accounts in the batch toast.
+- Report event shape keeps the full client telemetry field list with userId
+  (missing userId = upstream 200 but silent drop, per wb2api REPORT notes);
+  no retry on report (day-idempotent, blind resend would skew counters).
+
+
 ## 0.9.12
 
 ### /v3/config dual-probe discovery + capability surfacing + non-chat model filter (repo v0.12.51)
