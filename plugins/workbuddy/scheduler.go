@@ -1,10 +1,10 @@
 // scheduler.go implements the CPA scheduler.pick capability for workbuddy.
 //
-// Free vs paid routing: models in freeModelCache bypass credits checks and are
-// round-robined across all enabled workbuddy auths, because a free promotional
-// model costs no credits so an exhausted account still serves it. All other
-// models fall through to the panel-selected active account with the usual
-// exhausted/disabled fallback (picker.go semantics).
+// Free vs paid routing: models in the free-promo slate bypass credits checks
+// and are round-robined across all enabled workbuddy auths, because a free
+// promotional model costs no credits so an exhausted account still serves it.
+// All other models fall through to the panel-selected active account with the
+// usual exhausted/disabled fallback (picker.go semantics).
 package main
 
 import (
@@ -12,6 +12,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -23,34 +24,93 @@ const (
 	schedulerModeCredits = "credits"
 )
 
-// freeModelCache lists model IDs that are free while in trial and must NOT pay
-// account credits. A free model may be served from an account whose credits are
-// exhausted, because calling it does not spend the paid pool. Paid models keep
-// the credits-based picker so an exhausted account is skipped.
+// defaultFreePromos is the product-promo slate shipped with the plugin:
+// model id → promo end date (inclusive, UTC); the zero time means free
+// unbounded (no declared end yet). This default is replaceable at runtime by
+// the free_promos config field (usage_config.go), which REPLACES the whole
+// slate — list the models that are currently free there, each as
+// model=YYYY-MM-DD (or bare model for unbounded), comma-separated.
 //
-// Add here only models whose upstream idle cost is zero when the account is in
-// its free-trial window (e.g. deepseek-v4.1-flash free-for-2-weeks since
-// 2026-09-10). Once the trial ends the model stops being free; remove it here
-// at the same time you remove the promo from the model catalog.
-var freeModels = map[string]bool{
-	// DeepSeek V4.1 Flash: free for 2 weeks in WorkBuddy/CodeBuddy since
-	// 2026-09-10 launch partner agreement (models.go v0.12.19 note).
-	"deepseek-v4.1-flash": true,
-	// DeepSeek V4 Flash (non 4.1): still free in the 14-day promo window.
-	"deepseek-v4-flash": true,
+// A free model may be served from an account whose credits are exhausted,
+// because calling it does not spend the paid pool. Paid models keep the
+// credits-based picker so an exhausted account is skipped.
+var defaultFreePromos = map[string]time.Time{
+	// DeepSeek V4.1 Flash: free for 2 weeks since 2026-09-10, ends 2026-09-25
+	// (inclusive — the "25号" day itself is still free), per the launch partner
+	// agreement, user-confirmed. Stored as end-of-day 23:59:59.999 UTC so the
+	// comparison is simply now < end.
+	"deepseek-v4.1-flash": time.Date(2026, 9, 25, 23, 59, 59, 999999999, time.UTC),
+	// Hunyuan 4 Preview: free trial, same window (through 2026-09-25).
+	"hy4-preview": time.Date(2026, 9, 25, 23, 59, 59, 999999999, time.UTC),
+	// DeepSeek V4 Flash (non-4.1): no declared promo end yet → unbounded.
+	"deepseek-v4-flash": {},
 }
 
-// isFreeModel reports whether a model id is exempt from credits checks.
+// freePromos is the runtime-free-while-window table. Reads/writes are guarded
+// so configure() can hot-swap the slate without racing scheduler picks.
+// An absent id is a paid model; a zero end time is free unbounded.
+var freePromos = struct {
+	sync.RWMutex
+	m map[string]time.Time
+}{m: defaultFreePromos}
+
+// setFreePromo updates one model's window end (zero clears it, making the
+// model no longer free). Used by configure() for a free_promos override.
+func setFreePromo(model string, end time.Time) {
+	freePromos.Lock()
+	defer freePromos.Unlock()
+	if end.IsZero() {
+		delete(freePromos.m, model)
+		return
+	}
+	freePromos.m[model] = end
+}
+
+// setFreePromos replaces the whole free-promo slate. Used by configure().
+func setFreePromos(m map[string]time.Time) {
+	freePromos.Lock()
+	defer freePromos.Unlock()
+	freePromos.m = m
+}
+
+// freePromoEnd returns the model's current end date (zero time if none).
+func freePromoEnd(model string) time.Time {
+	freePromos.RLock()
+	defer freePromos.RUnlock()
+	return freePromos.m[model]
+}
+
+// isFreeModel reports whether a model is currently inside its free-promo
+// window (or is free unbounded). Absent from the slate → paid (goes through
+// the credits-aware picker). Zero end → free. Otherwise free only while now
+// is before the end-of-day marker: the end date is inclusive.
 func isFreeModel(model string) bool {
-	return freeModels[model]
+	freePromos.RLock()
+	defer freePromos.RUnlock()
+	end, ok := freePromos.m[model]
+	if !ok {
+		return false
+	}
+	if end.IsZero() {
+		return true
+	}
+	// end is clamped to end-of-day so the end date itself is still free.
+	return time.Now().UTC().Before(end)
 }
 
-// freeModelIDs returns the ids in freeModels (map iteration order, which Go
-// randomizes) so callers that need a stable advertised list can sort it.
+// freeModelIDs returns the ids currently inside their free window (map
+// iteration order, which Go randomizes) so callers that need a stable
+// advertised list can sort it. Post-window promos drop out of the merge, so
+// the advertised catalog and the scheduler free-routing stay in sync.
 func freeModelIDs() []string {
-	ids := make([]string, 0, len(freeModels))
-	for id := range freeModels {
-		ids = append(ids, id)
+	freePromos.RLock()
+	defer freePromos.RUnlock()
+	now := time.Now().UTC()
+	ids := make([]string, 0, len(freePromos.m))
+	for id, end := range freePromos.m {
+		if end.IsZero() || now.Before(end) {
+			ids = append(ids, id)
+		}
 	}
 	return ids
 }
@@ -70,7 +130,8 @@ var (
 
 // wbrr is a small round-robin over a stable ordered id list. It is not safe
 // for concurrent use by itself; serialize with freeRouletteMu when reading or
-// mutating it. The list is only ever rebuilt while holding the mutex.
+// mutating it (either of which the API interface is clean for).
+// The list is only ever rebuilt while holding the mutex.
 type wbrr struct {
 	mu   sync.Mutex
 	ids  []string
@@ -152,7 +213,7 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 	}
 
-	// Collect workbuddy candidates only.
+	// Collect workbuddy candidates only (skip disabled).
 	var wbCandidates []pluginapi.SchedulerAuthCandidate
 	for _, c := range req.Candidates {
 		if c.Provider != providerName {

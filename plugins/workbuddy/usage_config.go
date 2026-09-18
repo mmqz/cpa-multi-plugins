@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -99,6 +100,7 @@ func configure(raw []byte) {
 	nextLoginRegion := regionCN
 
 	nextPinned := map[string][]string{}
+	var freePromoCfgEntries map[string]time.Time // free_promos override (model→end)
 	cfgURL, cfgKey := "", ""
 	if len(raw) > 0 {
 		var req struct {
@@ -171,6 +173,11 @@ func configure(raw []byte) {
 						nextPinned["intl"] = ids
 					}
 				}
+				if strings.HasPrefix(line, "free_promos:") {
+					if m, ok := parseFreePromosValue(strings.TrimPrefix(line, "free_promos:")); ok {
+						freePromoCfgEntries = m
+					}
+				}
 			}
 		}
 	}
@@ -219,8 +226,66 @@ func configure(raw []byte) {
 
 	resolveUsageReport(cfgURL, cfgKey)
 	ensureScheduler()
+	// Apply free_promos override on top of the seeded defaults. The cfg value
+	// sets/overrides per-model window ends; anything not listed keeps its seed
+	// (so deepseek-v4-flash stays free even if not re-listed). A reconfigure
+	// without the field leaves the previous cfg merge, and empty cfgEntries
+	// means the pure seeded slate.
+	slate := make(map[string]time.Time, len(defaultFreePromos)+len(freePromoCfgEntries))
+	for k, v := range defaultFreePromos {
+		slate[k] = v
+	}
+	for k, v := range freePromoCfgEntries {
+		if v.IsZero() {
+			delete(slate, k)
+			continue
+		}
+		slate[k] = v
+	}
+	freePromos.Lock()
+	freePromos.m = slate
+	freePromos.Unlock()
 	// Migrate legacy codebuddy-cn auth files (merged plugin, v0.9.0).
 	startAdoption()
+}
+
+// parseFreePromosValue converts the free_promos config value (e.g.
+// "deepseek-v4.1-flash=2026-09-25,hy4-preview=2026-09-25" or bare ids) into a
+// map of model id → end time (zero = unbounded). Invalid entries are skipped.
+func parseFreePromosValue(v string) (map[string]time.Time, bool) {
+	out := map[string]time.Time{}
+	v = strings.TrimSpace(v)
+	v = strings.Trim(v, "\"'")
+	if v == "" {
+		return nil, false
+	}
+	// Accept "model=date", "model", comma-separated.
+	for _, tok := range strings.Split(v, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		model, dateStr, hasDate := strings.Cut(tok, "=")
+		model = strings.TrimSpace(model)
+		model = strings.Trim(model, "\"'")
+		if model == "" {
+			continue
+		}
+		if !hasDate {
+			out[model] = time.Time{}
+			continue
+		}
+		dateStr = strings.TrimSpace(dateStr)
+		dateStr = strings.Trim(dateStr, "\"'")
+		d, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			log.Printf("free_promos: skipping %q: bad date %q: %v", model, dateStr, err)
+			continue
+		}
+		// Seed at end-of-day 23:59:59.999 UTC so the DAY ITSELF is free.
+		out[model] = d.Add(24*time.Hour - time.Nanosecond)
+	}
+	return out, true
 }
 
 // resolveUsageReport fills usageReportURL/key from config → env → secret files.

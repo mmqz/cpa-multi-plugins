@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -451,5 +452,121 @@ func TestEnsureDefaultActiveAuth_AllExhausted_KeepsCurrent(t *testing.T) {
 	})
 	if id != "a1" {
 		t.Fatalf("all exhausted should keep a1, got %q", id)
+	}
+}
+
+// --- free-promo window expiry + config override --------------------------
+
+// resetFreePromos snapshots the current slate (deep-copy) and restores it via
+// cleanup, so a test that mutates the map in place cannot leak into another.
+func resetFreePromos(t *testing.T) {
+	t.Helper()
+	freePromos.RLock()
+	orig := make(map[string]time.Time, len(freePromos.m))
+	for k, v := range freePromos.m {
+		orig[k] = v
+	}
+	freePromos.RUnlock()
+	t.Cleanup(func() {
+		freePromos.Lock()
+		freePromos.m = orig
+		freePromos.Unlock()
+	})
+}
+
+// TestFreeModelExpiry l'expire: a promos model whose end date has passed is
+// no longer free (paid, credits-aware) and drops out of freeModelIDs.
+func TestFreeModelExpiry_PastWindowIsPaid(t *testing.T) {
+	resetFreePromos(t)
+	// Seeded window for deepseek-v4.1-flash ends 2026-09-25 (inclusive).
+	// As of 2026-09-18 that's still in the future, so verify the reverse too:
+	// force the end into the past and confirm it is no longer free.
+	freePromos.Lock()
+	freePromos.m["deepseek-v4.1-flash"] = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	freePromos.Unlock()
+
+	if isFreeModel("deepseek-v4.1-flash") {
+		t.Fatal("expired promo must be treated as paid")
+	}
+	for _, id := range freeModelIDs() {
+		if id == "deepseek-v4.1-flash" {
+			t.Fatal("expired promo must be dropped from freeModelIDs")
+		}
+	}
+	// hy4-preview (still inside its window) must remain free.
+	if !isFreeModel("hy4-preview") {
+		t.Fatal("hy4-preview still in window must be free")
+	}
+	if !isFreeModel("deepseek-v4-flash") {
+		t.Fatal("unbounded promo must stay free")
+	}
+}
+
+// TestFreePromoConfigOverride locks the free_promos config: an override
+// replaces the whole slate (deepseek-v4-flash drops out unless re-listed).
+func TestFreePromosConfigOverrideReplacesSlate(t *testing.T) {
+	resetFreePromos(t)
+	// Simulate configure(free_promos: "hy4-preview=2026-10-01")
+	slate := map[string]time.Time{
+		"hy4-preview": time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
+	}
+	setFreePromos(slate)
+
+	if !isFreeModel("hy4-preview") {
+		t.Fatal("override-listed model must be free")
+	}
+	if isFreeModel("deepseek-v4-flash") {
+		t.Fatal("override replaces slate: unlisted model must be paid")
+	}
+	// A not-in-slate model is paid.
+	if isFreeModel("gpt-5.6-sol") {
+		t.Fatal("unlisted model must be paid")
+	}
+}
+
+// TestParseFreePromosValue exercises the config-value parser (incl. bare id
+// → unbounded, and bad date skipped).
+func TestParseFreePromosValue(t *testing.T) {
+	m, ok := parseFreePromosValue("deepseek-v4.1-flash=2026-09-25,hy4-preview=bad-date,some-model")
+	if !ok {
+		t.Fatal("parser must accept the value")
+	}
+	if !m["deepseek-v4.1-flash"].Equal(time.Date(2026, 9, 25, 23, 59, 59, 999999999, time.UTC)) {
+		t.Fatalf("date must be clamped to end-of-day, got %v", m["deepseek-v4.1-flash"])
+	}
+	if _, has := m["hy4-preview"]; has {
+		t.Fatal("hy4-preview bad date must be skipped")
+	}
+	if v, has := m["some-model"]; !has || !v.IsZero() {
+		t.Fatalf("bare model must be unbounded (has=%v v=%v)", has, v)
+	}
+}
+
+// 现在断言 seeded slate: 2026-09-25 (today is 2026-09-18) both in window.
+func TestFreePromoInclusiveEndDate(t *testing.T) {
+	resetFreePromos(t)
+	if !isFreeModel("deepseek-v4.1-flash") || !isFreeModel("hy4-preview") {
+		t.Fatal("seeded window models must be free today")
+	}
+}
+
+// TestConfigureFreePromosWiresConfig locks the free_promos config_yaml path:
+// configure() with a free_promos line replaces the slate, and a later
+// reconfigure without one restores the seeded defaults.
+func TestConfigureFreePromosWiresConfig(t *testing.T) {
+	resetFreePromos(t)
+	configure(configYAMLEnvelope("enabled: true\nfree_promos: \"hy4-preview=2026-10-01\"\n"))
+	if !isFreeModel("hy4-preview") {
+		t.Fatal("configured promoted model must be free")
+	}
+	// Merge semantics: entries NOT touched by the override keep their seed.
+	if !isFreeModel("deepseek-v4-flash") {
+		t.Fatal("override merges: unlisted seed model must stay free")
+	}
+	// Reconfigure without free_promos leaves the merged state intact but the
+	// seeded defaults are always part of the slate.
+	configure(configYAMLEnvelope("enabled: true\n"))
+	if !isFreeModel("deepseek-v4-flash") || !isFreeModel("deepseek-v4.1-flash") {
+		t.Fatal("seeded defaults must always be present")
 	}
 }

@@ -63,8 +63,10 @@ func TestMergeFreeModels(t *testing.T) {
 	}
 	got := mergeFreeModels(base)
 	ids := discoveryIDs(got)
-	if len(got) != 3 {
-		t.Fatalf("want gpt-5.6-sol + 2 free models, got %v", ids)
+	// hy4-preview joined the free promos (window through 2026-09-25), so now
+	// there are 3 free ids expected on top of the paid base.
+	if len(got) != 4 {
+		t.Fatalf("want gpt-5.6-sol + 3 free models, got %v", ids)
 	}
 	if got[0].ID != "gpt-5.6-sol" {
 		t.Fatalf("paid discovery entry must stay first, got %v", ids)
@@ -76,12 +78,14 @@ func TestMergeFreeModels(t *testing.T) {
 			t.Fatalf("merged free model %s must own_by provider, got %+v", m.ID, m)
 		}
 	}
-	if !seen["deepseek-v4-flash"] || !seen["deepseek-v4.1-flash"] {
-		t.Fatalf("both free models must be present, got %v", ids)
+	for _, want := range []string{"deepseek-v4-flash", "deepseek-v4.1-flash", "hy4-preview"} {
+		if !seen[want] {
+			t.Fatalf("free model %s must be present, got %v", want, ids)
+		}
 	}
 	// Already-present free model must not be duplicated.
 	dedup := mergeFreeModels([]pluginapi.ModelInfo{{ID: "deepseek-v4.1-flash"}})
-	if len(dedup) != 2 {
+	if len(dedup) != 3 {
 		t.Fatalf("existing free model must not duplicate, got %v", discoveryIDs(dedup))
 	}
 }

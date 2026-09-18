@@ -167,14 +167,14 @@ func TestFetchDynamicModelsRecordsSourceState(t *testing.T) {
 	}
 	got = fetchDynamicModelsFromStorage(storage)
 	// Discovery's doctored list [deepseek-v4.1-flash glm-5.2] plus the free-model
-	// guarantee merges deepseek-v4-flash (absent upstream) → 3 models. The paid
-	// entry leading the list must stay intact.
-	if len(got) != 3 || got[0].ID != "deepseek-v4.1-flash" {
+	// guarantee merges deepseek-v4-flash and hy4-preview (absent upstream) → 4
+	// models. The paid entry leading the list must stay intact.
+	if len(got) != 4 || got[0].ID != "deepseek-v4.1-flash" {
 		t.Fatalf("successful discovery must be served (with free-model merge): %+v", discoveryIDs(got))
 	}
 	st = realmModelStateFor("cn")
-	if st == nil || st.Source != "discovery" || st.Count != 3 {
-		t.Fatalf("discovery state = %+v, want source=discovery count=3", st)
+	if st == nil || st.Source != "discovery" || st.Count != 4 {
+		t.Fatalf("discovery state = %+v, want source=discovery count=4", st)
 	}
 	if st.LastError != "" {
 		t.Errorf("successful discovery must clear last_error, got %q", st.LastError)

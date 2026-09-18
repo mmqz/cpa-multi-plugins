@@ -262,7 +262,7 @@ func mergeFreeModelsForRealm(models []pluginapi.ModelInfo, realm string) []plugi
 }
 
 func mergeFreeModels(models []pluginapi.ModelInfo) []pluginapi.ModelInfo {
-	seen := make(map[string]bool, len(models)+len(freeModels))
+	seen := make(map[string]bool, len(models)+len(freeModelIDs()))
 	for _, m := range models {
 		if m.ID != "" {
 			seen[strings.ToLower(m.ID)] = true
