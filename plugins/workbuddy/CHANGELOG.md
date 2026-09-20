@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.9.29
+
+### Fork audit round: stream errors surface, empty streams rejected, WorkBuddy CLI identity (repo v0.12.74)
+
+A full audit of the libo0118 fork's qoder-custom branch (7 commits, 26
+files) surfaced four defects in this tree; this release fixes the two that
+belong to workbuddy (qoder's fixes ship in 0.8.17 the same day).
+
+**Upstream error frames surface.** The stream pumps fed every data line
+straight into cleanChunkJSON, so an upstream error delivered inside a
+200-OK stream — an SSE `event:error` line, or a JSON frame carrying
+`{"error":...}` or a non-zero `code` — was silently swallowed: the stream
+ended looking successful and usage was billed against a completion that
+never happened. `workBuddyStreamFrame` now inspects each line before
+translation and aborts the stream with a redacted message on error frames.
+
+**Empty streams rejected.** A 200 stream that ends without a single
+completion payload (keep-alives + [DONE] only) is now an explicit
+`empty_stream` failure — in both the streaming pump and the aggregating
+path — instead of a silent empty success.
+
+**WorkBuddy CLI identity on chat calls.** backendHeaders now fills
+`X-IDE-Name: WorkBuddy / X-IDE-Type: WorkBuddy / X-IDE-Version: 5.5.6`
+when no identity is present, so the official usage history's client column
+is populated for CLI-login accounts. The CodeBuddyIDE (platform=="ide")
+and Intl realm overrides keep their existing values.
+
+**Hy3 "low" effort preserved.** The current Hy3 catalog advertises a low
+level; forceMaxThinking no longer forces it up to high (hy3/hy3-x only —
+hy4 keeps the historical pin).
+
 ## 0.9.28
 
 ### Issue #3 closure: system-prompt wholesale replacement retired (repo v0.12.73)

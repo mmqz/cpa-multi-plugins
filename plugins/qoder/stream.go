@@ -109,22 +109,17 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 	collector := &sseUsageCollector{}
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	seenPayload := false
 	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
+		bodyStr, meaningful, frameErr := qoderUnwrapFrame(scanner.Text())
+		if frameErr != nil {
+			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, frameErr.Error())
+			streamEmitError(streamID, frameErr.Error())
+			return
 		}
-		payload := strings.TrimPrefix(line, "data:")
-		var outer map[string]any
-		if json.Unmarshal([]byte(payload), &outer) != nil {
+		seenPayload = seenPayload || meaningful
+		if bodyStr == "" || bodyStr == "[DONE]" {
 			continue
-		}
-		bodyStr, ok := outer["body"].(string)
-		if !ok {
-			continue
-		}
-		if bodyStr == "[DONE]" {
-			break
 		}
 		collector.feed(bodyStr)
 		cleaned := cleanChunkJSON(bodyStr)
@@ -177,18 +172,14 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 	chunks := make([]pluginapi.ExecutorStreamChunk, 0, 64)
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	seenPayload := false
 	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
+		bodyStr, meaningful, frameErr := qoderUnwrapFrame(scanner.Text())
+		if frameErr != nil {
+			return chunks, 0, frameErr
 		}
-		payload := strings.TrimPrefix(line, "data:")
-		var outer map[string]any
-		if json.Unmarshal([]byte(payload), &outer) != nil {
-			continue
-		}
-		bodyStr, ok := outer["body"].(string)
-		if !ok || bodyStr == "[DONE]" {
+		seenPayload = seenPayload || meaningful
+		if bodyStr == "" || bodyStr == "[DONE]" {
 			continue
 		}
 		if collector != nil {
@@ -205,6 +196,11 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 	}
 	if err := scanner.Err(); err != nil {
 		return chunks, 0, fmt.Errorf("upstream stream read error: %w", err)
+	}
+	// v0.8.17 empty-stream guard: a 200 envelope stream with zero payload
+	// chunks is an upstream failure, not a silent success.
+	if !seenPayload {
+		return chunks, 0, fmt.Errorf("empty_stream: qoder upstream closed before a completion payload")
 	}
 	return chunks, 0, nil
 }
@@ -492,6 +488,52 @@ func stripDataPrefix(s string) string {
 		s = strings.TrimSpace(strings.TrimPrefix(s, "data:"))
 	}
 	return s
+}
+
+// qoderUnwrapFrame inspects one upstream SSE line BEFORE translation.
+// v0.8.17 (fork libo0118/qoder-custom review): the pumps used to read only
+// the envelope's "body" string and ignore both "statusCodeValue" and any
+// "error" field inside the body — an upstream error delivered as a 200-OK
+// envelope was silently swallowed and the stream ended looking successful.
+// Returns (bodyStr, meaningful, err):
+//   - err != nil: upstream error frame — abort the stream, record failure.
+//   - meaningful: the line carried a real completion payload (empty-stream
+//     guard input).
+//   - bodyStr: the unwrapped inner body ("" for control/non-data lines).
+func qoderUnwrapFrame(line string) (string, bool, error) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "event:error" || trimmed == "event: error" {
+		return "", false, fmt.Errorf("qoder upstream error event")
+	}
+	if !strings.HasPrefix(trimmed, "data:") {
+		return "", false, nil
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+	var outer struct {
+		Body   json.RawMessage `json:"body"`
+		Status int             `json:"statusCodeValue"`
+	}
+	if json.Unmarshal([]byte(payload), &outer) != nil {
+		return "", false, nil
+	}
+	body := payload
+	if len(outer.Body) > 0 {
+		inner := string(outer.Body)
+		if json.Unmarshal(outer.Body, &body) != nil {
+			body = inner
+		}
+	}
+	if strings.TrimSpace(body) == "[DONE]" {
+		return "[DONE]", false, nil
+	}
+	var chunk struct {
+		Error json.RawMessage `json:"error"`
+	}
+	_ = json.Unmarshal([]byte(body), &chunk)
+	if outer.Status >= 400 || (len(chunk.Error) > 0 && string(chunk.Error) != "null") {
+		return "", false, fmt.Errorf("qoder upstream error: %s", truncateRedacted(body, 200))
+	}
+	return body, true, nil
 }
 
 func firstNonEmpty(vals ...string) string {

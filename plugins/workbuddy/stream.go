@@ -103,8 +103,15 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 	collector := &sseUsageCollector{}
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	seenPayload := false
 	for scanner.Scan() {
-		content := stripDataPrefix(scanner.Text())
+		content, meaningful, frameErr := workBuddyStreamFrame(scanner.Text())
+		if frameErr != nil {
+			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, frameErr.Error())
+			streamEmitError(streamID, frameErr.Error())
+			return
+		}
+		seenPayload = seenPayload || meaningful
 		if content == "" || content == "[DONE]" {
 			continue
 		}
@@ -121,6 +128,14 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
 			return
 		}
+	}
+	// v0.9.29 empty-stream guard: a 200 stream that ended without a single
+	// completion payload is an upstream failure, not a silent success.
+	if !seenPayload {
+		message := "empty_stream: workbuddy upstream closed before a completion payload"
+		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, message)
+		streamEmitError(streamID, message)
+		return
 	}
 	// A mid-stream read failure means the client received a truncated stream:
 	// surface it as an error frame and record the attempt as failed.
@@ -199,8 +214,13 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var chunks []pluginapi.ExecutorStreamChunk
+	seenPayload := false
 	for scanner.Scan() {
-		content := stripDataPrefix(scanner.Text())
+		content, meaningful, frameErr := workBuddyStreamFrame(scanner.Text())
+		if frameErr != nil {
+			return chunks, frameErr
+		}
+		seenPayload = seenPayload || meaningful
 		if content == "" || content == "[DONE]" {
 			continue
 		}
@@ -218,6 +238,9 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 	}
 	if err := scanner.Err(); err != nil {
 		return chunks, fmt.Errorf("upstream stream read error: %w", err)
+	}
+	if !seenPayload {
+		return chunks, fmt.Errorf("empty_stream: workbuddy upstream closed before a completion payload")
 	}
 	return chunks, nil
 }
@@ -457,6 +480,47 @@ func stripDataPrefix(s string) string {
 		s = strings.TrimSpace(strings.TrimPrefix(s, "data:"))
 	}
 	return s
+}
+
+// workBuddyStreamFrame inspects one upstream SSE line BEFORE translation.
+// v0.9.29 (fork libo0118/qoder-custom review): the previous pumps fed every
+// data line straight into cleanChunkJSON, so an upstream error frame (SSE
+// "event:error" line, or a 200-OK JSON body carrying {"error":...} / a
+// non-zero code) was silently swallowed — the stream ended looking
+// successful, with usage billed against a completion that never happened.
+// Returns (content, meaningful, err):
+//   - err != nil: upstream error frame — abort the stream and record failure.
+//   - meaningful: the line carried a real completion payload (used by the
+//     empty-stream guard: a 200 stream that ends without any payload is an
+//     error, not a silent success).
+//   - content: the stripped payload ("" for comment/event/control lines).
+func workBuddyStreamFrame(line string) (string, bool, error) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "event:error" || trimmed == "event: error" {
+		return "", false, fmt.Errorf("workbuddy upstream error event")
+	}
+	// Comment frames (": keep-alive"), event declarations and blank lines are
+	// transport control — neither content nor errors.
+	if trimmed == "" || strings.HasPrefix(trimmed, ":") || strings.HasPrefix(trimmed, "event:") {
+		return "", false, nil
+	}
+	content := stripDataPrefix(line)
+	if content == "[DONE]" {
+		return content, false, nil
+	}
+	var frame struct {
+		Error   json.RawMessage   `json:"error"`
+		Code    int               `json:"code"`
+		Choices []json.RawMessage `json:"choices"`
+	}
+	if json.Unmarshal([]byte(content), &frame) != nil {
+		// Not a JSON payload (fragment etc.) — pass through as non-meaningful.
+		return content, false, nil
+	}
+	if (len(frame.Error) > 0 && string(frame.Error) != "null") || frame.Code != 0 {
+		return "", false, fmt.Errorf("workbuddy upstream error: %s", truncateRedacted(content, 200))
+	}
+	return content, true, nil
 }
 
 func firstNonEmpty(vals ...string) string {

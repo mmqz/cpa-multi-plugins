@@ -161,7 +161,14 @@ func TestNormalizeReasoningEffort(t *testing.T) {
 	if got := normalizeReasoningEffort("  XHigh "); got != "xhigh" {
 		t.Errorf("normalizeReasoningEffort trim/case = %q", got)
 	}
-	for _, bad := range []string{"", "ultra", "high", "10", "max"} {
+	// v0.8.17: the catalog advertises high/max for some models (DeepSeek-Flash
+	// low/high/max), so those dials are now legal instead of dropped.
+	for _, good := range []string{"high", "max"} {
+		if got := normalizeReasoningEffort(good); got != good {
+			t.Errorf("normalizeReasoningEffort(%q) = %q, want passthrough", good, got)
+		}
+	}
+	for _, bad := range []string{"", "ultra", "10"} {
 		if got := normalizeReasoningEffort(bad); got != "" {
 			t.Errorf("normalizeReasoningEffort(%q) = %q, want empty", bad, got)
 		}

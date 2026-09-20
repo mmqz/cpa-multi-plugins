@@ -341,7 +341,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.28"
+var version = "0.9.29"
 
 func wbRegistration() registration {
 	return registration{
@@ -595,6 +595,17 @@ func backendHeaders(req *http.Request, sa *storedAuth) {
 	commonHeaders(req)
 	applyPlatformHeaders(req, platformForAuth(sa))
 	applyRealmHeaders(req, sa)
+	// v0.9.29 (fork libo0118/qoder-custom review): the official WorkBuddy
+	// 5.5.6 desktop's bundled CLI sends these identity headers on chat calls;
+	// without them the official usage history's client column stays blank for
+	// CLI-login accounts. Only the blank case is filled — the adopted
+	// CodeBuddyIDE (platform=="ide") and Intl realm overrides above keep
+	// their existing values.
+	if req.Header.Get("X-IDE-Name") == "" {
+		req.Header.Set("X-IDE-Name", "WorkBuddy")
+		req.Header.Set("X-IDE-Type", "WorkBuddy")
+		req.Header.Set("X-IDE-Version", "5.5.6")
+	}
 	if sa.Auth.AccessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+sa.Auth.AccessToken)
 	} else {

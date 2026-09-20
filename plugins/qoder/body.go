@@ -202,12 +202,17 @@ func runeSafePrefix(s string, n int) string {
 }
 
 // normalizeReasoningEffort validates the OpenAI-style reasoning_effort dial.
-// Upstream accepts low/medium/xhigh; anything else returns "" = inject nothing.
-// All models share the qfmodel dial set (2026-09-19 unified reasoning chain).
+// v0.8.17 (fork libo0118/qoder-custom review): the catalog's
+// thinking_config.enabled.efforts advertise per-model level sets that include
+// "high" and "max" (e.g. DeepSeek-Flash low/high/max, Qwen3.8-Max
+// low/medium/xhigh) — the old low/medium/xhigh whitelist silently dropped the
+// high/max dials and callers got upstream defaults instead. Levels are
+// normalized to the union of advertised values without conflating
+// high/max/xhigh; anything else returns "" = inject nothing.
 func normalizeReasoningEffort(s string) string {
 	effort := strings.ToLower(strings.TrimSpace(s))
 	switch effort {
-	case "low", "medium", "xhigh":
+	case "low", "medium", "high", "xhigh", "max":
 		return effort
 	}
 	return ""

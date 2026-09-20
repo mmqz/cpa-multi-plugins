@@ -44,26 +44,27 @@ func wbModels() []pluginapi.ModelInfo {
 	}
 }
 
-func cachedDynamicModels() ([]pluginapi.ModelInfo, bool) {
+func cachedDynamicModels(accountKey string) ([]pluginapi.ModelInfo, bool) {
 	dynamicModelsCache.RLock()
 	defer dynamicModelsCache.RUnlock()
-	if len(dynamicModelsCache.models) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsCacheTTL {
+	// v0.8.17: the entry must belong to the asking credential — a catalog
+	// fetched for account A (region + plan-specific offers) must never serve
+	// account B (fork libo0118/qoder-custom review).
+	if dynamicModelsCache.accountKey == accountKey && len(dynamicModelsCache.models) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsCacheTTL {
 		return dynamicModelsCache.models, true
 	}
 	return nil, false
 }
 
-func storeDynamicModels(models []pluginapi.ModelInfo) {
+func storeDynamicModels(accountKey string, models []pluginapi.ModelInfo) {
 	dynamicModelsCache.Lock()
 	dynamicModelsCache.models = models
 	dynamicModelsCache.fetched = time.Now()
+	dynamicModelsCache.accountKey = accountKey
 	dynamicModelsCache.Unlock()
 }
 
 func fetchDynamicModels() []pluginapi.ModelInfo {
-	if models, ok := cachedDynamicModels(); ok {
-		return models
-	}
 	models := wbModels()
 	files, err := hostAuthListFiles()
 	if err != nil || len(files) == 0 {
@@ -88,7 +89,7 @@ func fetchDynamicModels() []pluginapi.ModelInfo {
 		}
 		dyn, err := callModelsAPI(sa)
 		if err == nil && len(dyn) > 0 {
-			storeDynamicModels(dyn)
+			storeDynamicModels(modelCatalogAccountKey(sa), dyn)
 			return dyn
 		}
 	}
@@ -96,15 +97,19 @@ func fetchDynamicModels() []pluginapi.ModelInfo {
 }
 
 func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
-	if models, ok := cachedDynamicModels(); ok {
-		return models
-	}
 	sa, err := parseStored(storageJSON)
 	if err != nil || sa == nil {
 		return fetchDynamicModels()
 	}
+	// v0.8.17: cache lookup is scoped to THIS credential (the storage JSON is
+	// the account the host is asking about). On miss, discovery runs against
+	// the same credential and the result is stored under its key.
+	key := modelCatalogAccountKey(sa)
+	if models, ok := cachedDynamicModels(key); ok {
+		return models
+	}
 	if dyn, err := callModelsAPI(sa); err == nil && len(dyn) > 0 {
-		storeDynamicModels(dyn)
+		storeDynamicModels(key, dyn)
 		return dyn
 	}
 	return fetchDynamicModels()
