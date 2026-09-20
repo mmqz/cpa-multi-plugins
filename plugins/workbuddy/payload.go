@@ -11,21 +11,6 @@ import (
 	"strings"
 )
 
-// neutralPrompt is the substitute for over-long or agent-identity system
-// prompts that Tencent CodeBuddy's content filter rejects. Mirrors OmniRoute's
-// codebuddy-cn.ts NEUTRAL_PROMPT.
-const neutralPrompt = "You are a helpful AI assistant that helps with software engineering tasks."
-
-// agentPattern matches Claude Code / Cursor / Windsurf / Cline / Aider / Continue
-// / Copilot / Cody identity lines that Tencent's content filter blocklists.
-// Ported verbatim from OmniRoute/open-sse/executors/codebuddy-cn.ts (MIT).
-var agentPattern = regexp.MustCompile(`(?i)you are claude code|claude.?code.+official.+cli|anthropic.+official.+cli|anxthxropic.+official.+cli|you are (?:cursor|windsurf|cline|aider|continue|copilot|cody)|you are an? (?:ai )?(?:coding |code )?agent|cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)|claude.?code.+issues|give feedback.+claude.?code|you are .{0,30}(?:powerful )?ai agent|orchestration capabilities|OhMyOpenCode|<agent-identity>|<Role>|<Behavior_Instructions>`)
-
-// maxSystemPromptBytes is the byte-length threshold above which a system prompt
-// is replaced wholesale with neutralPrompt. Tencent's filter rejects very long
-// system prompts even when they don't match agentPattern. Mirrors OmniRoute.
-const maxSystemPromptBytes = 2000
-
 // toolDescriptionByteLimit is the threshold above which all tool descriptions
 // are stripped to avoid Tencent's 64KB body-size filter. Mirrors OmniRoute.
 const toolDescriptionByteLimit = 65536
@@ -247,9 +232,10 @@ func normalizeToolsInPlace(obj map[string]any) bool {
 
 // rewriteSystemInPlace is the in-place form of rewriteSystemForUpstream.
 // It does three things:
-//  1. For each system message: if length > maxSystemPromptBytes or matches
-//     agentPattern, replace content wholesale with neutralPrompt. Otherwise,
-//     apply sanitizeBlockedTemplates (single-word substitutions).
+//  1. For each system message: apply sanitizeBlockedTemplates (blocked
+//     phrases → safe variants). v0.9.28: the wholesale neutralPrompt swap
+//     (length/agentPattern triggers) is retired — see
+//     rewriteSystemContentField for the evidence chain.
 //  2. Strip reasoning_effort "none"/"off" (Tencent rejects them); mirror
 //     other values to reasoning_summary="auto" (OmniRoute codebuddy-cn.ts).
 //  3. forceMaxThinking for hy3/hy4-family models.
@@ -269,12 +255,13 @@ func rewriteSystemInPlace(obj map[string]any) bool {
 
 // rewriteSystemMessagesInPlace applies the content-filter defenses to SYSTEM
 // messages only. v0.9.18 scope fix: the pre-0.9.18 loop fed EVERY message
-// through the wholesale replacement, so any user paste / tool result /
-// assistant history entry over maxSystemPromptBytes (or matching agentPattern)
-// was silently rewritten to neutralPrompt and the upstream model saw a
-// history full of hollow "You are a helpful AI assistant..." messages. Field
-// reports mapping to exactly this: tool output that "looks truncated / stdout
-// empty", conversations that "reset every so often", and the model answering
+// through the then-wholesale replacement, so any user paste / tool result /
+// assistant history entry over the then-maxSystemPromptBytes (or matching the
+// then-agentPattern) was silently rewritten to neutralPrompt and the upstream
+// model saw a history full of hollow "You are a helpful AI assistant..."
+// messages. Field reports mapping to exactly this: tool output that "looks
+// truncated / stdout empty", conversations that "reset every so often", and
+// the model answering
 // with the neutral prompt itself on interruption. OmniRoute codebuddy-cn.ts
 // (the porting source) gates the replacement on
 // `message.role !== "system" -> return message` verbatim; this restores it.
@@ -297,29 +284,31 @@ func rewriteSystemMessagesInPlace(obj map[string]any) bool {
 }
 
 // rewriteSystemContentField applies the filter defenses to one SYSTEM
-// message's content. Mirrors OmniRoute codebuddy-cn.ts: a string content is
-// replaced wholesale with neutralPrompt when it exceeds maxSystemPromptBytes
-// or matches agentPattern; an array content is flattened (text parts joined
-// with newlines) for the same decision and, when replaced, collapses into a
-// SINGLE {"type":"text"} part — not one neutralPrompt per part. Short clean
-// content only goes through the single-word template substitutions.
+// message's content. v0.9.28 (issue #3 closure, adopting PR #4's position):
+// the wholesale neutralPrompt replacement — for content over
+// maxSystemPromptBytes or matching agentPattern — is RETIRED. Evidence that
+// it defended nothing: (a) the upstream filter blocklists VERBATIM phrases
+// (sanitizeBlockedTemplates' one-word insert "tool" defeats it — a verbatim
+// matcher does not reject by length or by broad agent-identity patterns);
+// (b) PR #4's author removed both triggers and ran without 400s; (c) since
+// the v0.9.18 role gate, non-system messages of any length or content pass
+// unfiltered and no rejection was ever reported. What the wholesale swap DID
+// do was gut every agent host's system prompt (nearly all match "you are
+// claude code" / "you are a coding agent" and exceed 2000 bytes): tool-use
+// rules, project context and behavior constraints were silently swapped for
+// an 18-byte generic line — a permanent invisible degradation, strictly worse
+// than a loud 400 that can be reported and fixed. System content now only
+// goes through sanitizeBlockedTemplates (known blocked phrases → safe
+// variants; everything else survives verbatim), on strings and per text part
+// on arrays alike.
 func rewriteSystemContentField(msg map[string]any) bool {
 	switch c := msg["content"].(type) {
 	case string:
-		if len(c) > maxSystemPromptBytes || agentPattern.MatchString(c) {
-			msg["content"] = neutralPrompt
-			return true
-		}
 		if r := sanitizeBlockedTemplates(c); r != c {
 			msg["content"] = r
 			return true
 		}
 	case []any:
-		text := flattenSystemParts(c)
-		if len(text) > maxSystemPromptBytes || agentPattern.MatchString(text) {
-			msg["content"] = []any{map[string]any{"type": "text", "text": neutralPrompt}}
-			return true
-		}
 		modified := false
 		for _, p := range c {
 			part, ok := p.(map[string]any)
@@ -336,23 +325,6 @@ func rewriteSystemContentField(msg map[string]any) bool {
 		return modified
 	}
 	return false
-}
-
-// flattenSystemParts mirrors OmniRoute's flatten(): join the text of all
-// {"type":"text","text":...} parts with newlines; non-text parts contribute
-// nothing (an image-only system message stays empty and is never replaced).
-func flattenSystemParts(parts []any) string {
-	texts := make([]string, 0, len(parts))
-	for _, p := range parts {
-		part, ok := p.(map[string]any)
-		if !ok {
-			continue
-		}
-		if t, ok := part["text"].(string); ok {
-			texts = append(texts, t)
-		}
-	}
-	return strings.Join(texts, "\n")
 }
 
 // mirrorReasoningEffort implements OmniRoute codebuddy-cn.ts reasoning_effort

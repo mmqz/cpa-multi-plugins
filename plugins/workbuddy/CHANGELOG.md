@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.9.28
+
+### Issue #3 closure: system-prompt wholesale replacement retired (repo v0.12.73)
+
+The remaining piece of issue #3 — the wholesale neutralPrompt swap for
+system messages over 2000 bytes or matching agentPattern, kept in v0.9.26 as
+a "WAF backstop" — is retired. The user's recheck challenged the retention,
+and the evidence is on their side:
+
+- The upstream filter blocklists VERBATIM phrases. A verbatim matcher does
+  not reject by length or by broad agent-identity patterns — the success of
+  the one-word-insert safe variants ("Anthropic's official CLI **tool** for
+  Claude") proves the mechanism is literal matching, not length or
+  heuristic scanning.
+- PR #4's author removed both triggers and ran without 400s.
+- Since the v0.9.18 role gate, non-system messages of any length or content
+  pass unfiltered — no rejection was ever reported.
+
+What the triggers DID do was gut every agent host's system prompt: nearly
+all match "you are claude code" / "you are a coding agent" and exceed 2000
+bytes, so tool-use rules, project context and behavior constraints were
+silently swapped for an 18-byte generic line — a permanent invisible
+degradation, strictly worse than a loud 400 that can be reported and fixed.
+
+**Change.** `rewriteSystemContentField` now applies only
+`sanitizeBlockedTemplates` (blocked phrases → safe variants; everything
+else survives verbatim), on strings and per text part on arrays. The
+neutralPrompt constant, agentPattern regex, maxSystemPromptBytes threshold
+and flattenSystemParts helper are removed. The sanitize regex net from
+v0.9.26 keeps the two known blocked phrases neutralized, and the v0.9.18
+role gate (system-only) is untouched.
+
+**Tests.** sanitize_scope_test.go rewritten to the new semantics: long
+clean system prompt survives verbatim (the agent-host regression), identity
+line sanitized while surrounding context survives, broad agent-identity
+patterns no longer wipe anything, array structure preserved with per-part
+sanitize, non-system roles still untouched, full-pipeline end-to-end.
+
 ## 0.9.27
 
 ### PR #6 recheck round: auth document merge on token refresh (repo v0.12.72)
