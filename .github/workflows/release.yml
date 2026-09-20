@@ -172,7 +172,12 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
-    if: always() && !cancelled()
+    # Deep-audit hardening: publish only when the build job itself succeeded.
+    # The optional darwin-amd64 cross leg keeps reporting success via
+    # continue-on-error, so a toolchain regression there still cannot block a
+    # release -- but a REQUIRED leg failing now skips the release instead of
+    # silently shipping an incomplete asset set.
+    if: always() && !cancelled() && needs.build.result == 'success'
     steps:
       - name: Checkout
         uses: actions/checkout@v4

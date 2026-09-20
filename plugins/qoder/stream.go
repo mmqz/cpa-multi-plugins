@@ -74,7 +74,7 @@ func streamHeaders() http.Header {
 // the outbound call and host transport policy applies. The host bridge emits
 // arbitrary 32KB chunks, so we adapt to io.Reader and keep the bufio.Scanner
 // SSE line framing unchanged.
-func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID string) {
+func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID, cooldownModel string) {
 	// Always close the host stream exactly once on every exit path.
 	closed := false
 	closeOnce := func() {
@@ -100,6 +100,9 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		// Drain the error body via the same bridge so the message is complete.
 		errPayload, _ := io.ReadAll(newHostStreamReader(stream))
 		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(errPayload))
+		if authID != "" {
+			recordUpstreamFailure(authID, cooldownModel, statusCode, string(errPayload))
+		}
 		if authUID != "" {
 			go reconcileByUID(authUID, statusCode, string(errPayload))
 		}
@@ -139,7 +142,23 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 	// surface it as an error frame and record the attempt as failed.
 	if err := scanner.Err(); err != nil {
 		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, err.Error())
+		if authID != "" {
+			recordUpstreamFailure(authID, cooldownModel, 0, err.Error())
+		}
 		streamEmitError(streamID, fmt.Sprintf("upstream stream read error: %v", err))
+		return
+	}
+	// v0.8.18: the async pump finally gets the same empty-stream guard the
+	// synchronous collector has had since v0.8.17 — a 200 envelope stream
+	// with zero payload is an upstream failure, not a silent success. (The
+	// seenPayload tracking used to be dead code here.)
+	if !seenPayload {
+		errEmpty := fmt.Errorf("empty_stream: qoder upstream closed before a completion payload")
+		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, errEmpty.Error())
+		if authID != "" {
+			recordUpstreamFailure(authID, cooldownModel, 0, errEmpty.Error())
+		}
+		streamEmitError(streamID, errEmpty.Error())
 		return
 	}
 	publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), false, 0, "")
@@ -419,6 +438,7 @@ func aggregateQoderSSE(r io.Reader, model string) ([]byte, error) {
 	// into memory because the gateway's SSE is short-lived (one chat call)
 	// and the inner stream is at most a few hundred KB.
 	var inner strings.Builder
+	seenPayload := false
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -439,6 +459,7 @@ func aggregateQoderSSE(r io.Reader, model string) ([]byte, error) {
 		if bodyStr == "[DONE]" {
 			break
 		}
+		seenPayload = true
 		// Re-emit the inner JSON as a standard "data:<json>\n" SSE frame so
 		// aggregateCompletion's parser can consume it unchanged.
 		inner.WriteString("data:")
@@ -447,6 +468,12 @@ func aggregateQoderSSE(r io.Reader, model string) ([]byte, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("qoder SSE read: %w", err)
+	}
+	// v0.8.18: third pump, same guard. Without it an empty 200 stream folds
+	// into a synthetic chatcmpl-qoderwork completion with empty content and
+	// finish_reason "stop" — a silent fake success on the non-stream path.
+	if !seenPayload {
+		return nil, fmt.Errorf("empty_stream: qoder upstream closed before a completion payload")
 	}
 	return aggregateCompletion(strings.NewReader(inner.String()), model)
 }

@@ -68,13 +68,19 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 	}
 
-	// Collect qoderwork candidates only.
+	// Collect qoderwork candidates only. v0.8.18: a candidate whose
+	// (account, request-model) pair is cooling is skipped so the opt-in
+	// plugin-side picker agrees with the catalog filter used by host routing.
+	reqModel := requestModelForCooldown(req.Model, req.Options.Metadata)
 	var wbCandidates []pluginapi.SchedulerAuthCandidate
 	for _, c := range req.Candidates {
 		if c.Provider != providerName {
 			continue
 		}
 		if candidateDisabled(c) {
+			continue
+		}
+		if reqModel != "" && modelIsCooling(c.ID, reqModel) {
 			continue
 		}
 		wbCandidates = append(wbCandidates, c)

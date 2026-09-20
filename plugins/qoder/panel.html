@@ -324,6 +324,7 @@ function bindCardActions(root){
       else if(act==="select") selectAuth(idx, ev.currentTarget);
       else if(act==="refresh") refreshCredits(idx, ev.currentTarget);
       else if(act==="claim-pro") claimPro(idx, ev.currentTarget);
+      else if(act==="clear-cooldown") clearCooldown(ev.currentTarget.dataset.authId||idx, ev.currentTarget.dataset.model, ev.currentTarget);
     });
   });
 }
@@ -337,17 +338,27 @@ function card(a){
   const selected=!!a.selected;
   const isIntl=(a.region||"cn")==="intl";
   const regionBadge=`<span class="badge ${isIntl?"global":"cn"}">${isIntl?"Intl":"CN"}</span>`;
-  // CN: 签到 button + 领取Pro button
-  // active=false means the upstream check-in activity is not enabled for
+  // 签到 button + (CN only) 领取Pro button.
+  // CN: active=false means the upstream check-in activity is not enabled for
   // this account (e.g. Community plan). Show disabled button with '?'.
+  // Intl (v0.8.18): the benefit is a campaign (campaign.go) — keep the button
+  // enabled; a day with nothing claimable comes back as a neutral
+  // "今日暂无可领取权益" toast instead of a dead 404.
   let actionHTML;
   const checked=ci.today_checked_in;
   const ciActive=ci.active!==false; // absent=true (default active)
-  const btnClass=checked?"done":(ciActive?"sec":"done");
-  const btnText=checked?"已签到":(ciActive?"签到":"不可签");
-  const btnDisabled=(checked||!ciActive)?" disabled=\"disabled\"":"";
+  let btnClass,btnText,btnDisabled;
+  if(checked){btnClass="done";btnText="已签到";btnDisabled=" disabled=\"disabled\"";}
+  else if(isIntl){btnClass="sec";btnText="签到";btnDisabled="";}
+  else{btnClass=ciActive?"sec":"done";btnText=ciActive?"签到":"不可签";btnDisabled=ciActive?"":" disabled=\"disabled\"";}
   actionHTML=`<button class="${btnClass}" data-action="checkin" data-auth-index="${esc(a.auth_index)}"${btnDisabled}>${btnText}</button>`+
-    `<button class="sec" data-action="claim-pro" data-auth-index="${esc(a.auth_index)}" title="领取Pro升级包">领取Pro</button>`;
+    (isIntl?"":`<button class="sec" data-action="claim-pro" data-auth-index="${esc(a.auth_index)}" title="领取Pro升级包">领取Pro</button>`);
+  // v0.8.18: per-(account, model) cooldown rows with an inline clear action.
+  let coolingHTML="";
+  if(a.cooling&&a.cooling.length){
+    const chips=a.cooling.map(c=>`<span class="badge exhausted">${esc(String(c.model||""))} ${esc(String(c.seconds||0))}s <a href="javascript:void(0)" data-action="clear-cooldown" data-auth-id="${esc(a.auth_id||a.auth_index)}" data-model="${esc(String(c.model||""))}" style="color:inherit;text-decoration:underline">解除</a></span>`).join(" ");
+    coolingHTML=`<div class="uid">模型冷却中: ${chips}</div>`;
+  }
   const selectBtn=selected
     ? `<button class="done" disabled="disabled">使用中</button>`
     : (disabled?``:`<button class="sec" data-action="select" data-auth-index="${esc(a.auth_index)}">选用</button>`);
@@ -358,6 +369,7 @@ function card(a){
   return `<div class="card${selected?" selected":""}" data-region="${region}" data-auth="${esc(a.auth_index)}">
   <h2>${esc(nick)} <span style="display:flex;gap:6px;align-items:center">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
+  ${coolingHTML}
   ${progressHTML(cr)}
   ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
   <div class="actions">${selectBtn}${refreshBtn}${actionHTML}</div>
@@ -699,6 +711,18 @@ async function checkin(idx, btn){
     await load(true);
   }catch(e){
     toast("签到请求失败","err",e.message);
+    busy(btn,false);
+  }
+}
+async function clearCooldown(idx, model, btn){
+  busy(btn,true);
+  try{
+    const d=await api("/cooldowns/clear",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth_id:idx,model:model||""})});
+    if(d.error){toast("解除失败","err",asText(d.error))}
+    else{toast(model?("已解除 "+model+" 冷却"):"已解除该账号全部模型冷却","ok","已移除 "+asText(d.removed)+" 条记录")}
+    await load(true);
+  }catch(e){
+    toast("解除请求失败","err",e.message);
     busy(btn,false);
   }
 }

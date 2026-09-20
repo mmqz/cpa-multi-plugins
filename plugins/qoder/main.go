@@ -729,6 +729,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	// Map CPA-facing model name (e.g. "qoder/qmodel_preview" or "qmodel_preview")
 	// to the upstream key the gateway recognises.
 	upstreamModel := cpaToUpstreamKey(stripProviderPrefix(req.Model))
+	cooldownModel := requestModelForCooldown(req.Model, req.Metadata)
 	started := time.Now()
 	authUID := ""
 	if sa.Account.UID != "" {
@@ -768,6 +769,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	if statusCode >= 400 {
 		payload, _ := io.ReadAll(reader)
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
+		recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, string(payload))
 		reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
 		// 0.8.13: account-level statuses ride the error envelope so the host
 		// cooldown layer stops re-picking a drained credential.
@@ -776,6 +778,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	completion, err := aggregateQoderSSE(reader, req.Model)
 	if err != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
+		recordUpstreamFailure(req.AuthID, cooldownModel, 0, err.Error())
 		return nil, err
 	}
 	publishUsage(req.Model, upstreamModel, authUID, started, usageDetailFromCompletion(completion), false, 0, "")
@@ -810,6 +813,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	upstreamModel := cpaToUpstreamKey(stripProviderPrefix(req.Model))
+	cooldownModel := requestModelForCooldown(req.Model, req.Metadata)
 	started := time.Now()
 	authUID := ""
 	if sa.Account.UID != "" {
@@ -842,6 +846,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		chunks, statusCode, errCollect := collectUpstreamStreamQoder(encodedBody, sa, upstreamModel, sseFramed, collector)
 		if errCollect != nil {
 			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, errCollect.Error())
+			recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, errCollect.Error())
 			return nil, errCollect
 		}
 		publishUsage(req.Model, upstreamModel, authUID, started, collector.detail(), false, 0, "")
@@ -868,7 +873,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		streamClose(req.StreamID)
 		return okEnvelope(streamResponse{Headers: headers})
 	}
-	go pumpUpstreamStream(httpReq, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID)
+	go pumpUpstreamStream(httpReq, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, cooldownModel)
 	return okEnvelope(streamResponse{Headers: headers})
 }
 

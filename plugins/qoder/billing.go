@@ -36,6 +36,11 @@ type checkinStatusResponse struct {
 }
 
 func fetchCheckinStatus(sa *storedAuth) (*checkinSummary, error) {
+	// v0.8.18: route by region contract — Intl delivers its daily benefit as
+	// a campaign, not via the CN daily-check-in endpoints (campaign.go).
+	if capabilitiesForRegion(authRegion(sa)).Contract == checkinContractCampaign {
+		return fetchCampaignCheckinSummary(sa)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstreamBaseFor(sa)+"/sash/api/v1/me/daily-check-in/status", nil)
@@ -207,6 +212,10 @@ func fetchPaymentType(sa *storedAuth) string {
 }
 
 func performCheckinCall(sa *storedAuth) (map[string]any, error) {
+	// v0.8.18: campaign dialect for Intl (same normalization contract).
+	if capabilitiesForRegion(authRegion(sa)).Contract == checkinContractCampaign {
+		return performCampaignCheckin(sa)
+	}
 	req, err := http.NewRequest(http.MethodPost, upstreamBaseFor(sa)+"/sash/api/v1/me/daily-check-in/claim", strings.NewReader("{}"))
 	if err != nil {
 		return nil, err

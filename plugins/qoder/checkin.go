@@ -283,6 +283,17 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
 		out["total_credits"] = ci.TotalCredits
 		return out
 	}
+	// v0.8.18 (campaign dialect): claimed Intl campaigns drop out of
+	// /me/campaigns entirely, so an inactive summary means "nothing left to
+	// claim today" — already claimed earlier or no campaign running. Surface
+	// it as a no-op, not a failure (reason=none, neutral panel toast).
+	if capabilitiesForRegion(authRegion(sa)).Contract == checkinContractCampaign && !ci.Active {
+		out["success"] = true
+		out["skipped"] = true
+		out["reason"] = "none"
+		out["message"] = "今日暂无可领取权益"
+		return out
+	}
 
 	// Step 2: POST claim (5s budget).
 	res, err := performCheckinCall(sa)
@@ -520,6 +531,15 @@ func handleClaimPro(req pluginapi.ManagementRequest) map[string]any {
 	out := map[string]any{
 		"auth_index": authIndex,
 		"nickname":   sa.Account.Nickname,
+	}
+	// v0.8.18: Intl has no Pro-upgrade contract (capability fact, not a
+	// transient failure) — skip instead of firing a request that can only 404.
+	if !supportsProUpgrade(sa) {
+		out["success"] = false
+		out["skipped"] = true
+		out["reason"] = "unsupported"
+		out["message"] = "国际版暂无 Pro 升级活动"
+		return out
 	}
 	eligible, err := checkProUpgradeEligibility(sa)
 	if err != nil {

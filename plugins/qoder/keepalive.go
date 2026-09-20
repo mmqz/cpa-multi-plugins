@@ -84,6 +84,15 @@ func refreshCall(sa *storedAuth) (json.RawMessage, []byte, int, error) {
 		if err == nil {
 			return data, data, status, nil
 		}
+		// v0.8.18: Intl's desktop client also accepts the center endpoint.
+		// Compatibility fallback when the openapi device endpoint transiently
+		// rejects a valid drt- (fork bfSan/qoder-cpa-plugin review).
+		if authRegion(sa) == regionIntl {
+			data2, status2, err2 := doRawJSON(sharedHTTPClient(), http.MethodPost, "https://center.qoder.sh/algo/api/v3/user/refresh_token", nil, bytes.NewReader(body))
+			if err2 == nil {
+				return data2, data2, status2, nil
+			}
+		}
 		return nil, nil, status, err
 	}
 	// Legacy PAT family: try jrt- refresh first.
@@ -282,7 +291,7 @@ func runTokenKeepalive() *keepaliveSummary {
 			// but the row should be populated even when refresh errors early.
 			if sa, err := hostAuthGet(f.AuthIndex); err == nil {
 				row.Nickname = sa.Account.Nickname
-				row.Region = "cn"
+				row.Region = authRegion(sa)
 			}
 			status, err := refreshOneAuth(f.AuthIndex, f.ID)
 			row.Status = status
@@ -330,7 +339,7 @@ func handleKeepaliveNow(req pluginapi.ManagementRequest) map[string]any {
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
-	row := keepaliveRow{AuthIndex: authIndex, Nickname: sa.Account.Nickname, Region: "cn"}
+	row := keepaliveRow{AuthIndex: authIndex, Nickname: sa.Account.Nickname, Region: authRegion(sa)}
 	row.Status, err = refreshOneAuth(authIndex, "")
 	if err != nil {
 		row.Detail = truncateRedacted(err.Error(), 200)

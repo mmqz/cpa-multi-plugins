@@ -64,6 +64,17 @@ func storeDynamicModels(accountKey string, models []pluginapi.ModelInfo) {
 	dynamicModelsCache.Unlock()
 }
 
+// dropDynamicModelsCache invalidates the per-credential discovery cache.
+// Called when a model cooldown starts or is cleared: the cooled model must
+// not ride a stale catalog, so the next per-auth model query rebuilds
+// immediately (v0.8.18 per-model cooldown).
+func dropDynamicModelsCache() {
+	dynamicModelsCache.Lock()
+	dynamicModelsCache.models = nil
+	dynamicModelsCache.fetched = time.Time{}
+	dynamicModelsCache.Unlock()
+}
+
 func fetchDynamicModels() []pluginapi.ModelInfo {
 	models := wbModels()
 	files, err := hostAuthListFiles()
@@ -106,13 +117,32 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 	// the same credential and the result is stored under its key.
 	key := modelCatalogAccountKey(sa)
 	if models, ok := cachedDynamicModels(key); ok {
-		return models
+		return filterCoolingModels(sa, models)
 	}
 	if dyn, err := callModelsAPI(sa); err == nil && len(dyn) > 0 {
 		storeDynamicModels(key, dyn)
-		return dyn
+		return filterCoolingModels(sa, dyn)
 	}
-	return fetchDynamicModels()
+	return filterCoolingModels(sa, fetchDynamicModels())
+}
+
+// filterCoolingModels removes models currently cooling for THIS credential
+// (v0.8.18 per-model cooldown) so the host's built-in scheduler is never
+// offered a degraded (auth, model) pair. A credential with no active
+// cooldowns returns the list untouched.
+func filterCoolingModels(sa *storedAuth, models []pluginapi.ModelInfo) []pluginapi.ModelInfo {
+	authID := cooldownAuthIDFor(sa)
+	if authID == "" || len(models) == 0 || len(cooldownSnapshotFor(authID)) == 0 {
+		return models
+	}
+	out := make([]pluginapi.ModelInfo, 0, len(models))
+	for _, m := range models {
+		if modelIsCooling(authID, m.ID) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // fetchDynamicModels calls the QoderWork API to get the latest model list.
