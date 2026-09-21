@@ -17,6 +17,7 @@
 | `trae-solo-cn` | Trae Work CN / SOLO CN | 同 trae-cn | `en1oxy7wnw8j9n` | `solo_work_lite` | ✅ | 4/5 |
 | `qoder-intl` | Qoder Intl | `qoder.com` / `api3.qoder.sh` | `e883ade2-...` | - | ❌ | 5/5 COSY 签名 |
 | `qoder-cn` | QoderWork CN | `qoder.com.cn` / `gateway.qoder.com.cn` | `1c5e33e1-...` | - | ✅ | 5/5 |
+| `zcode`（zcode 分支） | 智谱 GLM 编码套餐（Z.AI + BigModel） | `zcode.z.ai`（控制面）/ `api.z.ai` + `open.bigmodel.cn`（LLM） | 无（poll_token 中转） | - | —（claim 后续） | 4/5 签名 V4 |
 
 ## 协议复用
 
@@ -26,6 +27,7 @@
 | `trae-core` | trae-cn, trae-solo-cn | client_id, function, has_checkin |
 | `trae-intl-core` | trae-intl | 独立（Web SOLO remote 协议） |
 | `qoder-core` | qoder-intl, qoder-cn | openapi_base, gateway_base, client_id, redirect_uri, has_checkin, has_pat_import |
+| `zcode-core`（zcode 分支） | zai, bigmodel（单插件按账号路由） | llm_openai_base, provider 字段; plan 字段路由 coding/start |
 
 ---
 
@@ -242,6 +244,97 @@
 
 ---
 
+## Provider: zcode（zcode 分支，M1）
+
+智谱 GLM 编码套餐统一 provider（Z.AI 国际 + BigModel 国内）。协议净室重实现自
+[TriDefender/zcode-api](https://github.com/TriDefender/zcode-api)（ZCode Proxy, MIT，2026-09 快照），
+插件侧每条实现均标注源码出处。
+
+### OAuth：服务端中转 CLI 登录（无本地回调）
+
+`src/auth/oauth.ts`（ZCode 3.12.3 桌面端 `startOAuthWithPolling` 同款）：
+
+1. 插件自生成 poll_token（32B hex），`POST https://zcode.z.ai/api/v1/oauth/cli/init`
+   头 `Authorization: Bearer {poll_token}`，body `{"provider":"zai"|"bigmodel"}` →
+   `{code:0, data:{flow_id, poll_token, authorize_url, expires_at, poll_interval_sec}}`
+2. 浏览器打开 authorize_url，**客户端追加中间页参数**：zai=`redirect_uri` / bigmodel=`redirect`，
+   值均为 `https://zcode.z.ai/app/oauth/login?redirect=zcode://oauth/callback&app_version=3.14.0`
+   —— 授权记录在服务端完成（浏览器不回 localhost；直连 authorize 的 localhost 回调会被
+   "Redirect URI not registered" 拒绝）。注意 URL 序列化两层的双重编码形态（`%253A`）。
+3. `GET /api/v1/oauth/cli/poll/{flow_id}`（同 Bearer）至 `status:"ready"` →
+   `{token:<plan JWT>, user:{user_id}, zai|bigmodel:{access_token}}`。
+   错误语义：4xx（除 408/429）、envelope `code!==0`、未知 status = 致命；5xx/网络/畸形 200 = 按 pending 重试。
+
+凭据形态：access_token 即 API key —— zai 为 `apiKeyId.apiKeySecret` 双段、bigmodel 单段；
+plan JWT **无 exp 永不刷新**（8 天旧 JWT 仍可查账务），仅网关 401/3012 表示需重登。
+
+### LLM 上游（coding-plan，OpenAI 兼容网关）
+
+`src/proxy/upstream.ts` + `src/provider/providers.ts`：
+
+- 端点：`https://api.z.ai/api/coding/paas/v4/chat/completions`（zai）/
+  `https://open.bigmodel.cn/api/coding/paas/v4/chat/completions`（bigmodel）
+- 认证：`Authorization: Bearer {access_token}`（OpenAI 格式单头；Anthropic 格式才双头
+  `x-api-key` + `Authorization` 同值 + `anthropic-version: 2023-06-01`）
+- 身份头（`g6n` builder，`src/proxy/identity.ts`）：HTTP-Referer、`User-Agent: ZCode/{ver}`
+  （LLM 请求追加 ` ai-sdk/anthropic/3.0.81` SDK 后缀）、[X-ZCode-App-Version]、
+  `X-Title: Z Code@cli`、X-Release-Channel、X-Client-Language、X-Client-Timezone（always，
+  "unknown" 回退）、**`X-ZCode-Agent: glm` 内联**、[X-Platform: `{os}-{arch}`]、
+  X-Os-Category（无条件）、[X-Os-Version]。**无 X-Device-Mid**。
+  控制面（billing/routing）走 `TV` builder：**无 X-ZCode-Agent**、可选 X-Device-Mid 尾位。
+- trace 头五件套（编码面 attribution）：`x-request-id`、`x-zcode-session-type: main`、
+  `x-zcode-trace-id`、`x-query-id`、`x-session-id` —— 全 UUID，start-plan 免后两个。
+- 头值统一过 printable-ASCII 门控；appVersion 非法时整体丢 X-ZCode-App-Version 且 UA 回退 `ZCode/unknown`。
+
+### Client Request Signing V4
+
+`src/proxy/client-signing.ts`（ZCode 3.9.1 `ClientRequestSigningV4Signer` 镜像）。
+**全部消息模板换行连接**（空格连接被上游拒绝，2026-09-18 字节级实证）：
+
+- 门禁：`GET https://zcode.z.ai/api/v1/agent/configs`（g6n 头 + `x-api-key: {credential}`）→
+  `data.codingPlanSignature.enable`；TTL 1h，网络失败负缓存 60s / 不可用负缓存 30s
+- 握手：`POST {origin}/api/paas/c1f3a7e2/v2/client`，头
+  `Authorization: {apiKeyId}.{apiKeySecret}`，body `{apiKey, nonce, sig, ts}`；
+  `sig = base64(HMAC-SHA256(HKDF-SHA256(secret, salt="WD_CLIENT_SIGN_KDF_SALT",
+  info="getSignKey_hmac"), "get_sign_key\n{id}\n{ts}\n{nonce}"))`；
+  应答 `code:200, data.privateCipher` = AES-256-GCM(HKDF(secret, info="ed25519_priv"))
+  加密的 PKCS8 Ed25519 私钥（iv=前 12B、AAD=apiKeyId、tag 128）
+- 每请求：Ed25519 签 `"{id}\n{ts}\n{appVersion}\n{sessionId}\n{nonce}"`（base64）+
+  PoW：seed=`sha256("{id}\nzcode\n{sessionId}\n{ts}")` hex[:32]，找
+  `sha256("{seed}\n{candidate}")` 具 8 个前导零 bit 的 candidate（12B hex nonce + 8 位 hex counter）
+- 七头组：`X-Client-Ts / X-Client-Version / X-Client-Sig / X-Session-Id / X-Client-Nonce /
+  X-App-Id: zcode / X-Client-Pow`
+- 重试梯：签名 → 401 且 envelope 提及 `VERIFY_SIGNATURE_INVALID`/`VERIFY_APIKEY_EXPIRED`
+  → 重握手重签 → 二次 VERIFY → 永久 bypass 并补发一次无签名请求
+- 免签路径：`/api/v1/zcode-plan/anthropic/v1/messages`、`/api/v1/zcode-plan/chat/completions`、
+  `/api/v1/off-peak/anthropic/v1/messages`；单段凭据（无 `.` 分隔）跳过签名
+- 全程 fail-open（与客户端一致）：门禁关/不可达、握手失败 → 无签名发送
+
+### 账务平面
+
+`src/server/routes-quota.ts` + `src/claim/client.ts`：
+
+- `GET https://zcode.z.ai/api/v1/zcode-plan/billing/balance?app_version=&platform={os}-{arch}`
+  —— 头：TV 身份集（无 X-ZCode-Agent）+ `Authorization: Bearer {JWT}` + `Accept` +
+  **稳定 `X-Device-Mid`**（活动网关缺头 3001 实证）；应答 balances[]
+  `{show_name, remaining_units, total_units, used_units, unit_type, expires_at}`（snake/camel 双兼容）
+- 试用套餐领取（后续版本）：`billing/preview`（5min 轮询）+ `billing/claim`
+  （需 `X-Aliyun-Captcha-Verify-Param`，原实现靠 in-process 浏览器环境，Go 侧无等价物）
+
+### 模型目录
+
+`src/provider/models.ts`：glm-4.5-air(131K/96K) · glm-4.6(200K/131K) · glm-4.6v(131K/32K 视觉) ·
+glm-4.7(200K/131K) · glm-5/5-turbo(200K/64K) · glm-5v-turbo(200K/131K 视觉) · glm-5.1(200K/64K) ·
+glm-5.2(1M/128K，3.11.2 目录缺名保留转发) · glm-5.3(1M/128K) · glm-5.3-flash(1M/128K，trial 网关)。
+
+### 端点重映射（待实施）
+
+`src/proxy/endpoint-routing.ts`：`/api/v1/agent/configs` 的 `proxyEndpoint.mapping` 表
+（from→to 精确 URL 重写，当前把 coding-plan Anthropic 端点映射到 `zcode.z.ai/api/v1/ultra[-zai]/...`），
+TTL 5min，fail-open。
+
+---
+
 ## 关键实现注意点
 
 ### CodeBuddy 系
@@ -278,6 +371,7 @@
 - [decolua/9router](https://github.com/decolua/9router) — Trae Intl JS 实现
 - [diegosouzapw/OmniRoute](https://github.com/diegosouzapw/OmniRoute) — Trae/Qoder TS 实现
 - [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — CPA 插件 SDK
+- [TriDefender/zcode-api](https://github.com/TriDefender/zcode-api) — 智谱 GLM 编码套餐反代（ZCode Proxy）——zcode 插件协议蓝本（OAuth 中转登录/签名 V4/身份头/账务平面，zcode 分支吸收）
 - [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) — WorkBuddy `/v3/config` 双路模型发现 + nonChatModel 过滤（v0.12.51 吸收）
 - [ThinkofRain1213/deepseek-harness-codearts](https://github.com/ThinkofRain1213/deepseek-harness-codearts) — WorkBuddy isChatModel 过滤 + supportsImages 三态（v0.12.51 吸收）
 - [Ttungx/trae-solo-local-api](https://github.com/Ttungx/trae-solo-local-api) — Trae Body 白名单/多模态实测（v0.12.37 依据）

@@ -51,6 +51,24 @@
         "TraeWork",
         "CheckIn"
       ]
+    },
+    {
+      "id": "zcode",
+      "name": "ZCode",
+      "description": "ZCode unified provider for CPA (GLM coding plan): Z.AI (api.z.ai) and BigModel (open.bigmodel.cn) in one plugin, server-mediated CLI login via zcode.z.ai (no local callback), per-account provider routing, permanent API keys + plan JWT, Client Request Signing V4 (Ed25519 + PoW, fail-open retry ladder), pinned glm-4.5-air..glm-5.3-flash catalog, billing/balance quota panel, per-model cooldown, auto-adopts legacy zcode.json files.",
+      "author": "mmqz",
+      "version": "0.1.0",
+      "repository": "https://github.com/mmqz/cpa-multi-plugins",
+      "homepage": "https://github.com/mmqz/cpa-multi-plugins/tree/zcode/plugins/zcode",
+      "license": "MIT",
+      "tags": [
+        "Provider",
+        "OAuth",
+        "ZCode",
+        "GLM",
+        "Z.AI",
+        "BigModel"
+      ]
     }
   ]
 }

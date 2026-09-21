@@ -2,7 +2,7 @@
 
 > CPA (CLIProxyAPI) 动态库插件集合：CodeBuddy / WorkBuddy / Trae / Qoder 的 CN + Intl 版本
 >
-> 7 个插件覆盖 4 个平台 × 2 个版本（CodeBuddy CN 与 WorkBuddy 已合并），让 CPA 一个 `/v1/chat/completions` 接口调用所有模型。
+> 主分支 7 个插件覆盖 4 个平台 × 2 个版本（CodeBuddy CN 与 WorkBuddy 已合并），让 CPA 一个 `/v1/chat/completions` 接口调用所有模型。`zcode` 分支新增 ZCode 插件（智谱 GLM 编码套餐，Z.AI + BigModel）。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -21,6 +21,7 @@
 | `workbuddy` | CodeBuddy / WorkBuddy 三区合并（CN + Global + Intl） | OpenAI 兼容 | ✅ 每日 | ✅ credits | ✅ functional |
 | `trae` | Trae 三变体合并（Code CN + SOLO CN + Intl） | llm_utils_chat / Web SOLO | ✅ 每日 | ✅ v2 pack 优先级 | ✅ functional |
 | `qoder` | Qoder 双区合并（CN + Intl） | COSY 签名 | ✅ 每日 | ✅ quota | ✅ functional |
+| `zcode`（zcode 分支） | 智谱 GLM 编码套餐双 provider 合并（Z.AI + BigModel） | OpenAI 兼容 + 签名 V4 | —（claim 后续版本） | ✅ billing/balance | 🚧 M1（zcode 分支） |
 
 
 ## 功能对标

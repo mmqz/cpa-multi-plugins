@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZCode 面板</title>
+<style>
+:root{
+  --bg:#faf9f5;--card:#ffffff;--border:#e3e1db;--fg:#2d2a26;--mut:#6d6760;
+  --acc:#4c8dff;--on-acc:#ffffff;--ok:#10b981;--err:#c65746;
+  --ok-soft:rgba(16,185,129,.10);--ok-border:rgba(16,185,129,.30);
+  --err-soft:rgba(198,87,70,.10);--err-border:rgba(198,87,70,.30);
+  --warn-soft:rgba(224,170,20,.12);--warn-border:rgba(224,170,20,.32);--warn:#e0aa14;
+  --btn-sec:#eef1f6;--acc-ring:rgba(76,141,255,.18);color-scheme:light
+}
+:root[data-theme="dark"]{
+  --bg:#1e1d1b;--card:#26241f;--border:#3a3833;--fg:#ede9e3;--mut:#9a948c;
+  --acc:#4c8dff;--on-acc:#ffffff;--ok:#34d399;--err:#e07a6a;--warn:#f0c050;
+  --ok-soft:rgba(52,211,153,.12);--ok-border:rgba(52,211,153,.38);
+  --err-soft:rgba(224,122,106,.12);--err-border:rgba(224,122,106,.38);
+  --warn-soft:rgba(240,192,80,.14);--warn-border:rgba(240,192,80,.38);
+  --btn-sec:#35332e;--acc-ring:rgba(76,141,255,.28);color-scheme:dark
+}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:24px 16px}
+h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);font-size:13px;margin-bottom:20px}
+.bar{display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+button{background:var(--acc);color:var(--on-acc);border:0;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:13px;white-space:nowrap}
+button.sec{background:var(--btn-sec);color:var(--fg)}button:disabled{opacity:.5;cursor:default}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;margin-bottom:20px}
+.card,.summary{background:var(--card);border:1px solid var(--border);border-radius:12px}
+.card{padding:16px}.card.selected{border-color:var(--acc);box-shadow:0 0 0 2px var(--acc-ring)}
+.card h2{font-size:15px;margin:0 0 2px;display:flex;justify-content:space-between;align-items:center}
+.uid{color:var(--mut);font-size:11px;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:12px}
+.badge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:99px;background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok-border)}
+.badge.exhausted{background:var(--err-soft);color:var(--err);border-color:var(--err-border)}
+.badge.plan{background:var(--warn-soft);color:var(--warn);border-color:var(--warn-border)}
+.stat{display:flex;justify-content:space-between;font-size:13px;padding:3px 0}
+.stat .k{color:var(--mut)}.stat .v{font-weight:600}
+.cool{margin-top:10px;font-size:12px;color:var(--err)}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:8px 16px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
+.toast.show{opacity:.92}
+.summary{padding:14px 16px;margin-bottom:16px;display:flex;gap:18px;flex-wrap:wrap;font-size:13px}
+.summary b{font-size:16px}
+.err{color:var(--err);font-size:12px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ZCode（智谱 GLM 编码套餐）</h1>
+  <div class="sub">Z.AI / BigModel 双区 · 登录走 CPA 授权入口（服务端中转，免回调）· 面板展示配额与冷却</div>
+  <div class="summary" id="summary">加载中…</div>
+  <div class="bar">
+    <button onclick="load(false,false)">刷新缓存</button>
+    <button onclick="load(true,true)" class="sec">强制刷新配额</button>
+    <span class="sub" id="serverTime"></span>
+  </div>
+  <div class="grid" id="cards"></div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+const base = new URLSearchParams(location.search).get('base') || '';
+function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200)}
+async function api(path, opts){
+  const res = await fetch(base + '/v0/management/plugins/zcode' + path, opts);
+  return await res.json().catch(()=>({error:'bad json'}));
+}
+function fmt(n){return (n??0).toLocaleString()}
+async function load(force, quota){
+  const el = document.getElementById('cards');
+  el.innerHTML = '<div class="card">加载中…</div>';
+  const data = force ? await api('/refresh',{method:'POST'}) : await api('/accounts');
+  if(data.error){ el.innerHTML = '<div class="card err">'+data.error+'</div>'; document.getElementById('summary').textContent=''; return; }
+  document.getElementById('serverTime').textContent = '更新于 ' + (data.server_time||'');
+  const s = data.summary||{};
+  document.getElementById('summary').innerHTML =
+    '账号 <b>'+fmt(s.account_count)+'</b> · 总余量 <b>'+fmt(s.total_remain)+'</b> · 已用 <b>'+fmt(s.total_used)+'</b>'
+    + ' · Z.AI <b>'+fmt(s.zai_remain)+'</b> / BigModel <b>'+fmt(s.bigmodel_remain)+'</b>'
+    + (s.exhausted_count ? ' · <span style="color:var(--err)">耗尽 '+s.exhausted_count+'</span>' : '');
+  el.innerHTML = '';
+  (data.accounts||[]).forEach(a=>{
+    const card = document.createElement('div');
+    card.className = 'card' + (a.selected?' selected':'');
+    const quotaHtml = a.credits
+      ? '<div class="stat"><span class="k">余量</span><span class="v">'+fmt(a.credits.total_remain)+'</span></div>'
+        + '<div class="stat"><span class="k">已用</span><span class="v">'+fmt(a.credits.total_used)+'</span></div>'
+        + (a.credits.total_size ? '<div class="stat"><span class="k">池</span><span class="v">'+fmt(a.credits.total_size)+'</span></div>' : '')
+      : '<div class="stat"><span class="k">配额</span><span class="v" style="color:var(--mut)">点击刷新加载</span></div>';
+    const cool = (a.cooling||[]).map(c=>c.model+'('+c.reason+' '+c.seconds+'s)').join('、');
+    card.innerHTML =
+      '<h2>'+(a.nickname||a.uid||'账号')+' <span>'
+      + '<span class="badge">'+(a.provider||'zai').toUpperCase()+'</span> '
+      + (a.plan==='start-plan'?'<span class="badge plan">START</span> ':'')
+      + (a.exhausted?'<span class="badge exhausted">耗尽</span>':'<span class="badge">正常</span>')
+      + '</span></h2>'
+      + '<div class="uid">'+(a.name||'')+'</div>'
+      + quotaHtml
+      + (cool?'<div class="cool">冷却中：'+cool+'</div>':'')
+      + (a.error?'<div class="err">'+a.error+'</div>':'')
+      + '<div class="bar" style="margin-top:12px">'
+      + '<button '+(a.selected?'disabled':'')+' onclick="select(\''+a.auth_index+'\')">设为路由账号</button>'
+      + '<button class="sec" onclick="loadOne(\''+a.auth_index+'\')">刷新配额</button>'
+      + '<button class="sec" onclick="switchPlan(\''+a.auth_index+'\','+'\''+(a.plan==='start-plan'?'coding-plan':'start-plan')+'\''+')">切到 '+(a.plan==='start-plan'?'coding':'start')+'</button>'
+      + '</div>';
+    el.appendChild(card);
+  });
+}
+async function select(idx){
+  const r = await api('/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auth_index:idx})});
+  toast(r.ok?'已选中':(r.error||'失败')); load(false,false);
+}
+async function loadOne(idx){
+  const r = await api('/credits?auth_index='+encodeURIComponent(idx));
+  toast(r.error||'已刷新'); load(false,false);
+}
+async function switchPlan(idx, plan){
+  const r = await api('/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auth_index:idx, plan:plan})});
+  toast(r.ok?'已切换到 '+plan:(r.error||'失败')); load(false,false);
+}
+load(false,false);
+</script>
+</body>
+</html>
