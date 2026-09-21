@@ -93,6 +93,14 @@ type hostAuthPhysical struct {
 	Disabled  bool
 }
 
+// hostAuthGetPhysicalFn / hostAuthPersistMigrateFn are indirection points so
+// tests can exercise note-writing paths without a live host RPC bridge. Both
+// default to the real host calls below.
+var (
+	hostAuthGetPhysicalFn    = hostAuthGetPhysical
+	hostAuthPersistMigrateFn = hostAuthPersistMigrate
+)
+
 func hostAuthGetPhysical(authIndex string) (*hostAuthPhysical, error) {
 	body, _ := json.Marshal(map[string]string{"auth_index": authIndex})
 	raw, err := hostCall(pluginabi.MethodHostAuthGet, body)

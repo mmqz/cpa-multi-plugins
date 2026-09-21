@@ -7,6 +7,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -237,19 +238,45 @@ func applyExhaustedPolicy(authIndex, authID string, sa *storedAuth, cr *creditsS
 	}
 }
 
+// existingNoteCredits reads the credit segment already stored on disk so a
+// failed credits query can keep the last known value instead of regressing the
+// card to "积分未知".
+func existingNoteCredits(authIndex string) string {
+	phys, err := hostAuthGetPhysicalFn(authIndex)
+	if err != nil || phys == nil {
+		return ""
+	}
+	return noteCreditsFromJSON(phys.JSON)
+}
+
+// noteCreditsFromJSON extracts the credit segment from a raw auth-file body.
+func noteCreditsFromJSON(raw []byte) string {
+	var pjson struct {
+		Note string `json:"note"`
+	}
+	if json.Unmarshal(raw, &pjson) != nil {
+		return ""
+	}
+	return creditSegmentFromNote(pjson.Note)
+}
+
 // syncAuthNote writes note without changing disabled state.
+//
+// cr == nil means "credits unknown this round" (upstream error or not fetched
+// yet). In that case the previously stored credit segment is preserved: a
+// transient billing failure must not erase a note the user already sees.
 func syncAuthNote(authIndex, authID string, sa *storedAuth, cr *creditsSummary, disabled bool) error {
 	if sa == nil {
 		return nil
 	}
-	note := displayNote(sa, cr, disabled)
+	note := displayNoteWithPrev(sa, cr, disabled, existingNoteCredits(authIndex))
 	if lifecycleStateUnchanged(authID, disabled, note) {
 		return nil
 	}
 	mu := checkinLockFor(authIndex)
 	mu.Lock()
 	defer mu.Unlock()
-	phys, err := hostAuthGetPhysical(authIndex)
+	phys, err := hostAuthGetPhysicalFn(authIndex)
 	name := authFileNameFor(sa)
 	path := ""
 	legacyPath := ""
@@ -257,7 +284,7 @@ func syncAuthNote(authIndex, authID string, sa *storedAuth, cr *creditsSummary, 
 		name, path, legacyPath = resolveAuthFileTarget(sa, phys)
 		// re-read disabled from disk as source of truth
 		disabled = parseDisabledFromAuthJSON(phys.JSON)
-		note = displayNote(sa, cr, disabled)
+		note = displayNoteWithPrev(sa, cr, disabled, noteCreditsFromJSON(phys.JSON))
 	}
 	if lifecycleStateUnchanged(authID, disabled, note) {
 		return nil
@@ -266,7 +293,7 @@ func syncAuthNote(authIndex, authID string, sa *storedAuth, cr *creditsSummary, 
 	if err != nil {
 		return err
 	}
-	if err := hostAuthPersistMigrate(name, path, legacyPath, raw); err != nil {
+	if err := hostAuthPersistMigrateFn(name, path, legacyPath, raw); err != nil {
 		return err
 	}
 	rememberLifecycleState(authID, disabled, note)
@@ -541,7 +568,14 @@ func listEntryMatchesUID(f pluginapi.HostAuthFileEntry, uid, wantName string) bo
 
 // enrichAuthMetadata builds Metadata map for AuthData (type/logo/note/disabled).
 func enrichAuthMetadata(sa *storedAuth, cr *creditsSummary, disabled bool) map[string]any {
-	note := displayNote(sa, cr, disabled)
+	return enrichAuthMetadataWithPrev(sa, cr, disabled, "")
+}
+
+// enrichAuthMetadataWithPrev is enrichAuthMetadata plus a previously known
+// credit segment, so callers that can see the on-disk note never degrade a
+// populated card back to the "积分未知" placeholder.
+func enrichAuthMetadataWithPrev(sa *storedAuth, cr *creditsSummary, disabled bool, prevCredits string) map[string]any {
+	note := displayNoteWithPrev(sa, cr, disabled, prevCredits)
 	return map[string]any{
 		"type":     providerName,
 		"provider": providerName,

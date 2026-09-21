@@ -37,9 +37,27 @@ func streamEmitError(streamID, message string) {
 	if streamID == "" {
 		return
 	}
-	// A-37: never emit raw upstream bodies that may contain Bearer/JWT.
-	errJSON, _ := json.Marshal(map[string]any{"error": map[string]any{"message": redactSecrets(message)}})
-	_ = streamEmit(streamID, errJSON)
+	body, err := streamErrorFrame(streamID, redactSecrets(message))
+	if err != nil {
+		return
+	}
+	_, _ = hostCall(pluginabi.MethodHostStreamEmit, body)
+}
+
+// streamErrorFrame renders the host.stream.emit request for a terminal error.
+// The message must travel in the RPC top-level "error" field, never inside
+// "payload": the host turns req.Error into the chunk's Err (feeding its
+// failure-classification / cooldown layer and surfacing a real terminal error
+// to the client), while a payload-embedded {"error":...} blob is just another
+// data chunk — the SSE translator drops the unframed line, the client sees a
+// truncated stream, and our wording never reaches the classifier.
+// A-37 still applies: raw upstream bodies may carry Bearer/JWT — callers pass
+// the message through redactSecrets first.
+func streamErrorFrame(streamID, message string) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"stream_id": streamID,
+		"error":     message,
+	})
 }
 
 var streamCloseOnce sync.Map // streamID -> sync.Once
@@ -159,7 +177,7 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 	// with zero payload is an upstream failure, not a silent success. (The
 	// seenPayload tracking used to be dead code here.)
 	if !seenPayload {
-		errEmpty := fmt.Errorf("empty_stream: qoder upstream closed before a completion payload")
+		errEmpty := emptyStreamError()
 		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, errEmpty.Error())
 		if authID != "" {
 			recordUpstreamFailure(authID, cooldownModel, 0, errEmpty.Error())
@@ -220,12 +238,12 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: json.RawMessage(cleaned)})
 	}
 	if err := scanner.Err(); err != nil {
-		return chunks, 0, fmt.Errorf("upstream stream read error: %w", err)
+		return chunks, 0, upstreamReadError(err)
 	}
 	// v0.8.17 empty-stream guard: a 200 envelope stream with zero payload
 	// chunks is an upstream failure, not a silent success.
 	if !seenPayload {
-		return chunks, 0, fmt.Errorf("empty_stream: qoder upstream closed before a completion payload")
+		return chunks, 0, emptyStreamError()
 	}
 	return chunks, 0, nil
 }
@@ -388,7 +406,7 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	// (sdk/api/handlers executeWithPluginExecutor), so fail fast here instead
 	// of assembling a partial completion nobody can safely consume.
 	if scanErr != nil {
-		return nil, fmt.Errorf("upstream stream read error: %w", scanErr)
+		return nil, upstreamReadError(scanErr)
 	}
 
 	message := map[string]any{"role": firstNonEmpty(role, "assistant"), "content": content}
@@ -476,7 +494,7 @@ func aggregateQoderSSE(r io.Reader, model string) ([]byte, error) {
 	// into a synthetic chatcmpl-qoderwork completion with empty content and
 	// finish_reason "stop" — a silent fake success on the non-stream path.
 	if !seenPayload {
-		return nil, fmt.Errorf("empty_stream: qoder upstream closed before a completion payload")
+		return nil, emptyStreamError()
 	}
 	return aggregateCompletion(strings.NewReader(inner.String()), model)
 }

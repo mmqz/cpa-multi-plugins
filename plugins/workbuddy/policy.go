@@ -149,8 +149,30 @@ func shouldReenableCN(disabled bool, cr *creditsSummary) bool {
 	return cr.TotalRemain > 0
 }
 
-// displayNote builds a one-line note for CPAMP Auth cards.
-func displayNote(sa *storedAuth, cr *creditsSummary, disabled bool) string {
+// emptyStreamError renders an upstream "stream closed before first payload"
+// failure.
+//
+// The wording is load-bearing. Plugin-side tests and the aggregate guards key
+// on the "empty_stream" prefix; host-side, CPA classifies stream errors from
+// the message text that survives the RPC boundary, and
+// isConnectionLifecycleMessage treats "unexpected eof" phrasing as a
+// transport-lifecycle event (message path only applies when no HTTP status is
+// attached): the credential keeps its healthy status instead of being cooled
+// for one flaky model.
+func emptyStreamError() error {
+	return fmt.Errorf("empty_stream: workbuddy upstream closed before a completion payload (unexpected EOF)")
+}
+
+// upstreamReadError renders a mid-stream read failure with the same
+// transport-lifecycle classification as emptyStreamError.
+func upstreamReadError(err error) error {
+	return fmt.Errorf("upstream stream read error (unexpected EOF): %w", err)
+}
+
+// notePrefix renders the region/disabled head of an auth-card note, without
+// the credit segment. Kept separate so syncAuthNote can rebuild a note while
+// preserving a previously known credit segment.
+func notePrefix(sa *storedAuth, disabled bool) string {
 	region := "CN"
 	switch accountRegion(sa) {
 	case "intl":
@@ -162,9 +184,51 @@ func displayNote(sa *storedAuth, cr *creditsSummary, disabled bool) string {
 	if disabled {
 		parts = append(parts, "已禁用")
 	}
+	return strings.Join(parts, " · ")
+}
+
+// creditSegmentFromNote extracts the credit segment of an existing auth note
+// (everything after the region / disabled prefix). Returns "" when the note
+// carries no usable credit information, so callers never resurrect "积分未知".
+func creditSegmentFromNote(note string) string {
+	parts := strings.Split(note, " · ")
+	segments := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "CN" || part == "INTL" || part == "Global" || part == "已禁用" {
+			continue
+		}
+		segments = append(segments, part)
+	}
+	seg := strings.Join(segments, " · ")
+	if seg == "" || strings.HasPrefix(seg, "积分未知") {
+		return ""
+	}
+	return seg
+}
+
+// displayNote builds a one-line note for CPAMP Auth cards.
+//
+// cr == nil means "credits unknown right now" (startup, a lazy panel refresh,
+// or a failed billing call). displayNote falls back to the placeholder because
+// it has no disk access; callers that can read the previous note should prefer
+// displayNoteWithPrev so a restart or transient billing error cannot regress a
+// card that already shows live credits.
+func displayNote(sa *storedAuth, cr *creditsSummary, disabled bool) string {
+	return displayNoteWithPrev(sa, cr, disabled, "")
+}
+
+// displayNoteWithPrev is displayNote plus a previously known credit segment.
+// prev is ignored whenever cr carries fresh data.
+func displayNoteWithPrev(sa *storedAuth, cr *creditsSummary, disabled bool, prev string) string {
+	parts := []string{notePrefix(sa, disabled)}
 	switch {
 	case cr == nil:
-		parts = append(parts, "积分未知")
+		if seg := creditSegmentFromNote(prev); seg != "" {
+			parts = append(parts, seg)
+		} else {
+			parts = append(parts, "积分未知")
+		}
 	case isCreditsExhausted(cr):
 		parts = append(parts, fmt.Sprintf("耗尽 · 余%d 已用%d", cr.TotalRemain, cr.TotalUsed))
 	default:

@@ -187,6 +187,11 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 				accountCache.Store(f.ID, &accountCacheEntry{
 					checkin: ci, credits: cr, plan: plan, fetched: now,
 				})
+				// Propagate the fresh credits into the host auth-file note so
+				// CPA's native credential card matches this panel. Without it a
+				// lazy /credits refresh updated the panel while the native card
+				// stayed on a stale note.
+				_ = syncAuthNote(f.AuthIndex, f.ID, sa, cr, f.Disabled)
 			}
 			return map[string]any{"accounts": []map[string]any{acct}}
 		}
@@ -213,6 +218,8 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 			ac.Error = err.Error()
 		} else {
 			ac.Credits = cr
+			// Throttled by lifecycleStateUnchanged inside syncAuthNote.
+			_ = syncAuthNote(f.AuthIndex, f.ID, sa, cr, f.Disabled)
 		}
 		out = append(out, ac)
 	}

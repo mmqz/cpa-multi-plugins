@@ -37,9 +37,27 @@ func streamEmitError(streamID, message string) {
 	if streamID == "" {
 		return
 	}
-	// A-37: never emit raw upstream bodies that may contain Bearer/JWT.
-	errJSON, _ := json.Marshal(map[string]any{"error": map[string]any{"message": redactSecrets(message)}})
-	_ = streamEmit(streamID, errJSON)
+	body, err := streamErrorFrame(streamID, redactSecrets(message))
+	if err != nil {
+		return
+	}
+	_, _ = hostCall(pluginabi.MethodHostStreamEmit, body)
+}
+
+// streamErrorFrame renders the host.stream.emit request for a terminal error.
+// The message must travel in the RPC top-level "error" field, never inside
+// "payload": the host turns req.Error into the chunk's Err (feeding its
+// failure-classification / cooldown layer and surfacing a real terminal error
+// to the client), while a payload-embedded {"error":...} blob is just another
+// data chunk — the SSE translator drops the unframed line, the client sees a
+// truncated stream, and our wording never reaches the classifier.
+// A-37 still applies: raw upstream bodies may carry Bearer/JWT — callers pass
+// the message through redactSecrets first.
+func streamErrorFrame(streamID, message string) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"stream_id": streamID,
+		"error":     message,
+	})
 }
 
 func streamClose(streamID string) {
@@ -132,7 +150,7 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 	// v0.9.29 empty-stream guard: a 200 stream that ended without a single
 	// completion payload is an upstream failure, not a silent success.
 	if !seenPayload {
-		message := "empty_stream: workbuddy upstream closed before a completion payload"
+		message := emptyStreamError().Error()
 		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, message)
 		streamEmitError(streamID, message)
 		return
@@ -140,8 +158,9 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 	// A mid-stream read failure means the client received a truncated stream:
 	// surface it as an error frame and record the attempt as failed.
 	if err := scanner.Err(); err != nil {
-		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, err.Error())
-		streamEmitError(streamID, fmt.Sprintf("upstream stream read error: %v", err))
+		readErr := upstreamReadError(err)
+		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, readErr.Error())
+		streamEmitError(streamID, readErr.Error())
 		return
 	}
 	publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), false, 0, "")
@@ -237,10 +256,10 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: []byte(cleaned)})
 	}
 	if err := scanner.Err(); err != nil {
-		return chunks, fmt.Errorf("upstream stream read error: %w", err)
+		return chunks, upstreamReadError(err)
 	}
 	if !seenPayload {
-		return chunks, fmt.Errorf("empty_stream: workbuddy upstream closed before a completion payload")
+		return chunks, emptyStreamError()
 	}
 	return chunks, nil
 }
@@ -405,12 +424,12 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	// (sdk/api/handlers executeWithPluginExecutor), so fail fast here instead
 	// of assembling a partial completion nobody can safely consume.
 	if scanErr != nil {
-		return nil, fmt.Errorf("upstream stream read error: %w", scanErr)
+		return nil, upstreamReadError(scanErr)
 	}
 	// v0.12.76: empty-stream guard — a 200 response that ended without a
 	// single completion payload is an upstream failure, not a success.
 	if !seenPayload {
-		return nil, fmt.Errorf("empty_stream: workbuddy upstream closed before a completion payload")
+		return nil, emptyStreamError()
 	}
 
 	message := map[string]any{"role": firstNonEmpty(role, "assistant"), "content": content}
