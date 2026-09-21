@@ -94,12 +94,15 @@ const (
 	endpointJobTokenRefresh  = upstreamBaseCN + "/api/v1/jobToken/refresh"
 
 	// Business endpoints (jt- Bearer, no COSY).
-	endpointUserInfo      = upstreamBaseCN + "/api/v1/userinfo"
-	endpointQuotaUsage    = upstreamBaseCN + "/api/v2/quota/usage"
-	endpointUserPlan      = upstreamBaseCN + "/api/v2/user/plan"
-	endpointCheckinStatus = upstreamBaseCN + "/sash/api/v1/me/daily-check-in/status"
-	endpointCheckinClaim  = upstreamBaseCN + "/sash/api/v1/me/daily-check-in/claim"
-	endpointProUpgrade    = upstreamBaseCN + "/sash/api/v1/me/pro-upgrade/claim"
+	endpointUserInfo   = upstreamBaseCN + "/api/v1/userinfo"
+	endpointQuotaUsage = upstreamBaseCN + "/api/v2/quota/usage"
+	endpointUserPlan   = upstreamBaseCN + "/api/v2/user/plan"
+	// endpointCheckinStatus/Claim removed v0.12.80: the legacy CN
+	// daily-check-in endpoints are DISABLED upstream (claim 409s on
+	// unclaimed days and grants nothing) — check-in rides the campaigns
+	// system for both regions (billing.go/campaign.go). The legacy status
+	// probe lives in billing.go as a read-only stats supplement.
+	endpointProUpgrade = upstreamBaseCN + "/sash/api/v1/me/pro-upgrade/claim"
 
 	// Inference endpoints (COSY-signed + QoderEncoding body).
 	endpointChat   = gatewayBaseCN + "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
@@ -349,7 +352,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.8.20"
+var version = "0.8.21"
 
 func wbRegistration() registration {
 	return registration{

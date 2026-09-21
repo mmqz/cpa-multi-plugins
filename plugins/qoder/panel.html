@@ -339,18 +339,18 @@ function card(a){
   const isIntl=(a.region||"cn")==="intl";
   const regionBadge=`<span class="badge ${isIntl?"global":"cn"}">${isIntl?"Intl":"CN"}</span>`;
   // 签到 button + (CN only) 领取Pro button.
-  // CN: active=false means the upstream check-in activity is not enabled for
-  // this account (e.g. Community plan). Show disabled button with '?'.
-  // Intl (v0.8.18): the benefit is a campaign (campaign.go) — keep the button
-  // enabled; a day with nothing claimable comes back as a neutral
-  // "今日暂无可领取权益" toast instead of a dead 404.
+  // v0.12.80: both regions ride the campaign dialect (campaign.go) — the
+  // legacy CN daily-check-in is DISABLED upstream. An inactive summary now
+  // means "nothing claimable today" (claimed earlier / no campaign running),
+  // never "check-in not enabled": keep the button enabled and let the claim
+  // come back as the neutral "今日暂无可领取权益" toast, exactly like Intl
+  // since v0.8.18. (The old CN "不可签" disabled state died with the legacy
+  // status semantics.)
   let actionHTML;
   const checked=ci.today_checked_in;
-  const ciActive=ci.active!==false; // absent=true (default active)
   let btnClass,btnText,btnDisabled;
   if(checked){btnClass="done";btnText="已签到";btnDisabled=" disabled=\"disabled\"";}
-  else if(isIntl){btnClass="sec";btnText="签到";btnDisabled="";}
-  else{btnClass=ciActive?"sec":"done";btnText=ciActive?"签到":"不可签";btnDisabled=ciActive?"":" disabled=\"disabled\"";}
+  else{btnClass="sec";btnText="签到";btnDisabled="";}
   actionHTML=`<button class="${btnClass}" data-action="checkin" data-auth-index="${esc(a.auth_index)}"${btnDisabled}>${btnText}</button>`+
     (isIntl?"":`<button class="sec" data-action="claim-pro" data-auth-index="${esc(a.auth_index)}" title="领取Pro升级包">领取Pro</button>`);
   // v0.8.18: per-(account, model) cooldown rows with an inline clear action.

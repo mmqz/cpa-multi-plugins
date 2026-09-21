@@ -13,6 +13,22 @@ import (
 	"time"
 )
 
+// billingBaseOverride is nil in production; tests set it to redirect every
+// sash/quota billing call (check-in, campaigns, quota) to an httptest server.
+// The upstream base consts are compile-time, so this indirection is the only
+// seam an HTTP-level test has.
+var billingBaseOverride func(region string) string
+
+// billingBaseFor routes billing calls by the account's region, honoring the
+// test override. All sash/api check-in paths must go through this helper —
+// a direct upstreamBaseFor(sa) call would bypass the test seam.
+func billingBaseFor(sa *storedAuth) string {
+	if billingBaseOverride != nil {
+		return billingBaseOverride(authRegion(sa))
+	}
+	return upstreamBaseFor(sa)
+}
+
 func billingHeaders(req *http.Request, sa *storedAuth) {
 	// QoderWork billing endpoints authenticate with the active token as a
 	// plain Bearer — jobToken (jt-) or device token (dt-), both accepted
@@ -35,15 +51,37 @@ type checkinStatusResponse struct {
 	RewardExpiresAt    int64  `json:"rewardExpiresAt"` // s epoch
 }
 
+// fetchCheckinStatus builds the panel's check-in summary. v0.12.80: BOTH
+// regions now claim through the campaigns system — upstream DISABLED the
+// legacy CN daily-check-in globally (status reports DISABLED with zero
+// streak; claim answers 409 on unclaimed days and grants no credits;
+// verified upstream 2026-09-21, cross-checked against the qoder2api
+// project's packet capture). Calling the legacy claim only produced false
+// "今日已签"/failure toasts on healthy CN accounts — the field report behind
+// this change.
+//
+// The legacy CN status endpoint stays readable, so for CN credentials we
+// merge its streak stats into the campaign summary (strictly read-only,
+// non-zero values only) — the panel keeps 连续/累计 display while claims ride
+// campaigns. Intl has no legacy endpoint; nothing to merge there.
 func fetchCheckinStatus(sa *storedAuth) (*checkinSummary, error) {
-	// v0.8.18: route by region contract — Intl delivers its daily benefit as
-	// a campaign, not via the CN daily-check-in endpoints (campaign.go).
-	if capabilitiesForRegion(authRegion(sa)).Contract == checkinContractCampaign {
-		return fetchCampaignCheckinSummary(sa)
+	sum, err := fetchCampaignCheckinSummary(sa)
+	if err != nil {
+		return nil, err
 	}
+	mergeLegacyCheckinStats(sa, sum)
+	return sum, nil
+}
+
+// fetchLegacyCheckinStatus queries the legacy CN daily-check-in status
+// endpoint. READ-ONLY since v0.12.80: its claim sibling is DISABLED upstream
+// and must never be called (409 + no grant). Kept as a stats supplement —
+// if upstream restores the legacy system, non-zero stats flow back in
+// automatically.
+func fetchLegacyCheckinStatus(sa *storedAuth) (*checkinStatusResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstreamBaseFor(sa)+"/sash/api/v1/me/daily-check-in/status", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, billingBaseFor(sa)+"/sash/api/v1/me/daily-check-in/status", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -59,25 +97,34 @@ func fetchCheckinStatus(sa *storedAuth) (*checkinSummary, error) {
 	if err := json.Unmarshal(resp.Body, &q); err != nil {
 		return nil, fmt.Errorf("checkin status parse: %w", err)
 	}
-	today := time.Now().Format("2006-01-02")
-	lastClaimed := ""
-	if q.LastClaimedAt > 0 {
-		lastClaimed = time.Unix(q.LastClaimedAt, 0).Format("2006-01-02")
+	return &q, nil
+}
+
+// mergeLegacyCheckinStats folds legacy CN daily-check-in stats into a
+// campaign-derived summary. Only strictly greater non-zero values overwrite:
+// the DISABLED legacy system reports zeros, which must never clobber the
+// campaign-derived state. No-op for Intl (no legacy endpoint — probing it
+// would only 404) and for nil summaries.
+func mergeLegacyCheckinStats(sa *storedAuth, sum *checkinSummary) {
+	if sum == nil || authRegion(sa) != regionCN {
+		return
 	}
-	sum := &checkinSummary{
-		Active:          q.Status == "CLAIMABLE" || q.Status == "CLAIMED",
-		TodayCheckedIn:  q.Status == "CLAIMED" && lastClaimed == today,
-		StreakDays:      q.CurrentStreakDays,
-		DailyCredit:     q.RewardCredits,
-		TodayCredit:     0,
-		TotalCredits:    q.TotalRewardCredits,
-		WeekCheckinDays: q.TotalClaimDays,
-		ActivityName:    "每日签到",
+	q, err := fetchLegacyCheckinStatus(sa)
+	if err != nil || q == nil {
+		return // best-effort: campaign summary stays authoritative
 	}
-	if sum.TodayCheckedIn {
-		sum.TodayCredit = q.RewardCredits
+	if q.CurrentStreakDays > sum.StreakDays {
+		sum.StreakDays = q.CurrentStreakDays
 	}
-	return sum, nil
+	if q.TotalClaimDays > sum.WeekCheckinDays {
+		sum.WeekCheckinDays = q.TotalClaimDays
+	}
+	if q.TotalRewardCredits > sum.TotalCredits {
+		sum.TotalCredits = q.TotalRewardCredits
+	}
+	if sum.DailyCredit == 0 && q.RewardCredits > 0 {
+		sum.DailyCredit = q.RewardCredits
+	}
 }
 
 // quotaUsageResponse mirrors GET /api/v2/quota/usage response (plain JSON,
@@ -211,49 +258,16 @@ func fetchPaymentType(sa *storedAuth) string {
 	return p.UserType
 }
 
+// performCheckinCall claims one account's daily benefit. v0.12.80: both
+// regions ride the campaigns claim (the only system that actually grants
+// credits). The legacy CN daily-check-in/claim endpoint is DISABLED upstream
+// — it answers 409 even on unclaimed days and grants nothing (2026-09-21
+// upstream verification) — so calling it can only misreport "已签/失败";
+// the v0.8.8 ALREADY_CLAIMED normalization here became dead weight and was
+// removed with the legacy claim path. If upstream ever restores the legacy
+// system, re-add the claim beside the read-only status probe.
 func performCheckinCall(sa *storedAuth) (map[string]any, error) {
-	// v0.8.18: campaign dialect for Intl (same normalization contract).
-	if capabilitiesForRegion(authRegion(sa)).Contract == checkinContractCampaign {
-		return performCampaignCheckin(sa)
-	}
-	req, err := http.NewRequest(http.MethodPost, upstreamBaseFor(sa)+"/sash/api/v1/me/daily-check-in/claim", strings.NewReader("{}"))
-	if err != nil {
-		return nil, err
-	}
-	billingHeaders(req, sa)
-	resp, err := hostHTTPDo(req)
-	if err != nil {
-		return map[string]any{"success": false, "message": err.Error()}, nil
-	}
-	if resp.StatusCode >= 400 {
-		body := truncateRedacted(string(resp.Body), 200)
-		// v0.8.8: QoderWork 在并发/重复领取时返回 HTTP 409 +
-		// {"result":"ALREADY_CLAIMED"}（偶尔也用 200 + success:false）。
-		// 旧代码把一切 http>=400 都吞成 success:false，导致下面
-		// checkinOneAccount 的 ALREADY_CLAIMED 分支永远打不中，
-		// “今日已签”被当成失败展示。这里提前识别并归一化。
-		var probe map[string]any
-		if json.Unmarshal(resp.Body, &probe) == nil {
-			if r, _ := probe["result"].(string); r == "ALREADY_CLAIMED" {
-				return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
-			}
-		}
-		if resp.StatusCode == http.StatusConflict && strings.Contains(string(resp.Body), "ALREADY_CLAIMED") {
-			return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
-		}
-		return map[string]any{"success": false, "message": fmt.Sprintf("http %d: %s", resp.StatusCode, body)}, nil
-	}
-	var m map[string]any
-	if err := json.Unmarshal(resp.Body, &m); err != nil {
-		return nil, err
-	}
-	// QoderWork checkin claim returns {"success":true, "rewardCredits":100,...}
-	// on success, or {"success":false,"error":"..."} on already-claimed.
-	// Normalise to the panel's expected shape (bool success).
-	if _, ok := m["success"]; !ok {
-		m["success"] = true
-	}
-	return m, nil
+	return performCampaignCheckin(sa)
 }
 
 // isCreditsExhausted is the shared "耗尽" definition for panel + scheduler.

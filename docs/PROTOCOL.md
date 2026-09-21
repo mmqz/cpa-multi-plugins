@@ -217,7 +217,11 @@
 - `GET https://openapi.qoder.sh/api/v2/quota/usage`
 
 ### 签到
-- **无**
+- **无 legacy 端点**；每日权益以 campaign 形式下发（v0.8.18 起）：
+  - **列表**: `GET https://openapi.qoder.sh/sash/api/v1/me/campaigns?forceRefresh=true`
+    - `campaigns[]` 中 `actionType=CLAIM_BENEFIT` 且 `claimStatus=CLAIMABLE` 的行为可领取项
+  - **领取**: `POST https://openapi.qoder.sh/sash/api/v1/me/campaigns/{campaignId}/claim` (body `{}`)
+    - 返回 `{status:"CLAIMED", replayed, benefit:{kind,amount}, expiresAt}`；`replayed=true` = 幂等重放（今日已领）
 
 ---
 
@@ -243,10 +247,14 @@
 - `GET https://openapi.qoder.com.cn/api/v2/user/plan`
 
 ### 签到
-- **状态**: `GET https://openapi.qoder.com.cn/sash/api/v1/me/daily-check-in/status`
-  - 返回 `{status:"CLAIMABLE"|"CLAIMED", rewardCredits, nextClaimAt, currentStreakDays, totalClaimDays, totalRewardCredits}`
-- **领取**: `POST https://openapi.qoder.com.cn/sash/api/v1/me/daily-check-in/claim` (body `{}`)
-  - 返回 `{success:true, rewardCredits:100, ...}`
+- **v0.12.80 起：领取走 campaigns 系统**（与 Intl 同构）。上游已全局禁用 legacy
+  daily-check-in：claim 对未领取日也恒返回 409 且不发积分（2026-09-21 实测，
+  qoder2api 项目抓包同结论）——继续调用只会对健康账号产生假“已签/失败”。
+  - **列表**: `GET https://openapi.qoder.com.cn/sash/api/v1/me/campaigns?forceRefresh=true`
+  - **领取**: `POST https://openapi.qoder.com.cn/sash/api/v1/me/campaigns/{campaignId}/claim` (body `{}`)
+- **legacy 状态（只读统计）**: `GET https://openapi.qoder.com.cn/sash/api/v1/me/daily-check-in/status`
+  - 返回 `{status:"DISABLED", ...}`（streak 恒 0）；插件仅在其非零时补充连续/累计展示，
+    绝不调用其 claim 兄弟端点
 - **Pro 升级领取**: `POST https://openapi.qoder.com.cn/sash/api/v1/me/pro-upgrade/claim`
 
 ---

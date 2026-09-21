@@ -31,13 +31,24 @@ import (
 type checkinContract int
 
 const (
-	checkinContractDaily    checkinContract = iota // CN: daily-check-in status/claim
-	checkinContractCampaign                        // Intl: campaigns list + claim
+	checkinContractDaily    checkinContract = iota // RETIRED v0.12.80 — legacy daily-check-in is DISABLED upstream
+	checkinContractCampaign                        // campaigns list + claim (Intl since v0.8.18, CN since v0.12.80)
 )
 
 // regionCapabilities records which upstream billing contracts exist per
-// region. Both regions share quota/plan/refresh; they differ in check-in
-// dialect and Pro-upgrade availability.
+// region. Both regions share quota/plan/refresh and — since v0.12.80 — the
+// campaigns check-in dialect. They still differ in Pro-upgrade availability.
+//
+// v0.12.80 CN dialect switch (field report: "Qoder CN 账户仍然不能签到"):
+// upstream DISABLED the legacy daily-check-in system globally — status
+// reports DISABLED with zero streak and claim answers 409 even on unclaimed
+// days while granting no credits (verified upstream 2026-09-21; same
+// conclusion in the qoder2api project's packet-captured campaigns flow,
+// "不走 daily-check-in/claim —— 该 legacy 端点已 DISABLED"). CN accounts now
+// claim via GET /sash/api/v1/me/campaigns + POST .../campaigns/{id}/claim,
+// the same system that already served Intl since v0.8.18. The legacy status
+// endpoint stays readable and is merged as a read-only stats supplement
+// (billing.go mergeLegacyCheckinStats).
 type regionCapabilities struct {
 	Checkin    bool
 	ProUpgrade bool
@@ -55,7 +66,7 @@ func capabilitiesForRegion(region string) regionCapabilities {
 	return regionCapabilities{
 		Checkin:    true,
 		ProUpgrade: true,
-		Contract:   checkinContractDaily,
+		Contract:   checkinContractCampaign,
 	}
 }
 
@@ -87,7 +98,7 @@ type campaignBen struct {
 }
 
 func fetchCampaignStatus(sa *storedAuth) (*campaignStatusResponse, error) {
-	req, err := http.NewRequest(http.MethodGet, upstreamBaseFor(sa)+"/sash/api/v1/me/campaigns?forceRefresh=true", nil)
+	req, err := http.NewRequest(http.MethodGet, billingBaseFor(sa)+"/sash/api/v1/me/campaigns?forceRefresh=true", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -172,17 +183,22 @@ func fetchCampaignCheckinSummary(sa *storedAuth) (*checkinSummary, error) {
 }
 
 func campaignCheckinSummary(status *campaignStatusResponse) *checkinSummary {
-	sum := &checkinSummary{
-		Active:       status != nil && (status.ShowCampaign || status.Claimable),
-		ActivityName: "权益活动",
-	}
+	sum := &checkinSummary{ActivityName: "权益活动"}
 	if status == nil {
 		return sum
 	}
+	// v0.12.80: a CLAIMABLE row is authoritative evidence of an active
+	// benefit regardless of the envelope's showCampaign/claimable flags —
+	// the CN campaigns response (unlike the Intl growth-page envelope this
+	// dialect was built on) may not carry them. The old order left
+	// Active=false with DailyCredit set whenever the flags were absent,
+	// which the panel renders as an unreachable "不可签".
 	if c := claimableCampaign(status); c != nil {
+		sum.Active = true
 		sum.DailyCredit = campaignCredit(c)
 		return sum
 	}
+	sum.Active = status.ShowCampaign || status.Claimable
 	if c := claimedCampaign(status); c != nil {
 		sum.TodayCheckedIn = true
 		sum.DailyCredit = campaignCredit(c)
@@ -208,7 +224,7 @@ func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
 	}
 	req, err := http.NewRequest(
 		http.MethodPost,
-		upstreamBaseFor(sa)+"/sash/api/v1/me/campaigns/"+c.CampaignID+"/claim",
+		billingBaseFor(sa)+"/sash/api/v1/me/campaigns/"+c.CampaignID+"/claim",
 		strings.NewReader("{}"),
 	)
 	if err != nil {
@@ -232,19 +248,26 @@ func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
 	}
 	// The activity page accepts either a bare payload or a {data:{...}}
 	// envelope; the claim succeeded when status reports CLAIMED.
+	// replayed=true is the upstream's idempotent replay (the same claim
+	// landed earlier today — qoder2api capture): surface it as
+	// ALREADY_CLAIMED so the panel shows 今日已签 instead of a fresh
+	// success toast that would invite the user to claim again.
 	body := m
 	if data, ok := m["data"].(map[string]any); ok {
 		body = data
 	}
-	if statusValue, _ := body["status"].(string); !strings.EqualFold(statusValue, "CLAIMED") {
-		return map[string]any{"success": false, "upstream": m}, nil
+	if statusValue, _ := body["status"].(string); strings.EqualFold(statusValue, "CLAIMED") {
+		if replayed, _ := body["replayed"].(bool); replayed {
+			return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
+		}
+		return map[string]any{
+			"success":        true,
+			"result":         "CLAIMED",
+			"rewardCredits":  float64(campaignCredit(c)),
+			"campaign_id":    c.CampaignID,
+			"campaign_key":   c.CampaignKey,
+			"campaign_title": c.CampaignKey,
+		}, nil
 	}
-	return map[string]any{
-		"success":        true,
-		"result":         "CLAIMED",
-		"rewardCredits":  float64(campaignCredit(c)),
-		"campaign_id":    c.CampaignID,
-		"campaign_key":   c.CampaignKey,
-		"campaign_title": c.CampaignKey,
-	}, nil
+	return map[string]any{"success": false, "upstream": m}, nil
 }

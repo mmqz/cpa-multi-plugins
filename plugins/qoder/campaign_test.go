@@ -8,9 +8,14 @@ package main
 import "testing"
 
 func TestCapabilitiesForRegion(t *testing.T) {
+	// v0.12.80: BOTH regions ride the campaign contract — upstream disabled
+	// the legacy CN daily-check-in (claim 409s on unclaimed days, grants
+	// nothing). The CN flip is the fix for the "Qoder CN 不能签到" field
+	// report; keep this test pinned so no future edit silently restores the
+	// dead legacy path.
 	cn := capabilitiesForRegion("cn")
-	if cn.Contract != checkinContractDaily {
-		t.Fatalf("CN contract = %d, want daily", cn.Contract)
+	if cn.Contract != checkinContractCampaign {
+		t.Fatalf("CN contract = %d, want campaign (legacy daily-check-in is DISABLED upstream)", cn.Contract)
 	}
 	if !cn.ProUpgrade {
 		t.Fatal("CN must keep the Pro-upgrade contract")

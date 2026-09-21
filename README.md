@@ -51,7 +51,7 @@
 - 每天 09:00 自动触发
 - Trae: `api.trae.cn/trae/api/v2/ug/checkin_credits/{status,claim}`
 - CodeBuddy CN: `codebuddy.cn/v2/billing/meter/{checkin-activity-status,daily-checkin}`
-- QoderWork CN: `openapi.qoder.com.cn/sash/api/v1/me/daily-check-in/{status,claim}`
+- QoderWork CN: v0.12.80 起走 campaigns 领取（`/sash/api/v1/me/campaigns/{id}/claim`）——legacy `daily-check-in/{status,claim}` 已被上游全局禁用（claim 恒 409 不发积分，2026-09-21 实测），status 保留为只读统计
 - **9074 限流识别**（Trae 业务码，三家参考项目都没做，cpa-multi-plugins 独有）
 
 ### ✅ 积分/配额查询

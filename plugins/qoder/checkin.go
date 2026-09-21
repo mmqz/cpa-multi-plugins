@@ -287,6 +287,10 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
 	// /me/campaigns entirely, so an inactive summary means "nothing left to
 	// claim today" — already claimed earlier or no campaign running. Surface
 	// it as a no-op, not a failure (reason=none, neutral panel toast).
+	// v0.12.80: CN joined the campaign dialect (legacy daily-check-in is
+	// DISABLED upstream), so this guard now covers both regions — an
+	// inactive CN summary likewise means "nothing claimable today", never
+	// an error.
 	if capabilitiesForRegion(authRegion(sa)).Contract == checkinContractCampaign && !ci.Active {
 		out["success"] = true
 		out["skipped"] = true
