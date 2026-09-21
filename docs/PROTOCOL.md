@@ -89,6 +89,16 @@
 - 其他完全相同（host、token、chat、配额、签到）
 - cockpit-tools `workbuddy_auto_checkin.rs:506` 直接调用 `codebuddy_cn_oauth::get_checkin_status` 和 `perform_checkin`
 
+### 模型能力发现 (v0.12.51，参考 workbuddy2api-panel + deepseek-harness-codearts)
+
+双路并发探测（实现 `plugins/workbuddy/models.go`，逐条从代码核实）：
+
+- 企业端点：排序权威；`/v3/config`：官方 IDE 配置目录，UA 敏感——必须 `CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0`（CLI UA 得到削减表：flash 输出上限 128K、无 supportedEfforts）
+- `/v3/config` 请求头：`Authorization: Bearer` + `Accept: application/json, text/plain, */*` + `X-Requested-With: XMLHttpRequest` + `X-Domain: <realm 域名>` + `X-Product: SaaS` + `X-CodeBuddy-Request: 1` + `X-User-Id: <账号 uid>`（空则省略）；三 realm 各自 `{upstreamBase}/v3/config`
+- 响应信封 `{code, data:{models:[...]}}`；合并 key=模型 id，企业管排序、v3 补能力 + 追加 v3 独有条目；单路失败降级另一路，双失败报错并带两个原因
+- 能力透出：ContextLength/InputTokenLimit、MaxCompletionTokens/OutputTokenLimit（兼容 `contextWindow/maxTokens` 与 `maxInputTokens/maxOutputTokens` 两代字段名）、Thinking.Levels/ZeroAllowed（`reasoning.supportedEfforts`/`canDisableThinking`）
+- nonChatModel 过滤（镜像 harness `buddy.ts` isChatModel 与 workbuddy2api-panel nonChatModel）：id 前缀 `nes-`/`completion-`/`codewise-`（embedding/completion/code-only）、maxOutput<=256、supportsExtra、tags 含 `text-to-image`（图像生成模型）→ 一律不进可选列表
+
 ---
 
 ## Provider: trae-intl
@@ -268,3 +278,6 @@
 - [decolua/9router](https://github.com/decolua/9router) — Trae Intl JS 实现
 - [diegosouzapw/OmniRoute](https://github.com/diegosouzapw/OmniRoute) — Trae/Qoder TS 实现
 - [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — CPA 插件 SDK
+- [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) — WorkBuddy `/v3/config` 双路模型发现 + nonChatModel 过滤（v0.12.51 吸收）
+- [ThinkofRain1213/deepseek-harness-codearts](https://github.com/ThinkofRain1213/deepseek-harness-codearts) — WorkBuddy isChatModel 过滤 + supportsImages 三态（v0.12.51 吸收）
+- [Ttungx/trae-solo-local-api](https://github.com/Ttungx/trae-solo-local-api) — Trae Body 白名单/多模态实测（v0.12.37 依据）

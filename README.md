@@ -181,6 +181,9 @@ cd plugins/trae && CGO_ENABLED=1 go build -buildmode=c-shared -o trae.so .
 | **[OmniRoute](https://github.com/diegosouzapw/OmniRoute)** | TypeScript | Trae Intl Web SOLO remote 协议（trae.ts）<br>CodeBuddy CN content filter 规避（codebuddy-cn.ts）<br>CodeBuddy CN/intl executor | trae-intl, workbuddy, codebuddy-cn, codebuddy-intl |
 | **[9router](https://github.com/decolua/9router)** | JavaScript | Trae 三区域切换（regions: cn/sg/us）<br>Trae Intl chat_sessions/events SSE | trae-intl |
 | **[cockpit-tools](https://github.com/jlcodes99/cockpit-tools)** | Rust | Trae v2 积分制 pack 优先级（apply_usage_response）<br>Trae 4 变体差异（TraePlatformKind）<br>CodeBuddy CN 签到状态机（workbuddy_auto_checkin.rs）<br>CodeBuddy CN 签到字段解析（codebuddy_cn_oauth.rs）<br>Trae 签到 API headers（x-app-type, Origin, Referer） | trae-cn, trae-solo-cn, workbuddy, codebuddy-cn |
+| **[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)** | Go | WorkBuddy `/v3/config` 模型目录双路发现（企业端点排序权威 + v3 补能力/独有条目）<br>nonChatModel 非对话模型过滤 | workbuddy |
+| **[ThinkofRain1213/deepseek-harness-codearts](https://github.com/ThinkofRain1213/deepseek-harness-codearts)** | TypeScript | `buddy.ts` isChatModel 过滤 + supportsImages 三态<br>image_url/data URI 图片链路实测 | workbuddy |
+| **[Ttungx/trae-solo-local-api](https://github.com/Ttungx/trae-solo-local-api)** | TypeScript | Trae 上游无原生 thinking 参数 / agent 字段 4023 实测（Body 白名单依据）<br>image_url 多模态透传实测 | trae |
 | **[router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** | Go | CPA 插件 SDK（examples/plugin/{executor,auth}/go/）<br>pluginapi / pluginabi 类型定义 | 全部 7 个插件 |
 
 ### 各插件的具体借鉴文件
@@ -190,6 +193,8 @@ cd plugins/trae && CGO_ENABLED=1 go build -buildmode=c-shared -o trae.so .
 - **content filter 规避**：`OmniRoute/open-sse/executors/codebuddy-cn.ts` line 149-202（AGENT_PATTERN + 长度兜底 + reasoning_summary 镜像 + 大工具描述压缩）
 - **签到状态机**：`cockpit-tools/src-tauri/src/modules/workbuddy_auto_checkin.rs` line 33-64, 406-754（WorkbuddyAutoCheckinConfig + 指数退避调度器）
 - **签到字段解析**：`cockpit-tools/src-tauri/src/modules/codebuddy_cn_oauth.rs` line 1208-1258, 1285-1394, 1423-1587（CheckinStatusResponse 完整字段 + fallback 路径）
+- **模型双路发现**：`linguo2625469/workbuddy2api-panel` nonChatModel + `/v3/config` 探测（v0.12.51 吸收：企业端点管排序、v3 补能力与独有条目、单路失败降级另一路）
+- **isChatModel 过滤 + supportsImages**：`ThinkofRain1213/deepseek-harness-codearts` `buddy.ts`（nes-/completion-/codewise- 前缀、maxOutput<=256、text-to-image tag 不进可选列表；能力透出至模型元数据）
 
 #### `plugins/codebuddy-cn` 已并入 `plugins/workbuddy`（v0.9.0）
 - 两者后端、额度池完全相同（copilot.tencent.com），仅登录 platform（CLI/ide）与 X-IDE-* 请求头不同
@@ -257,6 +262,9 @@ MIT — 详见 [LICENSE](LICENSE)
 - **jlcodes99** — cockpit-tools 作者，提供了 Trae v2 积分制 pack 优先级 + 16 平台账号管理协议事实
 - **router-for-me** — CLIProxyAPI 作者，提供了 CPA 插件 SDK + C ABI 接口规范
 - **lovingfish** — workbuddy-cliproxy 作者，提供了 workbuddy 单文件 clean-room 重写参考
+- **linguo2625469** — workbuddy2api-panel 作者，提供了 WorkBuddy `/v3/config` 模型目录双路发现 + nonChatModel 过滤参考（v0.12.51 吸收）
+- **ThinkofRain1213** — deepseek-harness-codearts 作者，提供了 isChatModel 过滤 + supportsImages 三态参考（v0.12.51 吸收）
+- **Ttungx** — trae-solo-local-api 作者，提供了 Trae Body 白名单与多模态透传实测依据（v0.12.37 依据）
 
 ## 协议变更跟踪
 
@@ -265,7 +273,7 @@ Trae / CodeBuddy / Qoder 平台会不定期更新协议。本项目通过以下�
 1. **协议层独立**：所有协议常量集中在 `upstream/constants.go`，变更时只改一处
 2. **pack 优先级可配置**：`SelectActivePack` 支持新增 product_type
 3. **content filter 正则可扩展**：`agentPattern` 在 `payload.go` 顶部，新身份行直接加
-4. **参考项目监控**：定期 sync 上游 5 个参考项目的最新 commit
+4. **参考项目监控**：定期 sync 上游参考项目（见「借鉴来源」与 docs/PROTOCOL.md「参考来源」）的最新 commit
 
 如发现协议变更，请提 [Issue](../../issues) 报告。
 
