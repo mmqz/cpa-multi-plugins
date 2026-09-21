@@ -366,8 +366,21 @@ func collectUpstreamStream(body string, sa *storedAuth, route chatRoute, sseFram
 // code treatment (3007 captcha / 1261 context / auth semantics) and the JWT
 // 401 gets the re-login hint; coding-plan failures keep the existing generic
 // rendering. The response headers ride along because the captcha challenge's
-// primary variant is a response header.
+// primary variant is a response header. Off-peak routes get first crack at
+// the lane's business codes (3101/3102/3103/3105) — those numbers mean
+// something else on the other planes, so the hint must be checked before the
+// generic anthropic table.
 func routeChatError(route chatRoute, sa *storedAuth, status int, headers http.Header, body string) error {
+	if route.offPeakTicketID != "" {
+		if biz := extractOffPeakBizCode([]byte(body)); biz != 0 {
+			if hint := offPeakBizHint(biz); hint != "" {
+				return fmt.Errorf("off-peak request rejected (HTTP %d): %s — %s", status, hint, truncateRedacted(body, 200))
+			}
+		}
+		if status == http.StatusUnauthorized {
+			return fmt.Errorf("off-peak JWT rejected by the gateway (401): please re-login — %s", truncateRedacted(body, 200))
+		}
+	}
 	if route.anthropic {
 		var captchaHeader string
 		if headers != nil {

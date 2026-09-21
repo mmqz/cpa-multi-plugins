@@ -17,7 +17,7 @@
 | `trae-solo-cn` | Trae Work CN / SOLO CN | 同 trae-cn | `en1oxy7wnw8j9n` | `solo_work_lite` | ✅ | 4/5 |
 | `qoder-intl` | Qoder Intl | `qoder.com` / `api3.qoder.sh` | `e883ade2-...` | - | ❌ | 5/5 COSY 签名 |
 | `qoder-cn` | QoderWork CN | `qoder.com.cn` / `gateway.qoder.com.cn` | `1c5e33e1-...` | - | ✅ | 5/5 |
-| `zcode`（zcode 分支） | 智谱 GLM 编码套餐（Z.AI + BigModel） | `zcode.z.ai`（控制面）/ `api.z.ai` + `open.bigmodel.cn`（LLM） | 无（poll_token 中转） | - | —（claim 后续） | 4/5 签名 V4 |
+| `zcode`（zcode 分支） | 智谱 GLM 编码套餐（Z.AI + BigModel） | `zcode.z.ai`（控制面/网关）/ `api.z.ai` + `open.bigmodel.cn`（LLM） | 无（poll_token 中转） | - | —（claim 需验证码侧车） | 5/5 签名 V4 + anthropic 翻译 + off-peak 票务 |
 
 ## 协议复用
 
@@ -27,7 +27,7 @@
 | `trae-core` | trae-cn, trae-solo-cn | client_id, function, has_checkin |
 | `trae-intl-core` | trae-intl | 独立（Web SOLO remote 协议） |
 | `qoder-core` | qoder-intl, qoder-cn | openapi_base, gateway_base, client_id, redirect_uri, has_checkin, has_pat_import |
-| `zcode-core`（zcode 分支） | zai, bigmodel（单插件按账号路由） | llm_openai_base, provider 字段; plan 字段路由 coding/start |
+| `zcode-core`（zcode 分支） | zai, bigmodel（单插件按账号路由） | llm_openai_base, provider 字段; plan 字段路由 coding/start；coding 直连 OpenAI 网关，start/off-peak 走 anthropic 翻译层 |
 
 ---
 
@@ -244,11 +244,12 @@
 
 ---
 
-## Provider: zcode（zcode 分支，M1）
+## Provider: zcode（zcode 分支，M1–M3）
 
 智谱 GLM 编码套餐统一 provider（Z.AI 国际 + BigModel 国内）。协议净室重实现自
 [TriDefender/zcode-api](https://github.com/TriDefender/zcode-api)（ZCode Proxy, MIT，2026-09 快照），
-插件侧每条实现均标注源码出处。
+start-plan 翻译层与 off-peak 票务通道对齐官方开源客户端 [zai-org/ZCode](https://github.com/zai-org/ZCode)
+（Apache-2.0，仅取账户级线路协议形状，行为基线保持闭源仿冒），插件侧每条实现均标注源码出处。
 
 ### OAuth：服务端中转 CLI 登录（无本地回调）
 
@@ -265,7 +266,10 @@
    `{token:<plan JWT>, user:{user_id}, zai|bigmodel:{access_token}}`。
    错误语义：4xx（除 408/429）、envelope `code!==0`、未知 status = 致命；5xx/网络/畸形 200 = 按 pending 重试。
 
-凭据形态：access_token 即 API key —— zai 为 `apiKeyId.apiKeySecret` 双段、bigmodel 单段；
+凭据形态：poll ready 返回的 `data.{provider}.access_token` 是 **OAuth token 而非聊天 Key**，须再经
+KeyResolver 业务链解析（zai：`z/login` → Bearer bizToken → `getCustomerInfo` 默认机构/项目 →
+`api_keys` 找/建 `zcode-api-key` → `copy/{apiKey}` 取 secretKey，终态 `{apiKeyId}.{apiKeySecret}`；
+bigmodel：OAuth token 裸值作 authorization、copy 失败回落单段 Key）。解析后的 Key 永久有效；
 plan JWT **无 exp 永不刷新**（8 天旧 JWT 仍可查账务），仅网关 401/3012 表示需重登。
 
 ### LLM 上游（coding-plan，OpenAI 兼容网关）
@@ -327,11 +331,67 @@ plan JWT **无 exp 永不刷新**（8 天旧 JWT 仍可查账务），仅网关 
 glm-4.7(200K/131K) · glm-5/5-turbo(200K/64K) · glm-5v-turbo(200K/131K 视觉) · glm-5.1(200K/64K) ·
 glm-5.2(1M/128K，3.11.2 目录缺名保留转发) · glm-5.3(1M/128K) · glm-5.3-flash(1M/128K，trial 网关)。
 
-### 端点重映射（待实施）
+### 端点重映射（参考）
 
 `src/proxy/endpoint-routing.ts`：`/api/v1/agent/configs` 的 `proxyEndpoint.mapping` 表
 （from→to 精确 URL 重写，当前把 coding-plan Anthropic 端点映射到 `zcode.z.ai/api/v1/ultra[-zai]/...`），
-TTL 5min，fail-open。
+TTL 5min，fail-open。注：ultra 网关是开源减配形态的替代通道，插件不采用（见“行为基线”注）。
+
+### start-plan Anthropic 翻译层（M2，官方开源协议）
+
+旧 OpenAI 路由 `/api/v1/zcode-plan/chat/completions` 已于 2026-08-28 服务端下线（404）。
+start-plan 网关只有 Anthropic 格式端点，官方客户端一律
+`POST https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages`（`Authorization: Bearer {plan JWT}` +
+`anthropic-version: 2023-06-01`，UA `ZCode/{ver} ai-sdk/anthropic/3.0.81`，3 头 trace 子集）。
+来源：官方开源 `translator/openai-to-anthropic.ts` + `translator/sse-translator.ts` +
+`proxy/system-prompt.ts` + `zcode_system.json` + `proxy/body-transformer.ts`：
+
+- **网关内容审查**：system 缺官方 ZCode 身份块 → biz 3012 “method not allowed”——system 前缀是准入门票：
+  3 个官方块（cli_prefix / stable / dynamic+environment，各带 ephemeral cache breakpoint）前置 +
+  用户 system 尾随 + `<system-reminder>` context_prefix 首插 user 轮（含本地日期）
+- **metadata.user_id**：每请求必带 `JSON{device_id, account_uuid:"", session_id:""}`；
+  device_id 与身份头 X-Device-Mid 同源（billing 稳定 UUID）
+- **cache_control 规范化**：清非系统消息全部标记 + 最后一条非系统消息末块打 ephemeral
+  （3 官方块已占 4 断点配额前 3）
+- **thinking 兼容**：GLM-5.3 家族 `output_config.effort` 是唯一生效通道
+  （low 8000 / high 16000 / max 32000 预算配对；`reasoning_effort` 被静默忽略）；
+  缺预算默认 1024，max_tokens += 预算且钤目录顶；禁采样参数
+- 请求翻译：system 提取双 \n\n 连接、连续 tool 消息合并单 user 轮 tool_result、
+  tool_calls→tool_use、图片 data-url→base64/https→url/其他降级文本、stop_sequences、
+  tool_choice 映射；响应回译单消息 + SSE 状态机（overwrite-usage 合并、finish 块带 usage、
+  tool 索引映射、截断流 flushFinal 兜底）
+- 业务码分流（官方 failure-provider-business-codes.ts 全表）：1261 上下文超限 / 1006 鉴权 /
+  1312 过载可重试 / 1302|1303|1305 限流可重试 / 1304|1308|1310|1313|3008-3010 限流不可重试 /
+  3007 安全校验（验证码挑战，头/体双变体）/ 3001|3005|3006 InvalidRequest；
+  start-plan 401 → 重登提示
+
+### Off-Peak 错峰票务通道（M3，官方开源协议）
+
+官方“闲时任务”低峰优惠通道，来源：官方开源 `packages/services/src/session/offPeakServerClient.ts`
++ `offPeakRuntimeModel.ts` + `offPeakTaskService.ts`、`packages/shared/src/off-peak-types.ts`、
+`apps/zcode-cli/packages/adapters/src/model/offpeak-retry.ts`（账户级 wire 契约，无客户端指纹）：
+
+- 五端点（基座 `https://zcode.z.ai/api/v1/off-peak`）：
+  `GET /ticket/availability` → `{can_take_number, next_take_at?}`（false 必带 next_take_at，
+  否则脏响应报错）；`POST /ticket` `{task_id}` → `{ticket_id, state, position?, next_poll_after?}`；
+  `POST /ticket/status` `{ticket_ids≤100}` → `{next_poll_after?, tickets[]}`（按 ticket_id 匹配，
+  应答序不保证）；`POST /ticket/{id}/settle`（幂等，未知票亦 2xx，4xx 同作 ack）；
+  messages 直连 `/anthropic/v1/messages`（免签路径）
+- 服务端准入态：queued → ready（5min TTL 废票）→ active（3h 硬顶）→ expired/settled；
+  next_poll_after 单位**秒**（Retry-After 惯例），轮询触发服务端晋级
+- 鉴权双凭证：`Authorization: Bearer {plan JWT}` + `x-coding-plan-api-key: {plan Key}`
+  （TV 身份集，messages 加 `X-Off-Peak-Ticket-ID`；bigmodel-team 加
+  `bigmodel-organization/project` 双头且缺一不发——插件 v1 不支持 Team 形态）
+- 业务码（lane 本地语义，禁入全局表）：3101 无资格 / 3102 票废（同 task_id 重取号 = 官方续跑语义，
+  3001 旧网关兼容）/ 3103 取号超限 / 3105 排队（HTTP 429 + Retry-After）
+- 失败决策（offpeak-retry.ts）：3102|3001 → 票废重取；3105 或裸 429 → 排队等待
+  min(Retry-After, 5min) 钳制，无头默认 60s 探测；排队 429 豁免 maxAttempts（官方语义）
+- 插件适配：宿主同步调用不支持后台任务队列，改为“票到即发”——取票 + 预算内轮询
+  （`offpeak_max_wait`，默认 0 = 仅接受即时 ready）→ 带票 messages → 终态 settle；
+  429 排队/3102 重取循环仅在非流式路径做（流式开 chunk 后重试不可透明），
+  流式错误经 routeChatError 渲染 lane 专属文案；off-peak 模型集合 = GLM-5.3 / GLM-5.3-Flash
+  （官方 idle-plan 选择器），启用时目录随之收窄；start-plan 账号服务端结构性拒绝
+  （start_plan_not_supported），插件侧同规则排除
 
 ---
 
@@ -372,6 +432,7 @@ TTL 5min，fail-open。
 - [diegosouzapw/OmniRoute](https://github.com/diegosouzapw/OmniRoute) — Trae/Qoder TS 实现
 - [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — CPA 插件 SDK
 - [TriDefender/zcode-api](https://github.com/TriDefender/zcode-api) — 智谱 GLM 编码套餐反代（ZCode Proxy）——zcode 插件协议蓝本（OAuth 中转登录/签名 V4/身份头/账务平面，zcode 分支吸收）
+- [zai-org/ZCode](https://github.com/zai-org/ZCode) — ZCode 官方开源客户端（Apache-2.0，同代 3.14.0 洗白开源）——zcode 插件 M2/M3 协议来源（start-plan anthropic 翻译层/system 块/错误码全表/off-peak 票务 wire 契约，zcode 分支吸收）。⚠ 仅取账户级线路协议形状；开源版为减配形态（无签名 V4/验证码求解/claim 链，ultra 网关替代通道），插件行为基线保持闭源仿冒
 - [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) — WorkBuddy `/v3/config` 双路模型发现 + nonChatModel 过滤（v0.12.51 吸收）
 - [ThinkofRain1213/deepseek-harness-codearts](https://github.com/ThinkofRain1213/deepseek-harness-codearts) — WorkBuddy isChatModel 过滤 + supportsImages 三态（v0.12.51 吸收）
 - [Ttungx/trae-solo-local-api](https://github.com/Ttungx/trae-solo-local-api) — Trae Body 白名单/多模态实测（v0.12.37 依据）

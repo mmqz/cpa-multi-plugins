@@ -21,7 +21,7 @@
 | `workbuddy` | CodeBuddy / WorkBuddy 三区合并（CN + Global + Intl） | OpenAI 兼容 | ✅ 每日 | ✅ credits | ✅ functional |
 | `trae` | Trae 三变体合并（Code CN + SOLO CN + Intl） | llm_utils_chat / Web SOLO | ✅ 每日 | ✅ v2 pack 优先级 | ✅ functional |
 | `qoder` | Qoder 双区合并（CN + Intl） | COSY 签名 | ✅ 每日 | ✅ quota | ✅ functional |
-| `zcode`（zcode 分支） | 智谱 GLM 编码套餐双 provider 合并（Z.AI + BigModel） | OpenAI 兼容 + 签名 V4 | —（claim 后续版本） | ✅ billing/balance | 🚧 M1（zcode 分支） |
+| `zcode`（zcode 分支） | 智谱 GLM 编码套餐双 provider 合并（Z.AI + BigModel） | OpenAI 兼容 + anthropic 翻译 + 签名 V4 + off-peak 票务 | —（claim 需验证码侧车） | ✅ billing/balance | ✅ M1–M3（zcode 分支） |
 
 
 ## 功能对标
@@ -185,7 +185,9 @@ cd plugins/trae && CGO_ENABLED=1 go build -buildmode=c-shared -o trae.so .
 | **[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)** | Go | WorkBuddy `/v3/config` 模型目录双路发现（企业端点排序权威 + v3 补能力/独有条目）<br>nonChatModel 非对话模型过滤 | workbuddy |
 | **[ThinkofRain1213/deepseek-harness-codearts](https://github.com/ThinkofRain1213/deepseek-harness-codearts)** | TypeScript | `buddy.ts` isChatModel 过滤 + supportsImages 三态<br>image_url/data URI 图片链路实测 | workbuddy |
 | **[Ttungx/trae-solo-local-api](https://github.com/Ttungx/trae-solo-local-api)** | TypeScript | Trae 上游无原生 thinking 参数 / agent 字段 4023 实测（Body 白名单依据）<br>image_url 多模态透传实测 | trae |
-| **[router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** | Go | CPA 插件 SDK（examples/plugin/{executor,auth}/go/）<br>pluginapi / pluginabi 类型定义 | 全部 7 个插件 |
+| **[TriDefender/zcode-api](https://github.com/TriDefender/zcode-api)** | TypeScript | ZCode 智谱 GLM 编码套餐反代——OAuth 中转登录 / 签名 V4 / 身份头（g6n/TV）/ 账务平面 / 模型目录 | zcode |
+| **[zai-org/ZCode](https://github.com/zai-org/ZCode)** | TypeScript | ZCode 官方开源客户端（仅取账户级线路协议形状）：start-plan anthropic 翻译层 + 官方 system 块 + 业务错误码全表（M2）<br>off-peak 错峰票务五端点 wire 契约 + 排队/废票决策（M3） | zcode |
+| **[router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** | Go | CPA 插件 SDK（examples/plugin/{executor,auth}/go/）<br>pluginapi / pluginabi 类型定义 | 全部 8 个插件 |
 
 ### 各插件的具体借鉴文件
 
@@ -244,6 +246,13 @@ cd plugins/trae && CGO_ENABLED=1 go build -buildmode=c-shared -o trae.so .
 - **client_id**：`e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb`（vs CN 的 `1c5e33e1-...`）
 - **redirect_uri**：`qoder://aicoding.aicoding-agent/login-success`（vs CN 的 `qoder-work-cn://`）
 - **无签到**（Intl 平台无签到机制）
+
+#### `plugins/zcode`（zcode 分支，clean-room from TriDefender/zcode-api + zai-org/ZCode）
+- **行为基线（闭源仿冒）**：`TriDefender/zcode-api/src/{auth/oauth.ts, proxy/identity.ts, proxy/client-signing.ts, proxy/upstream.ts, server/routes-quota.ts}`（OAuth 中转登录 / g6n+TV 身份头 / 签名 V4 全套 / 账务平面）
+- **KeyResolver 凭证链（M1.1）**：`TriDefender/zcode-api/src/auth/resolver.ts` + 官方开源 `apps/zcode-cli/.../coding-plan-api-key.ts`（两实现逐行同构 = 账户级 API）：`z/login → getCustomerInfo → api_keys → copy` 终态 `{apiKeyId}.{apiKeySecret}`
+- **start-plan anthropic 翻译层（M2）**：官方开源 `translator/openai-to-anthropic.ts` + `translator/sse-translator.ts` + `proxy/system-prompt.ts` + `zcode_system.json`（3 官方块逐字）+ `proxy/body-transformer.ts`（system 前置/context_prefix/metadata/cache_control 规范化）+ `failure-provider-business-codes.ts`（业务码全表）
+- **off-peak 错峰票务（M3）**：官方开源 `packages/services/src/session/offPeakServerClient.ts`（五端点 wire 契约）+ `offPeakRuntimeModel.ts`（双凭证头）+ `offPeakTaskService.ts`（状态机/续跑）+ `off-peak-types.ts` + `offpeak-retry.ts`（排队/废票决策）
+- ⚠ 开源采用策略：官方开源版为减配形态（无签名 V4/验证码求解/claim 链，ultra 网关替代通道）——仅抄账户级线路协议，不抄行为；详见 docs/PROTOCOL.md zcode 节
 
 ### 协议事实文档
 

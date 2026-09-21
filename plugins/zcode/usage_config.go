@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,8 @@ func configure(raw []byte) {
 	nextMgmtKey := ""
 	cfgURL, cfgKey := "", ""
 	cfgVersion, cfgTitle, cfgReferer, cfgLang, cfgTz := "", "", "", "", ""
+	nextOffPeak := false
+	nextOffPeakMaxWait := time.Duration(0)
 
 	if len(raw) > 0 {
 		var req struct {
@@ -72,6 +75,16 @@ func configure(raw []byte) {
 				if strings.HasPrefix(line, "lifecycle_auto:") {
 					v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "lifecycle_auto:")), "\"'")
 					nextLifecycleAuto = v == "true" || v == "1" || v == "yes" || v == "on"
+				}
+				if strings.HasPrefix(line, "offpeak:") {
+					v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "offpeak:")), "\"'")
+					nextOffPeak = v == "true" || v == "1" || v == "yes" || v == "on"
+				}
+				if strings.HasPrefix(line, "offpeak_max_wait:") {
+					v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "offpeak_max_wait:")), "\"'")
+					if secs, perr := strconv.ParseInt(v, 10, 64); perr == nil && secs > 0 {
+						nextOffPeakMaxWait = time.Duration(secs) * time.Second
+					}
 				}
 				if strings.HasPrefix(line, "usage_report_url:") {
 					cfgURL = strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "usage_report_url:")), "\"'")
@@ -116,6 +129,8 @@ func configure(raw []byte) {
 	identityLanguage = cfgLang
 	identityTimezone = cfgTz
 	identityMu.Unlock()
+
+	configureOffPeak(nextOffPeak, nextOffPeakMaxWait)
 
 	// management key: config_yaml > env > keep existing.
 	if nextMgmtKey == "" {

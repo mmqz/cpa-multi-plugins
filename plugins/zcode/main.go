@@ -346,6 +346,8 @@ func wbRegistration() registration {
 				{Name: "login_provider", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{providerZai, providerBigmodel}, Description: "Upstream provider for NEW logins: zai (api.z.ai, default) or bigmodel (open.bigmodel.cn). Existing accounts keep their own provider."},
 				{Name: "lifecycle_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Auto disable accounts when the quota is exhausted (default true)."},
 				{Name: "scheduler_mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{schedulerModeOff, schedulerModeCredits}, Description: "Multi-account selection: off (defer to built-in, default) or credits (pick highest remaining). WARNING: when off + lifecycle_auto=false, exhausted accounts may still be routed."},
+				{Name: "offpeak", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Route coding-plan accounts through the off-peak (闲时) ticketing lane: take a queue ticket, wait for it to turn ready, then post the ticketed anthropic messages. start-plan accounts are never routed (server rejects them). Default false."},
+				{Name: "offpeak_max_wait", Type: pluginapi.ConfigFieldTypeString, Description: "Max seconds to wait for a queued ticket to turn ready before giving up (default 0 = only an immediately-ready ticket passes; e.g. 900 waits up to 15min). Queue-ack retries obey the same budget."},
 				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional override of CPAMP usage import URL (default http://cpa-manager-plus:18317/v0/management/usage/import; also env USAGE_REPORT_URL)."},
 				{Name: "usage_report_key", Type: pluginapi.ConfigFieldTypeString, Description: "Optional CPAMP admin key override. Prefer auto-detect from env CPAMP_ADMIN_KEY / USAGE_REPORT_KEY or secret file /run/secrets/cpamp_admin_key."},
 			},
@@ -575,7 +577,32 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	started := time.Now()
 	authUID := sa.Account.UID
 
-	route := routeFor(sa)
+	// Off-peak lane: acquire a ready ticket before the first send (the
+	// messages call must carry X-Off-Peak-Ticket-ID). The same task_id
+	// is reused across ticket-expired retakes inside this round.
+	var route chatRoute
+	var offTaskID string
+	var offDeadline time.Time
+	var currentTicketID string
+	if offPeakEligible(sa) {
+		offTaskID = newOffPeakTaskID()
+		budget := offPeakWaitBudget()
+		if budget > 0 {
+			offDeadline = time.Now().Add(budget)
+		}
+		ticket, terr := offPeakAcquireTicket(sa, offTaskID, budget)
+		if terr != nil {
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "off-peak acquire: "+terr.Error())
+			return nil, upstreamStatusError(http.StatusServiceUnavailable, terr)
+		}
+		currentTicketID = ticket.TicketID
+		// Settle whatever ticket the round ended on — a 3102 retake swaps
+		// the ticket mid-round, so the defer must read the variable.
+		defer func() { offPeakSettleBestEffort(sa, currentTicketID) }()
+		route = offPeakRouteFor(sa, ticket.TicketID)
+	} else {
+		route = routeFor(sa)
+	}
 	var body string
 	if route.anthropic {
 		anthropicBody, terr := translateOpenAIToAnthropicBody(req.Payload, upstreamModel, false, authProviderFor(sa), sa.Auth.DeviceMid, time.Now())
@@ -608,26 +635,75 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	// Compliance: route via host.http.do_stream so request-log captures the
 	// outbound call. The send carries the full V4 signing retry ladder.
 	// Non-streaming body: read the whole bridge stream, then decide error vs
-	// completion envelope.
-	stream, statusCode, respHeaders, err := sendChatWithSigning(sa, buildReq)
-	if err != nil {
-		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
-		return nil, fmt.Errorf("http_error: %w", err)
+	// completion envelope. On the off-peak lane a failed send may be a
+	// queue ack (429/3105 → wait and retry on the same ticket) or a dead
+	// ticket (3102/3001 → retake with the same task_id, i.e. the official
+	// resume semantics) — both bounded by the wait budget and a hard
+	// attempt cap; streaming cannot retry transparently, this loop is the
+	// non-stream path's compensation.
+	const offPeakSendMaxAttempts = 8
+	var payload []byte
+	var statusCode int
+	var respHeaders http.Header
+	for attempt := 0; ; attempt++ {
+		stream, sc, hdrs, serr := sendChatWithSigning(sa, buildReq)
+		if serr != nil {
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, serr.Error())
+			return nil, fmt.Errorf("http_error: %w", serr)
+		}
+		bodyBytes, rerr := io.ReadAll(newHostStreamReader(stream))
+		stream.Close()
+		if rerr != nil {
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, rerr.Error())
+			recordUpstreamFailure(req.AuthID, cooldownModel, 0, rerr.Error())
+			return nil, upstreamReadError(rerr)
+		}
+		if sc < 400 {
+			payload, statusCode, respHeaders = bodyBytes, sc, hdrs
+			break
+		}
+		if route.offPeakTicketID != "" && attempt < offPeakSendMaxAttempts {
+			decision, waitMs := offPeakFailureDecision(sc, extractOffPeakBizCode(bodyBytes), retryAfterMillis(hdrs))
+			switch decision {
+			case offPeakFailureQueued:
+				delay := time.Duration(waitMs) * time.Millisecond
+				if !offDeadline.IsZero() {
+					if left := time.Until(offDeadline); left < delay {
+						if left <= 0 {
+							break // budget gone → fall to error render
+						}
+						delay = left
+					}
+				}
+				time.Sleep(delay)
+				continue
+			case offPeakFailureTicketExpired:
+				var budget time.Duration
+				if !offDeadline.IsZero() {
+					if budget = time.Until(offDeadline); budget <= 0 {
+						break
+					}
+				}
+				next, terr := offPeakAcquireTicket(sa, offTaskID, budget)
+				if terr != nil {
+					payload, statusCode, respHeaders = bodyBytes, sc, hdrs
+					bodyBytes = append(bodyBytes, []byte(" — retake failed: "+terr.Error())...)
+					break
+				}
+				offPeakSettleBestEffort(sa, route.offPeakTicketID)
+				currentTicketID = next.TicketID
+				route = offPeakRouteFor(sa, next.TicketID)
+				continue
+			}
+		}
+		payload, statusCode, respHeaders = bodyBytes, sc, hdrs
+		break
 	}
-	defer stream.Close()
-	reader := newHostStreamReader(stream)
 	if statusCode >= 400 {
-		payload, _ := io.ReadAll(reader)
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
 		recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, string(payload))
 		reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
 		return nil, upstreamStatusError(statusCode, routeChatError(route, sa, statusCode, respHeaders, string(payload)))
-	}
-	payload, readErr := io.ReadAll(reader)
-	if readErr != nil {
-		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, readErr.Error())
-		recordUpstreamFailure(req.AuthID, cooldownModel, 0, readErr.Error())
-		return nil, upstreamReadError(readErr)
 	}
 	if route.anthropic {
 		// Anthropic message → OpenAI completion, then the same validation
@@ -665,7 +741,24 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	started := time.Now()
 	authUID := sa.Account.UID
 
-	route := routeFor(sa)
+	// Off-peak lane: acquire a ready ticket first (same contract as the
+	// non-stream path). Streaming cannot retry a failed send
+	// transparently — once chunks flow, a retry is visible — so the lane
+	// only prepays the ticket here and renders lane-aware errors through
+	// routeChatError; the settle rides the pump/collect completion.
+	var route chatRoute
+	var currentTicketID string
+	if offPeakEligible(sa) {
+		ticket, terr := offPeakAcquireTicket(sa, newOffPeakTaskID(), offPeakWaitBudget())
+		if terr != nil {
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "off-peak acquire: "+terr.Error())
+			return nil, upstreamStatusError(http.StatusServiceUnavailable, terr)
+		}
+		currentTicketID = ticket.TicketID
+		route = offPeakRouteFor(sa, ticket.TicketID)
+	} else {
+		route = routeFor(sa)
+	}
 	bodyRaw := req.Payload
 	if len(bodyRaw) == 0 {
 		bodyRaw = req.OriginalRequest
@@ -698,6 +791,9 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	if req.StreamID == "" {
 		collector := &sseUsageCollector{}
 		chunks, statusCode, errCollect := collectUpstreamStream(body, sa, route, sseFramed, collector)
+		if currentTicketID != "" {
+			offPeakSettleBestEffort(sa, currentTicketID)
+		}
 		if errCollect != nil {
 			publishUsage(req.Model, upstreamModel, authUID, started, collector.detail(), true, statusCode, errCollect.Error())
 			recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, errCollect.Error())
@@ -714,7 +810,14 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	// client disconnects — otherwise the pump keeps reading a dead upstream until
 	// sharedHTTPClient's 120s timeout, holding a pool slot the whole time.
 	ctx, cancel := context.WithCancel(context.Background())
-	go pumpUpstreamStream(ctx, sa, route, body, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, cooldownModel)
+	go func() {
+		pumpUpstreamStream(ctx, sa, route, body, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, cooldownModel)
+		// The ticket's round is over on every pump exit path; settle is
+		// idempotent and the server's reaper covers a lost call.
+		if currentTicketID != "" {
+			offPeakSettleBestEffort(sa, currentTicketID)
+		}
+	}()
 	return okEnvelope(streamResponse{Headers: headers})
 }
 

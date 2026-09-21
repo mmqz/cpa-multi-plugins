@@ -137,6 +137,11 @@ func handleModelForAuth(raw []byte) ([]byte, error) {
 	models := zcodeModels()
 	if sa, err := parseStored(req.StorageJSON); err == nil {
 		models = filterPlanModels(sa, models)
+		// Off-peak lane serves its own (much narrower) model set — narrow the
+		// catalog so the host only offers models the ticketed gateway accepts.
+		if offPeakEligible(sa) {
+			models = filterOffPeakModels(models)
+		}
 		models = filterCoolingModels(sa, models)
 	}
 	models = filterExcludedModels(models, req.Host)

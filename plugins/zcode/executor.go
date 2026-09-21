@@ -34,10 +34,14 @@ var startPlanAnthropicEndpoint = "https://zcode.z.ai/api/v1/zcode-plan/anthropic
 // set to apply, and whether the upstream speaks Anthropic messages (start-
 // plan) or OpenAI chat completions (coding-plan). The anthropic flag drives
 // the request/response/SSE translation layer (anthropic.go / anthropic_sse.go).
+// offPeakTicketID non-empty marks the off-peak ticketed lane (offpeak.go):
+// the endpoint is the ticketed messages gateway, headers carry the plan-key
+// + ticket identity, and failures get the lane's business-code treatment.
 type chatRoute struct {
-	endpoint     string
-	anthropic    bool
-	applyHeaders func(*http.Request, *storedAuth, string)
+	endpoint        string
+	anthropic       bool
+	applyHeaders    func(*http.Request, *storedAuth, string)
+	offPeakTicketID string
 }
 
 // routeFor resolves the chat route for one credential: start-plan accounts
@@ -49,6 +53,17 @@ func routeFor(sa *storedAuth) chatRoute {
 		return chatRoute{endpoint: startPlanAnthropicEndpoint, anthropic: true, applyHeaders: applyStartPlanChatHeaders}
 	}
 	return chatRoute{endpoint: chatEndpointFor(sa), applyHeaders: applyChatHeaders}
+}
+
+// offPeakRouteFor builds the ticketed anthropic chat route (offpeak.go owns
+// the header set; here only so routeFor and the lane live in one shape).
+func offPeakRouteFor(sa *storedAuth, ticketID string) chatRoute {
+	return chatRoute{
+		endpoint:        offPeakMessagesEndpoint,
+		anthropic:       true,
+		applyHeaders:    func(req *http.Request, s *storedAuth, body string) { applyOffPeakChatHeaders(req, s, ticketID) },
+		offPeakTicketID: ticketID,
+	}
 }
 
 // chatEndpointFor returns the coding-plan OpenAI-compatible chat endpoint.
