@@ -19,6 +19,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -90,6 +91,11 @@ func fetchCampaignStatus(sa *storedAuth) (*campaignStatusResponse, error) {
 	if err != nil {
 		return nil, err
 	}
+	// v0.12.76: bounded wait (billing.go parity) — a hung campaigns probe
+	// used to ride the bridge's long default ceiling.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
 	billingHeaders(req, sa)
 	resp, err := hostHTTPDo(req)
 	if err != nil {
@@ -208,6 +214,10 @@ func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// v0.12.76: bounded wait (billing.go parity).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
 	billingHeaders(req, sa)
 	resp, err := hostHTTPDo(req)
 	if err != nil {

@@ -117,6 +117,12 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		bodyStr, meaningful, frameErr := qoderUnwrapFrame(scanner.Text())
 		if frameErr != nil {
 			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, frameErr.Error())
+			// v0.12.76: envelope errors also feed the cooldown table — every
+			// other failure site does; without this a streaming-path 429
+			// envelope never cools the (auth, model) pair.
+			if authID != "" {
+				recordUpstreamFailure(authID, cooldownModel, 0, frameErr.Error())
+			}
 			streamEmitError(streamID, frameErr.Error())
 			return
 		}
@@ -442,24 +448,21 @@ func aggregateQoderSSE(r io.Reader, model string) ([]byte, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			// Skip event:/id:/retry:/comment lines
-			continue
-		}
-		payload := strings.TrimPrefix(line, "data:")
-		var outer map[string]any
-		if err := json.Unmarshal([]byte(payload), &outer); err != nil {
-			continue
-		}
-		bodyStr, ok := outer["body"].(string)
-		if !ok {
-			continue
+		// v0.12.76: route every line through qoderUnwrapFrame so a 200-OK
+		// error envelope (statusCodeValue>=400 / body carrying {"error":...})
+		// surfaces as an error instead of being folded into a synthetic
+		// empty completion — the two streaming paths already do this.
+		bodyStr, meaningful, frameErr := qoderUnwrapFrame(scanner.Text())
+		if frameErr != nil {
+			return nil, frameErr
 		}
 		if bodyStr == "[DONE]" {
 			break
 		}
-		seenPayload = true
+		seenPayload = seenPayload || meaningful
+		if bodyStr == "" {
+			continue
+		}
 		// Re-emit the inner JSON as a standard "data:<json>\n" SSE frame so
 		// aggregateCompletion's parser can consume it unchanged.
 		inner.WriteString("data:")

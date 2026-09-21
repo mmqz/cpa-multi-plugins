@@ -328,8 +328,18 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	seenPayload := false
 	for scanner.Scan() {
-		data := stripDataPrefix(scanner.Text())
+		// v0.12.76: route every line through workBuddyStreamFrame — the
+		// non-stream path used to swallow upstream error frames (SSE
+		// "event:error" / 200-OK {"error":...} bodies) and fold an empty
+		// stream into a synthetic empty-content completion: a silent fake
+		// success. Same guard the two streaming paths have had since v0.9.29.
+		data, meaningful, frameErr := workBuddyStreamFrame(scanner.Text())
+		if frameErr != nil {
+			return nil, frameErr
+		}
+		seenPayload = seenPayload || meaningful
 		if data == "" || data == "[DONE]" {
 			continue
 		}
@@ -396,6 +406,11 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	// of assembling a partial completion nobody can safely consume.
 	if scanErr != nil {
 		return nil, fmt.Errorf("upstream stream read error: %w", scanErr)
+	}
+	// v0.12.76: empty-stream guard — a 200 response that ended without a
+	// single completion payload is an upstream failure, not a success.
+	if !seenPayload {
+		return nil, fmt.Errorf("empty_stream: workbuddy upstream closed before a completion payload")
 	}
 
 	message := map[string]any{"role": firstNonEmpty(role, "assistant"), "content": content}

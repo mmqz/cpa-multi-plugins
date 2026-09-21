@@ -123,7 +123,43 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 		storeDynamicModels(key, dyn)
 		return filterCoolingModels(sa, dyn)
 	}
-	return filterCoolingModels(sa, fetchDynamicModels())
+	return filterCoolingModels(sa, fetchDynamicModelsForRegion(authRegion(sa)))
+}
+
+// fetchDynamicModelsForRegion is the region-scoped fallback used when THIS
+// credential's own discovery fails: only catalogs discovered under the SAME
+// region are accepted, so an intl account can never be handed a cn catalog
+// (different gateway, different model ids) and vice versa (v0.12.76).
+func fetchDynamicModelsForRegion(region string) []pluginapi.ModelInfo {
+	models := wbModels()
+	files, err := hostAuthListFiles()
+	if err != nil || len(files) == 0 {
+		return models
+	}
+	// Strict filename-prefix match — same filter as host_auth.go hostAuthList.
+	prefix := providerName + "-"
+	for _, f := range files {
+		if !strings.HasPrefix(strings.ToLower(f.Name), prefix) {
+			continue
+		}
+		raw, err := hostAuthGetByIndex(f.AuthIndex)
+		if err != nil {
+			continue
+		}
+		sa, err := parseStored(raw)
+		if err != nil || sa == nil {
+			continue
+		}
+		if authRegion(sa) != region {
+			continue
+		}
+		dyn, err := callModelsAPI(sa)
+		if err == nil && len(dyn) > 0 {
+			storeDynamicModels(modelCatalogAccountKey(sa), dyn)
+			return dyn
+		}
+	}
+	return models
 }
 
 // filterCoolingModels removes models currently cooling for THIS credential

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.30
+
+### Deep-audit round: the non-stream path gets the same guards (repo v0.12.76)
+
+A subagent code review of the 0.9.29 absorption round found the non-stream
+executor path missing every guard the streaming paths already had; this
+release closes the gap.
+
+**Upstream error frames surface on the non-stream path too.**
+`handleExecExecute` folded SSE chunks via `aggregateCompletion`, which fed
+every line straight into the delta merger: an SSE `event:error` line was
+silently skipped, and a 200-OK JSON body carrying `{"error":...}` or a
+non-zero `code` produced a synthetic `chatcmpl-workbuddy` completion with
+empty content and `finish_reason: "stop"` — a silent fake success.
+`aggregateCompletion` now routes every line through `workBuddyStreamFrame`
+and aborts on error frames.
+
+**Empty streams rejected on the non-stream path too.** A 200 response that
+ends without a single completion payload is now an explicit `empty_stream`
+failure — same message and semantics as the two streaming paths.
+
+**Formatting restored.** payload.go had picked up a tab→space regression in
+0.9.29's large edit; `gofmt -w` returns it to canonical form.
+
 ## 0.9.29
 
 ### Fork audit round: stream errors surface, empty streams rejected, WorkBuddy CLI identity (repo v0.12.74)

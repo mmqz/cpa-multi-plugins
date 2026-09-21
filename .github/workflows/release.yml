@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+    # Deep-audit A2 fix (v0.12.76): also run CI on main pushes so the branch
+    # badge reflects reality (previously the latest main-ref run was a
+    # cancelled dispatch, rendering the badge permanently "failing" while
+    # tag runs were green for 76+ consecutive releases).
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       version:
@@ -177,7 +183,9 @@ jobs:
     # continue-on-error, so a toolchain regression there still cannot block a
     # release -- but a REQUIRED leg failing now skips the release instead of
     # silently shipping an incomplete asset set.
-    if: always() && !cancelled() && needs.build.result == 'success'
+    # v0.12.76: tag-gated as well — main-branch CI runs (badge refresh) must
+    # build but NEVER publish. workflow_dispatch keeps its version input path.
+    if: always() && !cancelled() && needs.build.result == 'success' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
     steps:
       - name: Checkout
         uses: actions/checkout@v4

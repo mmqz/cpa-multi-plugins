@@ -214,7 +214,7 @@ func summarizeCredits(accounts []wbAccount) map[string]any {
 		used += cr.TotalUsed
 		size += cr.TotalSize
 		packs += cr.PackCount
-		if a.Region == "global" {
+		if a.Region == regionIntl {
 			glRemain += cr.TotalRemain
 			glUsed += cr.TotalUsed
 			glSize += cr.TotalSize
