@@ -109,6 +109,24 @@ func handleModelStatic(raw []byte) ([]byte, error) {
 	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: models})
 }
 
+// filterPlanModels narrows the catalog to the models the credential's plan
+// tier actually serves. The start-plan (trial) gateway officially serves
+// GLM-5.3-Flash / GLM-5.2 / GLM-5-Turbo (open-source zcode-builtin catalog:
+// "start-plan 仅 GLM-5.3-Flash/5.2/5-Turbo — 按 plan 过滤有官方依据");
+// coding-plan accounts keep the full pinned catalog.
+func filterPlanModels(sa *storedAuth, models []pluginapi.ModelInfo) []pluginapi.ModelInfo {
+	if sa == nil || sa.Auth.Plan != planStart {
+		return models
+	}
+	out := make([]pluginapi.ModelInfo, 0, len(models))
+	for _, m := range models {
+		if _, ok := startPlanModelIDs[strings.ToLower(m.ID)]; ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 func handleModelForAuth(raw []byte) ([]byte, error) {
 	var req pluginapi.AuthModelRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -118,6 +136,7 @@ func handleModelForAuth(raw []byte) ([]byte, error) {
 	// response whose Provider doesn't match the auth's provider.
 	models := zcodeModels()
 	if sa, err := parseStored(req.StorageJSON); err == nil {
+		models = filterPlanModels(sa, models)
 		models = filterCoolingModels(sa, models)
 	}
 	models = filterExcludedModels(models, req.Host)

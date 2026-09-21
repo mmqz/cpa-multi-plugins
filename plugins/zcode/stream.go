@@ -92,13 +92,18 @@ func streamHeaders() http.Header {
 // An emit failure (client disconnected → host closed the stream) aborts the
 // pump so we stop reading a dead upstream. cancel is invoked on every exit so
 // the underlying http request context is released promptly.
-func pumpUpstreamStream(ctx context.Context, sa *storedAuth, endpoint, body string, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID, cooldownModel string) {
+//
+// route selects the wire dialect: coding-plan OpenAI frames pass through the
+// existing unwrap/clean path; start-plan anthropic events go through the
+// translation state machine (anthropic_sse.go) first, so the host only ever
+// sees OpenAI chunk JSON.
+func pumpUpstreamStream(ctx context.Context, sa *storedAuth, route chatRoute, body string, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID, cooldownModel string) {
 	buildReq := func() (*http.Request, error) {
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(body))
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, route.endpoint, strings.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
-		applyChatHeaders(httpReq, sa, body)
+		route.applyHeaders(httpReq, sa, body)
 		return httpReq, nil
 	}
 	// Always close the host stream exactly once on every exit path.
@@ -115,7 +120,7 @@ func pumpUpstreamStream(ctx context.Context, sa *storedAuth, endpoint, body stri
 		defer cancel()
 	}
 
-	stream, statusCode, _, err := sendChatWithSigning(sa, buildReq)
+	stream, statusCode, respHeaders, err := sendChatWithSigning(sa, buildReq)
 	if err != nil {
 		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
 		streamEmitError(streamID, fmt.Sprintf("http_error: %v", err))
@@ -125,21 +130,74 @@ func pumpUpstreamStream(ctx context.Context, sa *storedAuth, endpoint, body stri
 	if statusCode >= 400 {
 		// Drain the error body via the same bridge so the message is complete.
 		errPayload, _ := io.ReadAll(newHostStreamReader(stream))
-		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(errPayload))
+		errBody := string(errPayload)
+		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, errBody)
 		if authID != "" {
-			recordUpstreamFailure(authID, cooldownModel, statusCode, string(errPayload))
+			recordUpstreamFailure(authID, cooldownModel, statusCode, errBody)
 		}
 		if authUID != "" {
-			go reconcileByUID(authUID, statusCode, string(errPayload))
+			go reconcileByUID(authUID, statusCode, errBody)
 		}
-		streamEmitError(streamID, chatUpstreamError(statusCode, string(errPayload)).Error())
+		streamEmitError(streamID, routeChatError(route, sa, statusCode, respHeaders, errBody).Error())
 		return
 	}
 	collector := &sseUsageCollector{}
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	seenPayload := false
+
+	// Anthropic dialect: translate events first, then run the translated
+	// OpenAI chunks through the same clean/emit path.
+	var anthropicState *anthropicSSEState
+	var pendingEvent string
+	if route.anthropic {
+		anthropicState = newAnthropicSSEState(upstreamModel)
+	}
+
 	for scanner.Scan() {
+		if anthropicState != nil {
+			line := strings.TrimSpace(scanner.Text())
+			if strings.HasPrefix(line, "event:") {
+				pendingEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+				continue
+			}
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if payload == "" || payload == "[DONE]" {
+				continue
+			}
+			outs, terr := anthropicState.anthropicTranslateEvent(pendingEvent, []byte(payload))
+			pendingEvent = ""
+			if terr != nil {
+				publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, terr.Error())
+				if authID != "" {
+					recordUpstreamFailure(authID, cooldownModel, 0, terr.Error())
+				}
+				streamEmitError(streamID, terr.Error())
+				return
+			}
+			for _, out := range outs {
+				if out == "" {
+					continue
+				}
+				seenPayload = true
+				collector.feed(out)
+				cleaned := cleanChunkJSON(out)
+				if cleaned == "" {
+					continue
+				}
+				if sseFramed {
+					cleaned = "data: " + cleaned
+				}
+				if err := streamEmit(streamID, []byte(cleaned)); err != nil {
+					publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
+					return
+				}
+			}
+			continue
+		}
 		bodyStr, meaningful, frameErr := zcodeUnwrapFrame(scanner.Text())
 		if frameErr != nil {
 			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, frameErr.Error())
@@ -197,30 +255,76 @@ func pumpUpstreamStream(ctx context.Context, sa *storedAuth, endpoint, body stri
 
 // collectUpstreamStream is the synchronous fallback (no async stream id):
 // drain the upstream SSE, return the cleaned chunks as a slice. The
-// collector, when non-nil, observes the chunks for usage extraction.
-func collectUpstreamStream(body string, sa *storedAuth, sseFramed bool, collector *sseUsageCollector) ([]pluginapi.ExecutorStreamChunk, int, error) {
+// collector, when non-nil, observes the chunks for usage extraction. The
+// anthropic dialect is translated to OpenAI chunks before collection.
+func collectUpstreamStream(body string, sa *storedAuth, route chatRoute, sseFramed bool, collector *sseUsageCollector) ([]pluginapi.ExecutorStreamChunk, int, error) {
 	buildReq := func() (*http.Request, error) {
-		httpReq, err := http.NewRequest(http.MethodPost, chatEndpointFor(sa), strings.NewReader(body))
+		httpReq, err := http.NewRequest(http.MethodPost, route.endpoint, strings.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
-		applyChatHeaders(httpReq, sa, body)
+		route.applyHeaders(httpReq, sa, body)
 		return httpReq, nil
 	}
-	stream, statusCode, _, err := sendChatWithSigning(sa, buildReq)
+	stream, statusCode, respHeaders, err := sendChatWithSigning(sa, buildReq)
 	if err != nil {
 		return nil, 0, fmt.Errorf("http_error: %w", err)
 	}
 	defer stream.Close()
 	if statusCode >= 400 {
 		payload, _ := io.ReadAll(newHostStreamReader(stream))
-		return nil, statusCode, upstreamStatusError(statusCode, chatUpstreamError(statusCode, string(payload)))
+		return nil, statusCode, upstreamStatusError(statusCode, routeChatError(route, sa, statusCode, respHeaders, string(payload)))
+	}
+	var anthropicState *anthropicSSEState
+	var pendingEvent string
+	if route.anthropic {
+		anthropicState = newAnthropicSSEState("")
 	}
 	chunks := make([]pluginapi.ExecutorStreamChunk, 0, 64)
+	seenPayload := false
+	drain := func(outs []string) {
+		for _, out := range outs {
+			if out == "" {
+				continue
+			}
+			seenPayload = true
+			if collector != nil {
+				collector.feed(out)
+			}
+			cleaned := cleanChunkJSON(out)
+			if cleaned == "" {
+				continue
+			}
+			if sseFramed {
+				cleaned = "data: " + cleaned
+			}
+			chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: json.RawMessage(cleaned)})
+		}
+	}
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	seenPayload := false
 	for scanner.Scan() {
+		if anthropicState != nil {
+			line := strings.TrimSpace(scanner.Text())
+			if strings.HasPrefix(line, "event:") {
+				pendingEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+				continue
+			}
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if payload == "" || payload == "[DONE]" {
+				continue
+			}
+			outs, terr := anthropicState.anthropicTranslateEvent(pendingEvent, []byte(payload))
+			pendingEvent = ""
+			if terr != nil {
+				return chunks, 0, terr
+			}
+			drain(outs)
+			continue
+		}
 		bodyStr, meaningful, frameErr := zcodeUnwrapFrame(scanner.Text())
 		if frameErr != nil {
 			return chunks, 0, frameErr
@@ -244,12 +348,37 @@ func collectUpstreamStream(body string, sa *storedAuth, sseFramed bool, collecto
 	if err := scanner.Err(); err != nil {
 		return chunks, 0, upstreamReadError(err)
 	}
+	if anthropicState != nil {
+		if fin := anthropicState.flushFinal(); fin != "" {
+			drain([]string{fin})
+		}
+	}
 	// Empty-stream guard: a 200 envelope stream with zero payload chunks is
 	// an upstream failure, not a silent success.
 	if !seenPayload {
 		return chunks, 0, emptyStreamError()
 	}
 	return chunks, 0, nil
+}
+
+// routeChatError renders one upstream chat failure for the client, in the
+// dialect the route speaks: start-plan failures get the provider business
+// code treatment (3007 captcha / 1261 context / auth semantics) and the JWT
+// 401 gets the re-login hint; coding-plan failures keep the existing generic
+// rendering. The response headers ride along because the captcha challenge's
+// primary variant is a response header.
+func routeChatError(route chatRoute, sa *storedAuth, status int, headers http.Header, body string) error {
+	if route.anthropic {
+		var captchaHeader string
+		if headers != nil {
+			captchaHeader = strings.TrimSpace(headers.Get("x-aliyun-captcha-verify-param"))
+		}
+		if status == http.StatusUnauthorized {
+			return fmt.Errorf("start-plan JWT 被网关拒绝 (401)：请重新登录 — %s", truncateRedacted(body, 200))
+		}
+		return startPlanBizError(status, body, captchaHeader)
+	}
+	return chatUpstreamError(status, body)
 }
 
 // clientNeedsSSEFrame reports whether chunk payloads must carry their own

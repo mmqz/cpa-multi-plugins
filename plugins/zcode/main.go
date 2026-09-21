@@ -570,26 +570,38 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if sa.Auth.Plan == planStart {
-		return nil, fmt.Errorf("start-plan execution requires the Anthropic-format upstream (not yet supported by this build); use a coding-plan account")
-	}
 	upstreamModel := stripProviderPrefix(req.Model)
 	cooldownModel := requestModelForCooldown(req.Model, req.Metadata)
 	started := time.Now()
 	authUID := sa.Account.UID
 
-	body, err := buildChatBody(req.Payload, upstreamModel, false)
+	route := routeFor(sa)
+	var body string
+	if route.anthropic {
+		anthropicBody, terr := translateOpenAIToAnthropicBody(req.Payload, upstreamModel, false, authProviderFor(sa), sa.Auth.DeviceMid, time.Now())
+		if terr != nil {
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "body build: "+terr.Error())
+			return nil, fmt.Errorf("body build: %w", terr)
+		}
+		body = string(anthropicBody)
+	} else {
+		var berr error
+		body, berr = buildChatBody(req.Payload, upstreamModel, false)
+		if berr != nil {
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "body build: "+berr.Error())
+			return nil, fmt.Errorf("body build: %w", berr)
+		}
+	}
 	if err != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "body build: "+err.Error())
 		return nil, fmt.Errorf("body build: %w", err)
 	}
-	endpoint := chatEndpointFor(sa)
 	buildReq := func() (*http.Request, error) {
-		httpReq, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(body))
+		httpReq, err := http.NewRequest(http.MethodPost, route.endpoint, strings.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
-		applyChatHeaders(httpReq, sa, body)
+		route.applyHeaders(httpReq, sa, body)
 		return httpReq, nil
 	}
 
@@ -597,7 +609,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	// outbound call. The send carries the full V4 signing retry ladder.
 	// Non-streaming body: read the whole bridge stream, then decide error vs
 	// completion envelope.
-	stream, statusCode, _, err := sendChatWithSigning(sa, buildReq)
+	stream, statusCode, respHeaders, err := sendChatWithSigning(sa, buildReq)
 	if err != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
 		return nil, fmt.Errorf("http_error: %w", err)
@@ -609,13 +621,24 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
 		recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, string(payload))
 		reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
-		return nil, upstreamStatusError(statusCode, chatUpstreamError(statusCode, string(payload)))
+		return nil, upstreamStatusError(statusCode, routeChatError(route, sa, statusCode, respHeaders, string(payload)))
 	}
 	payload, readErr := io.ReadAll(reader)
 	if readErr != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, readErr.Error())
 		recordUpstreamFailure(req.AuthID, cooldownModel, 0, readErr.Error())
 		return nil, upstreamReadError(readErr)
+	}
+	if route.anthropic {
+		// Anthropic message → OpenAI completion, then the same validation
+		// gate the coding-plan path applies to its upstream body.
+		translated, terr := translateAnthropicResponseToOpenAI(payload, req.Model)
+		if terr != nil {
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, terr.Error())
+			recordUpstreamFailure(req.AuthID, cooldownModel, 0, terr.Error())
+			return nil, terr
+		}
+		payload = translated
 	}
 	completion, err := decodeNonStreamCompletion(payload, req.Model)
 	if err != nil {
@@ -637,19 +660,32 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if sa.Auth.Plan == planStart {
-		return nil, fmt.Errorf("start-plan execution requires the Anthropic-format upstream (not yet supported by this build); use a coding-plan account")
-	}
 	upstreamModel := stripProviderPrefix(req.Model)
 	cooldownModel := requestModelForCooldown(req.Model, req.Metadata)
 	started := time.Now()
 	authUID := sa.Account.UID
 
+	route := routeFor(sa)
 	bodyRaw := req.Payload
 	if len(bodyRaw) == 0 {
 		bodyRaw = req.OriginalRequest
 	}
-	body, err := buildChatBody(bodyRaw, upstreamModel, true)
+	var body string
+	if route.anthropic {
+		anthropicBody, terr := translateOpenAIToAnthropicBody(bodyRaw, upstreamModel, true, authProviderFor(sa), sa.Auth.DeviceMid, time.Now())
+		if terr != nil {
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "body build: "+terr.Error())
+			return nil, fmt.Errorf("body build: %w", terr)
+		}
+		body = string(anthropicBody)
+	} else {
+		var berr error
+		body, berr = buildChatBody(bodyRaw, upstreamModel, true)
+		if berr != nil {
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "body build: "+berr.Error())
+			return nil, fmt.Errorf("body build: %w", berr)
+		}
+	}
 	if err != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "body build: "+err.Error())
 		return nil, fmt.Errorf("body build: %w", err)
@@ -661,7 +697,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	// No async stream id → fall back to synchronous chunk collection.
 	if req.StreamID == "" {
 		collector := &sseUsageCollector{}
-		chunks, statusCode, errCollect := collectUpstreamStream(body, sa, sseFramed, collector)
+		chunks, statusCode, errCollect := collectUpstreamStream(body, sa, route, sseFramed, collector)
 		if errCollect != nil {
 			publishUsage(req.Model, upstreamModel, authUID, started, collector.detail(), true, statusCode, errCollect.Error())
 			recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, errCollect.Error())
@@ -678,7 +714,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	// client disconnects — otherwise the pump keeps reading a dead upstream until
 	// sharedHTTPClient's 120s timeout, holding a pool slot the whole time.
 	ctx, cancel := context.WithCancel(context.Background())
-	go pumpUpstreamStream(ctx, sa, chatEndpointFor(sa), body, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, cooldownModel)
+	go pumpUpstreamStream(ctx, sa, route, body, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, cooldownModel)
 	return okEnvelope(streamResponse{Headers: headers})
 }
 
