@@ -4,7 +4,8 @@
 // trace + V4 signing headers applied.
 //
 // Upstream contract notes (TriDefender/zcode-api):
-//   - Coding-plan OpenAI upstream auth is `Authorization: Bearer {key}`.
+//   - Coding-plan OpenAI upstream auth is `Authorization: Bearer {key}` where
+//     {key} is the RESOLVED plan key ("{id}.{secret}") from auth_keyres.go.
 //   - The LLM User-Agent carries the `ai-sdk/anthropic/3.0.81` SDK suffix.
 //   - Trace headers attribute every model request: x-request-id,
 //     x-zcode-session-type: main, x-zcode-trace-id, x-query-id, x-session-id

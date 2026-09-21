@@ -80,8 +80,6 @@ const (
 	authFileName  = "zcode.json"
 	pluginLogoURL = ""
 
-	// Control plane: server-mediated CLI login + plan JWT + billing.
-	zcodeAPIBase = "https://zcode.z.ai/api/v1"
 	// LLM upstreams (coding-plan, OpenAI-compatible gateway).
 	openAIBaseZai      = "https://api.z.ai/api/coding/paas/v4"
 	openAIBaseBigmodel = "https://open.bigmodel.cn/api/coding/paas/v4"
@@ -90,6 +88,10 @@ const (
 	// the server-issued expires_at (init response), typically 5 minutes.
 	loginTTL = 10 * time.Minute
 )
+
+// Control plane: server-mediated CLI login + plan JWT + billing. Var (not
+// const) so tests can point it at an httptest server.
+var zcodeAPIBase = "https://zcode.z.ai/api/v1"
 
 // loginCtx holds one in-flight CLI login flow (zcode.z.ai /oauth/cli/*).
 // The plugin generates the poll token, POSTs init to obtain flow_id +
@@ -373,17 +375,23 @@ type storedAuth struct {
 	Account zcodeAccount `json:"account"`
 }
 
-// zcodeTokens holds one credential. AccessToken is the provider API key:
-// Z.AI issues a two-part "id.secret" key, BigModel a single key. JWT is the
-// ZCode plan token (start-plan traffic + the billing plane); it has no exp
-// and is never refreshed — a 401/3012 from the gateway means re-login.
+// zcodeTokens holds one credential. AccessToken is the resolved coding-plan
+// API key: Z.AI issues a two-part "id.secret" key, BigModel a single (or
+// two-part) key. JWT is the ZCode plan token (start-plan traffic + the
+// billing plane); it has no exp and is never refreshed — a 401/3012 from the
+// gateway means re-login.
 type zcodeTokens struct {
-	AccessToken string `json:"accessToken"`         // provider API key (permanent)
-	JWT         string `json:"jwt,omitempty"`       // zcode.z.ai plan token (no exp)
-	Provider    string `json:"provider"`            // zai | bigmodel
-	Plan        string `json:"plan,omitempty"`      // coding-plan (default) | start-plan
-	DeviceMid   string `json:"deviceMid,omitempty"` // stable per-account UUID (billing plane)
-	ExpiresAt   int64  `json:"expiresAt,omitempty"` // 0 = unknown (permanent key)
+	// AccessToken is the RESOLVED coding-plan API key ("{id}.{secret}" for
+	// zai, "{id}" or "{id}.{secret}" for bigmodel) — the chat credential and
+	// the V4 signer's {apiKeyId}.{apiKeySecret} input. The raw OAuth token is
+	// kept alongside in OAuthToken.
+	AccessToken string `json:"accessToken"`
+	OAuthToken  string `json:"oauthToken,omitempty"` // login OAuth token (key-resolution input; not a chat credential)
+	JWT         string `json:"jwt,omitempty"`        // zcode.z.ai plan token (no exp)
+	Provider    string `json:"provider"`             // zai | bigmodel
+	Plan        string `json:"plan,omitempty"`       // coding-plan (default) | start-plan
+	DeviceMid   string `json:"deviceMid,omitempty"`  // stable per-account UUID (billing plane)
+	ExpiresAt   int64  `json:"expiresAt,omitempty"`  // 0 = unknown (permanent key)
 }
 
 type zcodeAccount struct {

@@ -15,6 +15,10 @@
 //  4. `GET {zcodeAPIBase}/oauth/cli/poll/{flow_id}` until
 //     `data.status == "ready"` → `{token (plan JWT), user.user_id,
 //     zai|bigmodel:{access_token}}`.
+//  5. Resolve the coding-plan API key from the OAuth access token via the
+//     business chain (auth_keyres.go): the poll's access_token is NOT a chat
+//     credential. Final shape: "{apiKeyId}.{apiKeySecret}" (zai) or single/
+//     two-part key (bigmodel).
 //
 // Poll error semantics mirror the client: 4xx (except 408/429), envelope
 // `code !== 0`, or an unknown status are fatal; 5xx / network errors /
@@ -226,18 +230,21 @@ func accessTokenFromPoll(data *cliPollData, provider string) string {
 	return strings.TrimSpace(data.Zai.AccessToken)
 }
 
-// buildStoredAuthFromPoll maps a ready poll payload onto storedAuth. The
-// nickname is fetched lazily by the panel (no blocking upstream call before
-// the auth file lands).
-func buildStoredAuthFromPoll(data *cliPollData, provider string) *storedAuth {
+// buildStoredAuthFromPoll maps a ready poll payload onto storedAuth with the
+// RESOLVED chat credential (chatKey = coding-plan API key from
+// resolveCodingPlanKey; the poll's OAuth token is preserved in OAuthToken).
+// The nickname is fetched lazily by the panel (no blocking upstream call
+// before the auth file lands).
+func buildStoredAuthFromPoll(data *cliPollData, provider, chatKey string) *storedAuth {
 	uid := strings.TrimSpace(data.User.UserID)
-	accessToken := accessTokenFromPoll(data, provider)
+	oauthToken := accessTokenFromPoll(data, provider)
 	if uid == "" {
-		uid = "u-" + sha256hex8(accessToken)
+		uid = "u-" + sha256hex8(chatKey)
 	}
 	return &storedAuth{
 		Auth: zcodeTokens{
-			AccessToken: accessToken,
+			AccessToken: chatKey,
+			OAuthToken:  oauthToken,
 			JWT:         strings.TrimSpace(data.Token),
 			Provider:    provider,
 			Plan:        planCoding,
@@ -327,7 +334,15 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 	if accessToken == "" {
 		return nil, fmt.Errorf("%s login poll: response missing %s.access_token", lc.provider, lc.provider)
 	}
-	sa := buildStoredAuthFromPoll(data, lc.provider)
+	// Resolve the coding-plan API key BEFORE persisting: the poll's
+	// access_token is an OAuth token, not a chat credential. Both reference
+	// clients run this chain inside the login flow — failure fails the login
+	// with a clear error instead of storing a credential that 401s later.
+	chatKey, err := resolveCodingPlanKey(accessToken, lc.provider)
+	if err != nil {
+		return nil, fmt.Errorf("%s login: resolve coding-plan key: %w", lc.provider, err)
+	}
+	sa := buildStoredAuthFromPoll(data, lc.provider, chatKey)
 	loginStates.Delete(state)
 	return okEnvelope(pluginapi.AuthLoginPollResponse{
 		Status: pluginapi.AuthLoginStatusSuccess,
@@ -336,7 +351,7 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 }
 
 // handleRefreshAuth implements AuthProvider.Refresh. ZCode credentials do not
-// refresh: the provider access token is a permanent API key and the plan JWT
+// refresh: the resolved coding-plan API key is permanent and the plan JWT
 // has no exp (an 8-day-old JWT still serves billing; only a 401/3012 from the
 // gateway means re-login). Return the stored credential unchanged so the host
 // refreshes its metadata without altering tokens.

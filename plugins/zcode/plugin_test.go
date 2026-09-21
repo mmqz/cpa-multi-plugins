@@ -58,16 +58,19 @@ func TestNormalizeProviderAndPlan(t *testing.T) {
 func TestBuildStoredAuthFromPoll(t *testing.T) {
 	var data cliPollData
 	if err := json.Unmarshal([]byte(`{
-		"status":"ready",
-		"token":"plan-jwt",
-		"user":{"user_id":"user-42"},
-		"zai":{"access_token":"keyid.keysecret"}
-	}`), &data); err != nil {
+                "status":"ready",
+                "token":"plan-jwt",
+                "user":{"user_id":"user-42"},
+                "zai":{"access_token":"keyid.keysecret"}
+        }`), &data); err != nil {
 		t.Fatalf("fixture: %v", err)
 	}
-	sa := buildStoredAuthFromPoll(&data, providerZai)
+	sa := buildStoredAuthFromPoll(&data, providerZai, "keyid.keysecret")
 	if sa.Auth.AccessToken != "keyid.keysecret" {
 		t.Fatalf("access token: %q", sa.Auth.AccessToken)
+	}
+	if sa.Auth.OAuthToken != "keyid.keysecret" {
+		t.Fatalf("oauth token must preserve the poll's access_token: %q", sa.Auth.OAuthToken)
 	}
 	if sa.Auth.JWT != "plan-jwt" {
 		t.Fatalf("jwt: %q", sa.Auth.JWT)
@@ -84,11 +87,11 @@ func TestBuildStoredAuthFromPoll(t *testing.T) {
 	// Missing user_id → stable derived uid (not empty).
 	var noUser cliPollData
 	_ = json.Unmarshal([]byte(`{"status":"ready","zai":{"access_token":"a.b"}}`), &noUser)
-	sa2 := buildStoredAuthFromPoll(&noUser, providerZai)
+	sa2 := buildStoredAuthFromPoll(&noUser, providerZai, "a.b")
 	if sa2.Account.UID == "" {
 		t.Fatal("derived uid must not be empty")
 	}
-	if sa2.Account.UID != buildStoredAuthFromPoll(&noUser, providerZai).Account.UID {
+	if sa2.Account.UID != buildStoredAuthFromPoll(&noUser, providerZai, "a.b").Account.UID {
 		t.Fatal("derived uid must be stable for the same token")
 	}
 }
