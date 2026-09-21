@@ -21,7 +21,7 @@
 ## 限制（当前版本）
 
 - **start-plan 执行未实现**：start-plan 网关只有 Anthropic 格式端点（`/api/v1/zcode-plan/anthropic/v1/messages`），需要 OpenAI→Anthropic 翻译层，后续版本补齐。start-plan 账号可正常登录、显示配额，执行请求返回明确错误。
-- **试用套餐自动领取（claim）未实现**：claim 需要 Aliyun 验证码 token，原实现依赖 in-process 浏览器环境；Go 侧无等价物。
+- **试用套餐自动领取（claim）未内建**：claim 需要 Aliyun 无痕验证码 token，原实现依赖 JS 运行时 + 完整 DOM（happy-dom），无法进入 c-shared 插件。面板已展示可领取活动（billing/preview）；自动领取走可选的 Node/Bun 验证码侧车（vendored MIT 求解模块，`POST /claim {jwt, plan_id}`，插件经 localhost 调用），未部署侧车时回落官方客户端手动领取（详见仓库 worklog Task 37 设计定稿）。
 
 ## 构建
 
