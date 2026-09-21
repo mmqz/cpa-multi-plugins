@@ -383,8 +383,8 @@ func TestSOLOStreamError4008IsPlanLimit(t *testing.T) {
 	if k := (&SOLOStreamError{Code: 1005, Msg: "plan"}).Kind(); k != ErrPlanLimit {
 		t.Errorf("1005 kind = %v, want plan_limit", k)
 	}
-	if k := (&SOLOStreamError{Code: 4001, Msg: "param invalid"}).Kind(); k != ErrClient {
-		t.Errorf("4001 kind = %v, want client", k)
+	if k := (&SOLOStreamError{Code: 4001, Msg: "param invalid"}).Kind(); k != ErrModelUnavailable {
+		t.Errorf("4001 kind = %v, want model_unavailable (issue #9)", k)
 	}
 }
 

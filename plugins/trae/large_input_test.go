@@ -36,8 +36,17 @@ func TestSoloStreamEventMsg(t *testing.T) {
 	if !strings.Contains(got, "输入过大") || !strings.Contains(got, "请求级问题") {
 		t.Errorf("guidance missing: %s", got)
 	}
-	plain := soloStreamEventMsg(4001, "param is invalid")
-	if plain != "trae error code=4001 msg=param is invalid" {
+	// v0.12.79 (issue #9): 4001 非过大文案 = 模型不匹配，同样给请求级指引。
+	mismatch := soloStreamEventMsg(4001, "param is invalid")
+	if !strings.Contains(mismatch, "trae error code=4001") {
+		t.Errorf("base lost: %s", mismatch)
+	}
+	if !strings.Contains(mismatch, "模型不在当前聊天通道") || !strings.Contains(mismatch, "与账号无关") {
+		t.Errorf("model-mismatch guidance missing: %s", mismatch)
+	}
+	// 其他业务码保持裸形状。
+	plain := soloStreamEventMsg(4023, "bad request")
+	if plain != "trae error code=4023 msg=bad request" {
 		t.Errorf("plain changed: %s", plain)
 	}
 }
@@ -51,7 +60,17 @@ func TestSoloStreamErrorCopy(t *testing.T) {
 	if !strings.Contains(err.Error(), "输入过大") {
 		t.Errorf("guidance missing: %s", err.Error())
 	}
-	other := &upstream.SOLOStreamError{Code: 4001, Msg: "param is invalid"}
+	// v0.12.79 (issue #9): 4001 模型不匹配 —— 原错误保留 + 请求级指引。
+	mismatch := &upstream.SOLOStreamError{Code: 4001, Msg: "param is invalid"}
+	copied := soloStreamErrorCopy(mismatch)
+	if !errors.Is(copied, mismatch) {
+		t.Errorf("mismatch copy lost %v", mismatch)
+	}
+	if !strings.Contains(copied.Error(), "模型不在当前聊天通道") {
+		t.Errorf("model-mismatch guidance missing: %s", copied.Error())
+	}
+	// 非请求级错误原样透传。
+	other := &upstream.SOLOStreamError{Code: 4023, Msg: "bad request"}
 	if soloStreamErrorCopy(other) != error(other) {
 		t.Errorf("plain error should pass through unchanged")
 	}

@@ -186,7 +186,9 @@ func TestChatStreamSendsHeadersAndRewritesBody(t *testing.T) {
 	if gotAppID != AppID || gotIdeVer != "0.1.61" {
 		t.Errorf("app headers: appid=%q idever=%q", gotAppID, gotIdeVer)
 	}
-	if !bytes.Contains(gotBody, []byte(`"stream":true`)) || !bytes.Contains(gotBody, []byte(`"function":"inline_chat"`)) {
+	// v0.12.79 (issue #9): llm_utils_chat 只接受 solo_work_lite（fixture
+	// variant 为空 → FunctionFor 兜底 cn → solo_work_lite）。
+	if !bytes.Contains(gotBody, []byte(`"stream":true`)) || !bytes.Contains(gotBody, []byte(`"function":"solo_work_lite"`)) {
 		t.Errorf("body not rewritten: %s", gotBody)
 	}
 }

@@ -140,7 +140,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.54"
+var version = "0.12.55"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -532,8 +532,10 @@ func suffixModels(in []pluginapi.ModelInfo, suffix string) []pluginapi.ModelInfo
 
 func handleModelStatic(_ []byte) ([]byte, error) {
 	// Advertise the UNION of all variant namespaces (used when no accounts
-	// are loaded, and for management UI model pickers): cn plain IDs +
-	// solo "-solo" + intl (auto/work virtual + "-intl" suffixed).
+	// are loaded, and for management UI model pickers). v0.12.79 (issue
+	// #9): cn and solo share the same solo_work_lite catalog, so the CN
+	// namespace is the solo list unsuffixed and the solo namespace the
+	// same list with "-solo"; intl keeps auto/work virtual + "-intl".
 	out := make([]pluginapi.ModelInfo, 0, 24)
 	seen := make(map[string]bool, 24)
 	add := func(ms []pluginapi.ModelInfo) {
@@ -545,7 +547,7 @@ func handleModelStatic(_ []byte) ([]byte, error) {
 			out = append(out, m)
 		}
 	}
-	add(staticCNModels())
+	add(staticSoloModels())
 	add(suffixModels(staticSoloModels(), modelSuffixSolo))
 	add(intlstaticModels())
 	return okEnvelope(pluginapi.ModelResponse{
@@ -586,9 +588,11 @@ func handleModelForAuth(request []byte) ([]byte, error) {
 
 // modelsForVariant returns the model catalog for ONE account, namespaced
 // by the credential's variant (v0.12.2). Dynamic fetch already targets the
-// account's own function (inline_chat vs solo_work_lite); every returned
-// ID gets the variant suffix so identical upstream names never collide
-// across cn/solo credential classes.
+// account's own function — v0.12.79 (issue #9): every variant rides
+// solo_work_lite (llm_utils_chat rejects everything else with 4001), so cn
+// and solo catalogs come from the same live lane; every returned ID gets the
+// variant suffix so identical upstream names never collide across cn/solo
+// credential classes.
 func modelsForVariant(a *auth.Auth) []pluginapi.ModelInfo {
 	suffix := ""
 	if a.Variant == variantSolo {
@@ -644,42 +648,34 @@ func staticToModelInfos(known []staticModel) []pluginapi.ModelInfo {
 	return out
 }
 
-// staticForVariant picks the fallback catalog for a credential variant
-// (solo accounts use the solo_work_lite catalog, everything else in this
-// plugin the inline_chat catalog).
+// staticForVariant picks the fallback catalog for a credential variant.
+// v0.12.79 (issue #9): every variant chats on solo_work_lite, so every
+// variant falls back to the same solo_work_lite snapshot — the old
+// staticCNModels (seed_m8/kimi-k2/Doubao-Seed-Code) were the IDE-catalog
+// entries of the dead inline_chat lane and 4001'd on every call.
 func staticForVariant(variant string) []pluginapi.ModelInfo {
-	if variant == variantSolo {
-		return staticSoloModels()
-	}
-	return staticCNModels()
+	return staticSoloModels()
 }
 
-// staticUnionModels is the parse-failure fallback when the variant is unknown:
-// the cn plain list plus the solo list (unsuffixed).
+// staticUnionModels is the parse-fallback when the variant is unknown.
+// v0.12.79 (issue #9): every variant rides the same solo_work_lite catalog,
+// so the "union" degenerates to the solo snapshot itself.
 func staticUnionModels() []pluginapi.ModelInfo {
-	out := make([]pluginapi.ModelInfo, 0, len(staticCNModels())+len(staticSoloModels()))
-	out = append(out, staticCNModels()...)
-	out = append(out, staticSoloModels()...)
-	return out
+	return staticSoloModels()
 }
 
-// staticCNModels / staticSoloModels are the FALLBACK catalogs used only when
-// the dynamic get_detail_param fetch fails (auth expired mid-cycle, network
-// error) or returns nothing user-facing. They are a calibrated snapshot of the
-// user-visible entries of each function's catalog (2026-09-12, live probe of
+// staticSoloModels is the FALLBACK catalog used only when the dynamic
+// get_detail_param fetch fails (auth expired mid-cycle, network
+// error) or returns nothing user-facing. It is a calibrated snapshot of the
+// user-visible entries of the solo_work_lite catalog (2026-09-12, live probe of
 // get_detail_param with a real credential — entries filtered by
 // is_invisible_to_user / empty display_name / config_switch=false; tenant
 // custom models are deliberately NOT snapshotted since they are tenant
-// specific). Everything dynamic comes from FetchModels, so upstream model
-// additions/rollouts appear WITHOUT a plugin update (the host re-runs
-// model.for_auth on every auth register/refresh).
-func staticCNModels() []pluginapi.ModelInfo {
-	return staticToModelInfos([]staticModel{
-		{"seed_m8", "Doubao-1.5-pro", 28000},
-		{"kimi-k2", "Kimi-K2-0905", 28000},
-		{"Doubao-Seed-Code", "Seed-Code", 28000},
-	})
-}
+// specific). glm-5.3 added per issue #9 (2026-09-21 reporter chat-verified);
+// DeepSeek-V4-* removed — solo_agent-only dead lane on llm_utils_chat (same
+// blocklist as the dynamic FetchModels). Everything dynamic comes from
+// FetchModels, so upstream model additions/rollouts appear WITHOUT a plugin
+// update (the host re-runs model.for_auth on every auth register/refresh).
 
 func staticSoloModels() []pluginapi.ModelInfo {
 	return staticToModelInfos([]staticModel{
@@ -687,11 +683,8 @@ func staticSoloModels() []pluginapi.ModelInfo {
 		{"Doubao-Seed-2.1-Pro", "Seed-2.1-Pro", 256000},
 		{"Doubao-Seed-2.1-Turbo", "Seed-2.1-Turbo", 256000},
 		{"glm-5.2", "GLM-5.2", 200000},
+		{"glm-5.3", "GLM-5.3", 200000},
 		{"glm-5", "GLM-5", 200000},
-		{"DeepSeek-V4-Flash-Official", "DeepSeek-V4-Flash 正式版", 200000},
-		{"DeepSeek-V4-Flash", "DeepSeek-V4-Flash", 200000},
-		{"DeepSeek-V4-Pro-Official", "DeepSeek-V4-Pro 正式版", 200000},
-		{"DeepSeek-V4-Pro", "DeepSeek-V4-Pro", 200000},
 		{"kimi-k3", "Kimi-K3", 200000},
 		{"kimi-k2.7-code", "Kimi-K2.7-Code", 200000},
 		{"kimi-k2.6", "Kimi-K2.6", 200000},
@@ -2070,43 +2063,68 @@ func chatHTTPErrorFor(status int, kind upstream.ErrKind, body string) error {
 			" // Input too large for the upstream model window (request-level, not account-level); shrink the context or start a new session."+
 			" | raw: %s", truncate(body, 200))
 	}
+	if kind == upstream.ErrModelUnavailable {
+		return fmt.Errorf("该模型不在当前聊天通道可用（模型配置不匹配，请求级问题，与账号无关）：请改用模型列表中的其他模型。"+
+			" // Model not available on this chat lane (config mismatch, request-level, not account-level); pick another model from the list."+
+			" | raw: %s", truncate(body, 200))
+	}
 	return fmt.Errorf("upstream %d (%s): %s", status, kind, truncate(body, 200))
 }
 
-// soloStreamErrorCopy wraps an aggregated in-stream SOLO error: oversize
-// gets request-level guidance (same copy as the HTTP path), rest unchanged.
+// soloStreamErrorCopy wraps an aggregated in-stream SOLO error: oversize /
+// model-mismatch get request-level guidance (same copy as the HTTP path),
+// rest unchanged.
 func soloStreamErrorCopy(se *upstream.SOLOStreamError) error {
 	if se.Kind() == upstream.ErrInputTooLarge {
 		return fmt.Errorf("%w —— 输入过大被上游拒绝（请求级问题，与账号无关）：请压缩上下文或清理会话后重试", se)
+	}
+	if se.Kind() == upstream.ErrModelUnavailable {
+		return fmt.Errorf("%w —— 该模型不在当前聊天通道可用（模型配置不匹配，请求级问题，与账号无关）：请改用模型列表中的其他模型", se)
 	}
 	return se
 }
 
 // soloStreamEventMsg renders one in-stream error event for the SSE client;
-// oversize wording gets request-level guidance appended (v0.12.50).
+// oversize (v0.12.50) and model-mismatch (v0.12.79, issue #9) get
+// request-level guidance appended.
 func soloStreamEventMsg(code int64, msg string) string {
 	base := fmt.Sprintf("trae error code=%d msg=%s", code, msg)
 	if upstream.MsgIndicatesInputTooLarge(msg) {
 		return base + " —— 输入过大被上游拒绝（请求级问题，与账号无关）：请压缩上下文或清理会话后重试"
 	}
+	// v0.12.79 (issue #9): 4001 = 模型不匹配（输入过大文案已先行接管），
+	// 给客户端明确指引而不是裸的 "param is invalid"。
+	if upstream.IsModelMismatchCode(code) {
+		return base + " —— 该模型不在当前聊天通道可用（模型配置不匹配，与账号无关）：请改用模型列表中的其他模型"
+	}
 	return base
 }
 
 func applyCooldown(uid string, kind upstream.ErrKind) {
+	applyCooldownOn(accountPool, uid, kind)
+}
+
+// applyCooldownOn is the testable core of applyCooldown (pool injectable).
+func applyCooldownOn(p *pool.Pool, uid string, kind upstream.ErrKind) {
 	switch kind {
 	case upstream.ErrPlanLimit:
-		accountPool.Cooldown(uid, pool.CoolPlan, 12*time.Hour, "plan limit (1005)")
+		p.Cooldown(uid, pool.CoolPlan, 12*time.Hour, "plan limit (1005)")
 	case upstream.ErrSoftRate:
-		accountPool.Cooldown(uid, pool.CoolSoft, 60*time.Second, "soft rate limit (429)")
+		p.Cooldown(uid, pool.CoolSoft, 60*time.Second, "soft rate limit (429)")
 	case upstream.ErrSessionDead:
-		accountPool.Disable(uid, "session dead (401)")
+		p.Disable(uid, "session dead (401)")
 	case upstream.ErrNotFound:
-		accountPool.Cooldown(uid, pool.CoolSoft, 60*time.Second, "not found (404)")
+		p.Cooldown(uid, pool.CoolSoft, 60*time.Second, "not found (404)")
 	case upstream.ErrServer, upstream.ErrClient:
-		accountPool.NoteError(uid, 3, 10*time.Minute)
+		p.NoteError(uid, 3, 10*time.Minute)
 	// v0.12.50: 输入过大是请求级问题——同一请求在任何账号上都会被拒，
 	// 记错误只会把健康账号冷却（NoteError 累计 3 次 → 10 分钟）。
 	case upstream.ErrInputTooLarge:
+		// 请求级失败，不惩罚账号
+	// v0.12.79 (issue #9): 4001 模型/通道不匹配同样是请求级失败——换任何
+	// 账号结果相同；反复选到死模型不得把健康账号累计冷却（对齐
+	// trae2api-more/TraeWorkAssistant：模型类 4001 不冷却、不计 failed）。
+	case upstream.ErrModelUnavailable:
 		// 请求级失败，不惩罚账号
 	}
 }

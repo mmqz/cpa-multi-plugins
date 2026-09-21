@@ -64,14 +64,34 @@ func (e *SOLOStreamError) Error() string {
 // 池里反复撞墙。对齐 dsh-router-traework PLAN_LIMIT_CODES（2026-09-15）。
 var soloPlanLimitCodes = map[int64]struct{}{1005: {}, 4008: {}}
 
-// Kind 将 SSE 流内错误分类。1005/4008 → ErrPlanLimit；其余归 ErrClient。
+// soloModelMismatchCodes 流内业务码 → 模型/通道不匹配语义集合。
+// v0.12.79 (issue #9): 4001 除「输入过大」文案外都是"模型在当前 function
+// 通道不可用"（trae2api-more IsModelConfigMismatch 同语义；文案泛化为
+// "We're sorry, the param is invalid"，无法再细分）。请求级失败：换任何账号
+// 结果相同，不冷却、不累计 errCount —— 否则客户端选到死模型（已由
+// FetchModels 名单过滤，兜底仍会漏网）会把健康账号累计冷却。
+var soloModelMismatchCodes = map[int64]struct{}{4001: {}}
+
+// IsModelMismatchCode reports whether an in-stream biz code means the model
+// is not available on the current chat lane (request-level failure).
+func IsModelMismatchCode(code int64) bool {
+	_, ok := soloModelMismatchCodes[code]
+	return ok
+}
+
+// Kind 将 SSE 流内错误分类。1005/4008 → ErrPlanLimit；非过大文案的 4001 →
+// ErrModelUnavailable（请求级，不冷却）；其余归 ErrClient。
 func (e *SOLOStreamError) Kind() ErrKind {
 	if _, ok := soloPlanLimitCodes[e.Code]; ok {
 		return ErrPlanLimit
 	}
 	// v0.12.50: 流内过大文案 → 请求级问题，不冷却账号。
+	// （顺序敏感：4001 + "prompt is too long…" 仍是 ErrInputTooLarge。）
 	if MsgIndicatesInputTooLarge(e.Msg) {
 		return ErrInputTooLarge
+	}
+	if _, ok := soloModelMismatchCodes[e.Code]; ok {
+		return ErrModelUnavailable
 	}
 	return ErrClient
 }

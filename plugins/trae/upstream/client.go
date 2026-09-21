@@ -29,6 +29,10 @@ const (
 	ErrServer                       // 5xx
 	ErrClient                       // 其他 4xx
 	ErrInputTooLarge                // v0.12.50: 413/过大文案 → 请求级问题，不冷却账号
+	// v0.12.79 (issue #9): 4001 = 模型在当前 function 通道不可用
+	//（trae2api-more IsModelConfigMismatch 语义）。请求级失败：换任何
+	// 账号结果相同，不冷却、不累计 errCount，避免死模型拖垮健康账号。
+	ErrModelUnavailable
 )
 
 func (k ErrKind) String() string {
@@ -47,6 +51,8 @@ func (k ErrKind) String() string {
 		return "client"
 	case ErrInputTooLarge:
 		return "input_too_large"
+	case ErrModelUnavailable:
+		return "model_unavailable"
 	default:
 		return "none"
 	}
@@ -167,6 +173,15 @@ func Classify(status int, body string) ErrKind {
 	}
 	if status >= 500 {
 		return ErrServer
+	}
+	// v0.12.79 (issue #9): body 带 code=4001（非过大/401/429/404 语义）=
+	// 模型在当前 function 通道不可用（trae2api-more IsModelConfigMismatch
+	// 同语义）。请求级失败：与账号健康无关，不冷却。放在账号级状态
+	// （401/429/404）之后做兜底——鉴权失败永远优先按会话失效处理；
+	// 过大判定在其上方，{"code":4001,"msg":"prompt is too long…"} 仍归
+	// ErrInputTooLarge。
+	if status >= 400 && status < 500 && strings.Contains(body, `"code":4001`) {
+		return ErrModelUnavailable
 	}
 	if status >= 400 {
 		return ErrClient
@@ -361,6 +376,26 @@ type ModelInfo struct {
 	MaxTokens     int64 // 目录不透出输出上限，恒 0（model_detail_list 为加密参数）
 }
 
+// soloAgentOnlyPrefixes 目录里的死模型名单（issue #9，2026-09-21 双账号实测）：
+// 这些 config 在 solo_work_lite 通道必定流内 4001 —— 它们由 IDE 加密 agent
+// 通道 / llm_raw_chat（solo_agent function）服务，llm_utils_chat 不提供。
+// 前缀匹配、大小写不敏感（目录同时出现 DeepSeek-V4-Flash 与 deepseek-v4-flash
+// 两种写法）。与 TraeWorkAssistant 的 solo_agent-only 名单吻合。过滤优于注册
+// 后报错：客户端永远选不到必然失败的模型。
+var soloAgentOnlyPrefixes = []string{"agnes", "deepseek-v4"}
+
+// configIsSoloAgentOnly reports whether a catalog config_name is served only
+// by the solo_agent/llm_raw_chat lane and therefore dead on llm_utils_chat.
+func configIsSoloAgentOnly(configName string) bool {
+	lower := strings.ToLower(configName)
+	for _, p := range soloAgentOnlyPrefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // FetchModels 拉 SOLO/CN 模型表（get_detail_param），只返回用户可见的正式条目。
 // 目录同时携带三类非可选配置，必须过滤（v0.12.46，2026-09-12 对 38 条实测目录校准）：
 //   - is_invisible_to_user=true：内部 subagent/实验通道（browser_use_subagent、
@@ -420,6 +455,11 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 		}
 		if cfg.DisplayConfig.DisplayName == "" {
 			continue // 租户自定义占位模板
+		}
+		// v0.12.79 (issue #9): solo_agent-only 死模型 —— 在本插件的唯一
+		// 聊天通道上必 4001，注册出来只会让客户端选到死模型。
+		if configIsSoloAgentOnly(cfg.ConfigName) {
+			continue
 		}
 		out = append(out, ModelInfo{
 			ID:            cfg.ConfigName,

@@ -13,18 +13,25 @@
 > ⚠️ v0.9.0 起 `codebuddy-cn` 与 `workbuddy` 合并为单一插件 `workbuddy`（同一后端、同一额度池），
 > 通过 `login_platform` 配置选择 CLI / ide 登录方式，旧 codebuddy-cn 账号文件自动收养。下表保留两者以说明协议差异。下文 Provider 章节同样保留作协议参考。
 | `trae-intl` | Trae Intl | `api.marscode.com` / `core-normal.trae.ai` | `ono9krqynydwx5` | - | ❌ | 4/5 Web SOLO remote |
-| `trae-cn` | Trae Code CN | `api.trae.cn` / `trae-api-cn.mchost.guru` | `ono9krqynydwx5` | `inline_chat` | ✅ | 4/5 llm_utils_chat |
+| `trae-cn` | Trae Code CN | `api.trae.cn` / `trae-api-cn.mchost.guru` | `ono9krqynydwx5` | `solo_work_lite` ᵛ⁰·¹²·⁷⁹ | ✅ | 4/5 llm_utils_chat |
 | `trae-solo-cn` | Trae Work CN / SOLO CN | 同 trae-cn | `en1oxy7wnw8j9n` | `solo_work_lite` | ✅ | 4/5 |
 | `qoder-intl` | Qoder Intl | `qoder.com` / `api3.qoder.sh` | `e883ade2-...` | - | ❌ | 5/5 COSY 签名 |
 | `qoder-cn` | QoderWork CN | `qoder.com.cn` / `gateway.qoder.com.cn` | `1c5e33e1-...` | - | ✅ | 5/5 |
 | `zcode`（zcode 分支） | 智谱 GLM 编码套餐（Z.AI + BigModel） | `zcode.z.ai`（控制面/网关）/ `api.z.ai` + `open.bigmodel.cn`（LLM） | 无（poll_token 中转） | - | —（claim 需验证码侧车） | 5/5 签名 V4 + anthropic 翻译 + off-peak 票务 |
+
+> ᵛ⁰·¹²·⁷⁹ issue #9：`llm_utils_chat` 仅接受 `function=solo_work_lite`（其余值一律流内
+> 4001 "param is invalid"），trae-cn/trae-intl 的聊天与目录请求自 v0.12.79 起也发
+> `solo_work_lite`（intl 实际走 Web SOLO remote 协议，不经过该端点；此处仅为映射
+> 表不再产出死值）。与官方客户端的 `inline_chat` 取值刻意偏离，依据：
+> trae2api-web RESEARCH.md / trae2api-more `IsModelConfigMismatch` / 报告者
+> 同-JWT 仅换 function 的翻转实验（2 个 CN 账号 11 模型实测可用）。
 
 ## 协议复用
 
 | 核心实现 | 覆盖 provider | 配置差异 |
 |---|---|---|
 | `codebuddy-core` | codebuddy-cn, codebuddy-intl, workbuddy | host, platform, user_agent, has_checkin |
-| `trae-core` | trae-cn, trae-solo-cn | client_id, function, has_checkin |
+| `trae-core` | trae-cn, trae-solo-cn | client_id, has_checkin（v0.12.79 起 function 统一为 solo_work_lite，issue #9） |
 | `trae-intl-core` | trae-intl | 独立（Web SOLO remote 协议） |
 | `qoder-core` | qoder-intl, qoder-cn | openapi_base, gateway_base, client_id, redirect_uri, has_checkin, has_pat_import |
 | `zcode-core`（zcode 分支） | zai, bigmodel（单插件按账号路由） | llm_openai_base, provider 字段; plan 字段路由 coding/start；coding 直连 OpenAI 网关，start/off-peak 走 anthropic 翻译层 |
@@ -154,10 +161,10 @@
   - `X-Ide-Version: 0.1.43` (建议用 0.1.52 看 glm-5.3)
   - `X-Ide-Version-Code: 20260716` (对应 0.1.52 用 `20260811`)
   - 其他 17 个 X-* 头
-- Body: `{messages, function:"inline_chat", stream:true, config_name:"{model}", model:"{model}"}`
+- Body: `{messages, function:"solo_work_lite", stream:true, config_name:"{model}", model:"{model}"}`（v0.12.79 起：该端点仅接受 solo_work_lite，issue #9）
 - Body 白名单 (v0.12.37): 只透传 `messages/function/stream/config_name/model` + `tools/tool_choice`（归一化后）+ 采样参数 `temperature/top_p/max_tokens/presence_penalty/frequency_penalty/seed/n/stop`；其余客户端字段（`reasoning_effort`/`thinking`/`stream_options`/`response_format`/`user`/`metadata` 等）一律丢弃——上游没有原生 thinking 参数（社区实测），agent 字段会触发 4023 "model is unknown"（参考 Ttungx/trae-solo-local-api）
 - 模型命名空间: 插件对外的模型 id 带凭据变体后缀（`-solo`/`-intl`，供宿主路由），发送上游前必须剥离——`config_name` 带后缀会被 SSE 流内 `event:error biz_code=4001 "We're sorry, the param is invalid."` 拒绝，且传输层仍算成功（v0.12.37 修复的 SOLO 全模型 4001 根因）
-- SSE 事件: `metadata`, `timing_cost`, `output` (含 response + reasoning_content + tool_calls), `extra_info`, `token_usage`, `done`, `error`（`event:error` 硬模型错误码: 4001=无效 config_name、4023=未知模型字段、1005=套餐限流）
+- SSE 事件: `metadata`, `timing_cost`, `output` (含 response + reasoning_content + tool_calls), `extra_info`, `token_usage`, `done`, `error`（`event:error` 硬模型错误码: 4001=无效 config_name / 模型在当前 function 不可用（v0.12.79 起按请求级失败处理：不冷却账号，agnes-*/deepseek-v4-* 等 solo_agent-only 名单已从目录过滤，issue #9）、4023=未知模型字段、1005=套餐限流）
 
 ### 配额查询 (v2)
 - `POST https://api.trae.cn/trae/api/v2/pay/ide_user_pay_status`
@@ -177,7 +184,7 @@
 
 ### 与 trae-cn 差异
 - **client_id**: `en1oxy7wnw8j9n` (SOLO stable，替换 `ono9krqynydwx5`)
-- **function**: `solo_work_lite` (替换 `inline_chat`)
+- **function**: `solo_work_lite`（历史差异；v0.12.79 起 trae-cn 也发同值，issue #9 —— 差异仅剩 client_id）
 - 其他完全相同（host、headers、SSE、配额、签到）
 - Body 中 messages content 需转为 `[{type:"text",text:"..."}]`
 - `tool_choice` 归一化: `"none"` 删 tools; `"auto"/"required"` 保留; `{type:"function",function:{name}}` 提取 name

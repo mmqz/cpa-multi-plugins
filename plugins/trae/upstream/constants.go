@@ -16,7 +16,11 @@ const (
 	IdeVersionCode = "20260820"
 	DeviceBrand    = "83DG"
 	OSVersion      = "Windows 11 Pro"
-	Function       = "inline_chat" // cn variant default (kept for compat)
+	// v0.12.79 (issue #9): historical cn default, NO longer used by any
+	// request — payload builders and FetchModels all go through
+	// FunctionFor(variant), which now returns solo_work_lite for every
+	// variant (llm_utils_chat rejects everything else with 4001).
+	Function = "inline_chat" // dead value, kept for compat only
 
 	// 端点
 	EpChat     = "/api/agent/v3/llm_utils_chat"

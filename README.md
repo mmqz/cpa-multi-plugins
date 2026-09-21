@@ -215,7 +215,7 @@ cd plugins/trae && CGO_ENABLED=1 go build -buildmode=c-shared -o trae.so .
 #### `plugins/trae-cn` (based on traework2api + cockpit-tools)
 - **协议层**：`Sliverkiss/traework2api/internal/{auth,upstream,pool,scheduler}/` 全部 Go 文件（MIT）
 - **client_id**：`ono9krqynydwx5`（non-solo，对齐 cockpit-tools `trae_account_platform_storage.rs:185`）
-- **function**：`inline_chat`（对齐 cockpit-tools `trae_account_platform_storage.rs`）
+- **function**：`inline_chat`（对齐 cockpit-tools `trae_account_platform_storage.rs`；⚠️ v0.12.79 起 deviate：llm_utils_chat 仅接受 `solo_work_lite`，cn/合并插件全部 variant 改发该值——issue #9）
 - **签到 headers**：`cockpit-tools/src-tauri/src/modules/trae_account_token_injection.rs:2761,2859`（x-app-type: trae, Origin: https://www.trae.cn, Referer: https://www.trae.cn/）
 - **v2 积分 pack 优先级**：`cockpit-tools/src-tauri/src/modules/trae_account_token_injection.rs:1807-1866`（apply_usage_response）
 - **pack product_type 映射**：`cockpit-tools/src/types/trae.ts:174-189`（TRAE_PRODUCT_TYPE）

@@ -10,8 +10,8 @@ import (
 
 func TestPrepareBodyDeveloperRoleNormalized(t *testing.T) {
 	src := `{"model":"glm-5.2","messages":[
-		{"role":"developer","content":"You are a coding agent."},
-		{"role":"user","content":"hi"}]}`
+                {"role":"developer","content":"You are a coding agent."},
+                {"role":"user","content":"hi"}]}`
 	out := PrepareBody([]byte(src), "solo")
 	var obj struct {
 		Messages []struct {
@@ -42,14 +42,14 @@ func TestPrepareBodyOrphanToolResultsDropped(t *testing.T) {
 	// 无名 tool_call 的 a2 被剔 → tool(a2) 成孤儿剔除；
 	// tool_calls 全被剔且无 content 的 assistant 占位整条剔除。
 	src := `{"model":"glm-5.2","messages":[
-		{"role":"user","content":"run tools"},
-		{"role":"assistant","tool_calls":[
-			{"id":"a1","type":"function","function":{"name":"ls","arguments":"{}"}},
-			{"id":"a2","type":"function","function":{"name":"","arguments":"{}"}}]},
-		{"role":"tool","tool_call_id":"a1","content":"files"},
-		{"role":"tool","tool_call_id":"a2","content":"orphan-by-nameless"},
-		{"role":"tool","tool_call_id":"ghost","content":"orphan"},
-		{"role":"user","content":"continue"}]}`
+                {"role":"user","content":"run tools"},
+                {"role":"assistant","tool_calls":[
+                        {"id":"a1","type":"function","function":{"name":"ls","arguments":"{}"}},
+                        {"id":"a2","type":"function","function":{"name":"","arguments":"{}"}}]},
+                {"role":"tool","tool_call_id":"a1","content":"files"},
+                {"role":"tool","tool_call_id":"a2","content":"orphan-by-nameless"},
+                {"role":"tool","tool_call_id":"ghost","content":"orphan"},
+                {"role":"user","content":"continue"}]}`
 	out := PrepareBody([]byte(src), "solo")
 	var obj struct {
 		Messages []map[string]any `json:"messages"`
@@ -76,10 +76,10 @@ func TestPrepareBodyOrphanToolResultsDropped(t *testing.T) {
 func TestPrepareBodyEmptyAssistantPlaceholderDropped(t *testing.T) {
 	// 无 name tool_call 且整条消息无 content → 占位剔除；带 content 保留。
 	src := `{"model":"glm-5.2","messages":[
-		{"role":"user","content":"go"},
-		{"role":"assistant","tool_calls":[{"id":"x","type":"function","function":{"name":"","arguments":"{}"}}]},
-		{"role":"assistant","content":"plain reply"},
-		{"role":"user","content":"end"}]}`
+                {"role":"user","content":"go"},
+                {"role":"assistant","tool_calls":[{"id":"x","type":"function","function":{"name":"","arguments":"{}"}}]},
+                {"role":"assistant","content":"plain reply"},
+                {"role":"user","content":"end"}]}`
 	out := PrepareBody([]byte(src), "solo")
 	var obj struct {
 		Messages []map[string]any `json:"messages"`
@@ -95,7 +95,7 @@ func TestPrepareBodyEmptyAssistantPlaceholderDropped(t *testing.T) {
 	}
 	// 无 tool_calls 的普通请求零改动（数量守恒）。
 	src2 := `{"model":"glm-5.2","messages":[
-		{"role":"system","content":"s"},{"role":"user","content":"u"}]}`
+                {"role":"system","content":"s"},{"role":"user","content":"u"}]}`
 	out2 := PrepareBody([]byte(src2), "solo")
 	var obj2 struct {
 		Messages []map[string]any `json:"messages"`
@@ -166,7 +166,8 @@ func TestSOLOStreamErrorKindInputTooLarge(t *testing.T) {
 	if got := (&SOLOStreamError{Code: 1005, Msg: "plan"}).Kind(); got != ErrPlanLimit {
 		t.Errorf("Kind=%v want ErrPlanLimit", got)
 	}
-	if got := (&SOLOStreamError{Code: 4001, Msg: "param is invalid"}).Kind(); got != ErrClient {
-		t.Errorf("Kind=%v want ErrClient", got)
+	// v0.12.79 (issue #9): 4001 非过大文案 = 模型不匹配（请求级，不冷却）。
+	if got := (&SOLOStreamError{Code: 4001, Msg: "param is invalid"}).Kind(); got != ErrModelUnavailable {
+		t.Errorf("Kind=%v want ErrModelUnavailable", got)
 	}
 }
