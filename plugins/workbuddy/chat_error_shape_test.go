@@ -130,7 +130,7 @@ func TestTranslateChatUpstreamErrorFullShapes(t *testing.T) {
 	h := http.Header{}
 	h.Set("Retry-After", "45")
 	err = translateChatUpstreamErrorFull(http.StatusTooManyRequests,
-		`{"code":6004,"msg":"rate limited"}`, sa, h)
+		`{"code":11120,"msg":"rate limited"}`, sa, h)
 	msg = err.Error()
 	if !strings.Contains(msg, "45") {
 		t.Errorf("Retry-After hint must be appended: %s", msg)
@@ -138,7 +138,7 @@ func TestTranslateChatUpstreamErrorFullShapes(t *testing.T) {
 
 	// No headers → no hint, raw shape.
 	err = translateChatUpstreamErrorFull(http.StatusTooManyRequests,
-		`{"code":6004,"msg":"rate limited"}`, sa, nil)
+		`{"code":11120,"msg":"rate limited"}`, sa, nil)
 	if strings.Contains(err.Error(), "重试（") {
 		t.Errorf("no hint expected without headers: %s", err.Error())
 	}

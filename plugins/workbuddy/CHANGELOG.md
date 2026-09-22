@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.9.32
+
+### 6004 model-scoped rate limit: per-(credential, model) hold with the declared reset (repo v0.12.81)
+
+The CN gateway answers model-level frequency limits with HTTP 429 + code 6004 and
+says so in the message — "您也可以切换其他模型继续使用" (switch to another model to
+continue). Attributing that 429 to the credential let one throttled model drive the
+host's escalating quota backoff across every model on the credential and 503 them
+all ("auth_unavailable ... last upstream error: 6004") — the opposite of what
+upstream advises, and the escalating window ignored the exact reset instant the
+upstream itself declares ("将在 2026-09-22 09:46:39 UTC+8 重置").
+
+**No credential attribution.** `upstreamStatusError` keeps 6004 at status 0 on
+every host version: the credential stays healthy for its other models. The
+credential-wide escalating backoff can no longer be armed by a single model's
+soft rate limit.
+
+**Declared reset honored.** `parseRateLimitResetAt` extracts the "将在 <ts>
+UTC+8 重置" instant; a per-(uid, upstream-model) registry (new
+model_ratelimit.go) fast-fails that pair — no upstream call — until the
+declared instant (1-minute default window when unparsable; never a guessed
+long window). Later 6004s only extend, never shorten, an active hold.
+
+**No more black box.** The bilingual copy states the exact reset time and
+upstream's switch-models advice. The literal "429" is deliberately absent
+from the copy so hosts that classify by message cannot re-read it as
+credential quota.
+
+**Credential ban = zero credits only.** 402/hard-credit keeps its
+credential-level path (credits reconcile lifecycle); soft 429s never trigger
+it (the pre-existing 429 guard in `isHardCreditError` is unchanged).
+
+Wiring: fast-fail in `handleExecExecute`/`handleExecStream`; the window is
+noted at all three upstream >=400 sites (execute, `collectUpstreamStream`,
+`pumpUpstreamStream`). `collectUpstreamStream` gains an upstreamModel param.
+Tests (model_ratelimit_test.go) pin the classifier, the reset parser
+(including the 2026-09-22 09:46:39 UTC+8 production sample), the registry
+lifecycle, the status-0 carve-out and the copy invariants.
+
 ## 0.9.30
 
 ### Deep-audit round: the non-stream path gets the same guards (repo v0.12.76)

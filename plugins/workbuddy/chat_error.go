@@ -137,13 +137,18 @@ func (e *statusError) Unwrap() error   { return e.err }
 //
 // Kept at status 0 (request/IP-level, credential stays healthy): 413/11115
 // prompt overflow, 11128 channel risk control, 11102 model-catalog rejection,
-// bare 403 WAF challenges, and everything else (400/404/5xx keep the host
-// default transient cooldown — unchanged from pre-0.9.17 behavior).
+// the 6004 model-scoped frequency limit (v0.9.32 — upstream itself says
+// "switch to another model to continue", so the credential must stay
+// healthy; the model is instead parked in the plugin's per-(uid, model)
+// rate-limit registry, see model_ratelimit.go), bare 403 WAF challenges,
+// and everything else (400/404/5xx keep the host default transient
+// cooldown — unchanged from pre-0.9.17 behavior).
 func upstreamStatusError(status int, payload string, err error) error {
 	switch {
 	case isPromptTooLong(status, payload),
 		isChannelRiskControl(status, payload),
 		isModelNotRegistered(status, payload),
+		isModelScopedRateLimit(status, payload),
 		isWafBlocked(status, payload):
 		return err
 	case status == http.StatusUnauthorized,
@@ -293,6 +298,15 @@ func translateChatUpstreamErrorFull(statusCode int, payload string, sa *storedAu
 	switch {
 	case isModelNotRegistered(statusCode, payload):
 		return base
+	case isModelScopedRateLimit(statusCode, payload):
+		// v0.9.32 (issue round 2026-09-22): model-scoped 6004 gets its own
+		// copy. The historical raw shape starts with "upstream 429", which
+		// hosts without the envelope status would re-read as credential
+		// quota from the message alone; the dedicated copy also carries the
+		// declared reset instant and upstream's switch-models advice.
+		resetAt, resetKnown := parseRateLimitResetAt(payload)
+		return fmt.Errorf("%s | raw: %s", modelScopedRateLimitCopy(resetAt, resetKnown),
+			truncateRedacted(payload, 200))
 	case isPromptTooLong(statusCode, payload):
 		// v0.9.16: 11115 码提及条件化——413 裸 HTML/空体与其他词族命中时
 		// body 里并没有 11115，硬编码会误导用户去查一个不存在的码。

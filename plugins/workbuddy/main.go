@@ -341,7 +341,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.31"
+var version = "0.9.32"
 
 func wbRegistration() registration {
 	return registration{
@@ -791,6 +791,14 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	if sa.Account.UID != "" {
 		authUID = sa.Account.UID
 	}
+	// v0.9.32: model-scoped 6004 fast-fail — a model under an active
+	// upstream rate-limit window fails here without an upstream call.
+	// Other (credential, model) pairs are untouched; the error stays
+	// plain so no host version reads it as credential-level quota.
+	if err := modelRateLimitError(authUID, upstreamModel); err != nil {
+		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
+		return nil, err
+	}
 	// CodeBuddy rejects non-stream requests (code 11101), so always stream
 	// upstream and fold the chunks into a single chat.completion object.
 	// prepareUpstreamBody does forceStream + normalizeTools + rewriteSystem +
@@ -813,6 +821,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	if statusCode >= 400 {
 		payload, _ := io.ReadAll(reader)
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
+		noteModelRateLimitFromPayload(authUID, upstreamModel, statusCode, string(payload))
 		reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
 		// v0.12.18: 11102 model-catalog rejections become a bilingual,
 		// realm-aware actionable error; 0.9.14 adds 11115/WAF/Retry-After
@@ -856,6 +865,14 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	if sa.Account.UID != "" {
 		authUID = sa.Account.UID
 	}
+	// v0.9.32: model-scoped 6004 fast-fail — a model under an active
+	// upstream rate-limit window fails here without an upstream call.
+	// Other (credential, model) pairs are untouched; the error stays
+	// plain so no host version reads it as credential-level quota.
+	if err := modelRateLimitError(authUID, upstreamModel); err != nil {
+		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
+		return nil, err
+	}
 	body := req.Payload
 	if len(body) == 0 {
 		body = req.OriginalRequest
@@ -869,7 +886,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	// No async stream id → fall back to synchronous chunk collection.
 	if req.StreamID == "" {
 		collector := &sseUsageCollector{}
-		chunks, statusCode, errCollect := collectUpstreamStream(body, sa, sseFramed, collector)
+		chunks, statusCode, errCollect := collectUpstreamStream(body, sa, sseFramed, collector, upstreamModel)
 		if errCollect != nil {
 			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, errCollect.Error())
 			return nil, errCollect

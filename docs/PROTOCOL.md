@@ -108,6 +108,22 @@
 - 能力透出：ContextLength/InputTokenLimit、MaxCompletionTokens/OutputTokenLimit（兼容 `contextWindow/maxTokens` 与 `maxInputTokens/maxOutputTokens` 两代字段名）、Thinking.Levels/ZeroAllowed（`reasoning.supportedEfforts`/`canDisableThinking`）
 - nonChatModel 过滤（镜像 harness `buddy.ts` isChatModel 与 workbuddy2api-panel nonChatModel）：id 前缀 `nes-`/`completion-`/`codewise-`（embedding/completion/code-only）、maxOutput<=256、supportsExtra、tags 含 `text-to-image`（图像生成模型）→ 一律不进可选列表
 
+### 错误分类：6004 模型级限流（v0.12.81，2026-09-22 生产样本实测）
+
+- 网关对**单模型**频率限制返回 HTTP 429 + 业务码 6004，msg 自带声明式重置时间与
+  "您也可以切换其他模型继续使用"——上游自证这是**模型级**限流，同凭证其他模型不受影响
+- 插件行为（`plugins/workbuddy/model_ratelimit.go`）：
+  - 6004 一律**不作为凭证级 429 归因**（`upstreamStatusError` 保持 status 0），
+    任何宿主版本都不会把它计入跨模型升级退避——凭证对其他模型保持健康；
+  - 解析 msg 中 "将在 <时间> UTC+8 重置" 的**声明式重置时刻**，记入
+    (凭证 uid, 上游模型) 注册表；该模型后续请求**快速失败**（不再打上游），
+    直至声明时刻；解析失败退 1 分钟默认窗口，绝不猜测长窗口；后续 6004
+    只延长、不缩短在持窗口；
+  - 错误文案双语透出精确重置时间（"将于 2026-09-22 09:46:39 UTC+8 重置"），
+    文案刻意不含字面 "429"，避免按消息分类的宿主把它误读成凭证配额；
+  - 凭证级封禁仅保留 402/积分耗尽（hardCredit 生命周期 + 周期性积分 reconcile），
+    与"只有积分归零才 ban、积分恢复自动解封"的语义对齐。
+
 ---
 
 ## Provider: trae-intl
