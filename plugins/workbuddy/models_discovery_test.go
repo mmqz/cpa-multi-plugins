@@ -145,14 +145,14 @@ func TestFetchDynamicModelsRecordsSourceState(t *testing.T) {
 		return nil, errors.New("models API status 403")
 	}
 	got := fetchDynamicModelsFromStorage(storage)
-	if len(got) != len(wbModels()) {
-		t.Fatalf("fallback must serve the CN static catalog: got %d want %d", len(got), len(wbModels()))
+	if len(got) != 0 {
+		t.Fatalf("no-cache failure must advertise nothing (v0.9.33): %v", discoveryIDs(got))
 	}
 	st := realmModelStateFor("cn")
 	if st == nil {
 		t.Fatal("discovery failure must record realm state")
 	}
-	if st.Source != "static (discovery failed)" || st.Count != len(wbModels()) {
+	if st.Source != "none (discovery failed)" || st.Count != 0 {
 		t.Errorf("state source/count = %q/%d", st.Source, st.Count)
 	}
 	if !strings.Contains(st.LastError, "403") {

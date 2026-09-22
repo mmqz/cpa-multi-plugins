@@ -68,7 +68,7 @@
 - `reasoning_effort` 镜像（非 none → `reasoning_summary: "auto"`）
 - 大工具描述压缩（tools JSON ≥ 64KB → 删 `tool.function.description`）
 - 强制 `stream=true`（腾讯后端拒非流，code 11101）
-- `forceMaxThinking` for hy3-family models
+- `forceMaxThinking` for hy3/hy4-family models（hy3 家族已上游退役，逻辑保留仅为兼容历史 pin）
 
 ### ✅ Executor（execute + execute_stream）
 - 非流式：上游 SSE 聚合 → 单个 `chat.completion` 对象
@@ -91,7 +91,7 @@ openai-compatibility:
     api-key-entries:
       - api-key: "<你的 CodeBuddy/WorkBuddy access_token>"
     models:
-      - name: "hy3"
+      - name: "hy4-preview"
       - name: "glm-5.2"
 ```
 

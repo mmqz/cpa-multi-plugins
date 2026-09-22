@@ -75,15 +75,25 @@ func modelHintForRealm(realm string) string {
 	}
 	label := "该区域缓存目录 / cached realm catalog"
 	if len(ids) == 0 {
-		for _, m := range staticModelsForRealm(realm) {
-			ids = append(ids, m.ID)
+		// v0.9.33: the static catalogs are gone — fall back to the stale
+		// cache (the last successful discovery answer) before giving up.
+		if stale, ok := cachedDynamicModelsStale(realm); ok {
+			for _, m := range stale {
+				if id := strings.TrimSpace(m.ID); id != "" {
+					ids = append(ids, id)
+				}
+			}
+			label = "该区域最近一次成功发现的目录 / last known realm catalog"
 		}
-		realmTag := strings.ToUpper(strings.TrimSpace(realm))
+	}
+	if len(ids) == 0 {
+		realmTag := strings.ToLower(strings.TrimSpace(realm))
 		if realmTag == "" {
-			realmTag = "CN"
+			realmTag = "cn"
 		}
-		label = fmt.Sprintf("静态 %s 目录（该区域已知支持；动态发现优先，也可用 models_%s 配置写死） / static %s catalog (known-good for this realm; dynamic discovery wins, or pin via models_%s)",
-			realmTag, strings.ToLower(realmTag), realmTag, strings.ToLower(realmTag))
+		return fmt.Sprintf(
+			"无该区域模型目录缓存（动态发现尚未成功过）；请稍后重试，或用 models_%s 配置显式指定模型 / no cached catalog for this realm (discovery has not succeeded yet); retry later, or pin models via models_%s",
+			realmTag, realmTag)
 	}
 	if len(ids) > 20 {
 		ids = ids[:20]

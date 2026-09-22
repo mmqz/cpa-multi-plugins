@@ -232,7 +232,7 @@ func TestDiscoveryTransientFailureKeepsLastGood(t *testing.T) {
 	}
 }
 
-func TestDiscoveryFailureWithoutCacheServesStatic(t *testing.T) {
+func TestDiscoveryFailureWithoutCacheAdvertisesNothing(t *testing.T) {
 	resetDynamicModelsCache()
 	defer resetDynamicModelsCache()
 	orig := discoverModelsFn
@@ -243,11 +243,11 @@ func TestDiscoveryFailureWithoutCacheServesStatic(t *testing.T) {
 		return nil, errors.New("never worked")
 	}
 	got := fetchDynamicModelsFromStorage(storage)
-	if len(got) != len(wbModels()) {
-		t.Fatalf("no-cache failure must fall back to static: %d vs %d", len(got), len(wbModels()))
+	if len(got) != 0 {
+		t.Fatalf("no-cache failure must advertise nothing (v0.9.33): %v", discoveryIDs(got))
 	}
 	st := realmModelStateFor("cn")
-	if st == nil || st.Source != "static (discovery failed)" {
+	if st == nil || st.Source != "none (discovery failed)" {
 		t.Fatalf("state source = %+v", st)
 	}
 }

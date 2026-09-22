@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.9.33
+
+### Static model catalogs removed — advertisement is discovery-only (repo v0.12.82)
+
+Upstream retired the hy3 family (hy3 / hy3-preview / hy3-preview-agent) without
+notice while the hand-maintained static catalogs still advertised it. The stale
+ids turned into host-level `unknown provider for model hy3-preview-agent` 400s
+that no plugin log could explain — the list a client sees and the models the
+upstream actually serves had silently diverged, and nothing in the error path
+pointed at the cause.
+
+**Better empty than wrong.** The static catalogs (CN's twelve-entry table and
+the Intl/Global hy4-preview fallback) are deleted, not refreshed:
+
+- `model.static` advertises nothing, deliberately — ids are upstream's to
+  define and retire, and a static table rots faster than any changelog can
+  track;
+- `model.for_auth` = config pin (`models_cn` / `models_intl` / `models_global`,
+  still authoritative and still skipped discovery) > discovery (fresh answer >
+  today's cache > stale cache) > nothing;
+- a tokenless credential advertises nothing (no more faked list);
+- discovery failure with no cache advertises nothing and logs why — the realm
+  diagnostics now say `none (discovery failed)` / `none (no token in storage)`;
+- the 11102 error hint lists the cached (or stale) discovery catalog and, when
+  no catalog exists, points at `models_<realm>` pins instead of inventing ids.
+
+Chat requests still pass the client's model id through verbatim. Pinned IDs
+now get generic metadata (Name = ID) since the metadata table is gone —
+display names for everything else come from upstream discovery itself.
+
 ## 0.9.32
 
 ### 6004 model-scoped rate limit: per-(credential, model) hold with the declared reset (repo v0.12.81)

@@ -1,7 +1,9 @@
-// models.go implements the ModelProvider capability: static and per-auth
-// model lists, dynamic model discovery via the upstream models API, alias
-// reverse resolution (client-facing alias → upstream model id), and the
-// host-config oauth-excluded-models filter.
+// models.go implements the ModelProvider capability: per-auth model lists
+// via upstream discovery, alias reverse resolution (client-facing alias →
+// upstream model id), and the host-config oauth-excluded-models filter.
+// v0.9.33: the hand-maintained static catalogs were removed — discovery
+// (fresh > cached > stale) is the only advertisement source; see the
+// historical note in this file.
 package main
 
 import (
@@ -18,75 +20,17 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-// wbModels is the CN realm static catalog (copilot.tencent.com), mirroring
-// Tencent's official CN built-in model table. v0.12.19: this list is NO
-// LONGER the fallback for Intl/Global credentials — see staticModelsForRealm.
-// Sharing it across realms is exactly what made Intl credentials advertise
-// deepseek-v4-flash and die with upstream 11102 "service info not found".
-func wbModels() []pluginapi.ModelInfo {
-	return []pluginapi.ModelInfo{
-		{ID: "glm-5.2", Name: "GLM-5.2", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "glm-5.1", Name: "GLM-5.1", ContextLength: 131072, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "glm-5v-turbo", Name: "GLM-5V Turbo", ContextLength: 131072, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "kimi-k2.7", Name: "Kimi K2.7", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "minimax-m3", Name: "MiniMax M3", ContextLength: 204800, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "hy3", Name: "Hy3", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "hy3-preview", Name: "Hy3 Preview", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "hy3-preview-agent", Name: "Hy3 Preview Agent", ContextLength: 262144, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		// Hy4 Preview: Tencent Hunyuan 4 preview (770B/A49B, 1M context),
-		// free for 14 days in WorkBuddy/CodeBuddy since 2026-08-28 launch.
-		{ID: "hy4-preview", Name: "Hy4 Preview", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-		// DeepSeek V4.1 Flash: released 2026-09-10, official launch partner
-		// WorkBuddy/CodeBuddy (deepseek.com news260910; free for 2 weeks).
-		// 552B-backbone MoE, 1M context. Upstream ID follows the lowercase
-		// convention of deepseek-v4-flash/-pro. Dynamic discovery is the
-		// primary source; this static entry covers the discovery-failure
-		// fallback so the rollout window stays visible.
-		{ID: "deepseek-v4.1-flash", Name: "DeepSeek V4.1 Flash", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-	}
-}
-
-// Realm static catalogs (v0.12.19). Policy: a static fallback entry must be
-// SUPPORTED by that realm's upstream. A false negative (model exists but is
-// not listed) heals via dynamic discovery or the models_cn/models_global/
-// models_intl config pins; a false positive (model listed but not registered
-// upstream) is a hard upstream 400 code 11102 "model [...] service info not
-// found". So the non-CN catalogs only carry models with direct upstream
-// evidence, and CN brand models (deepseek-v4-*, glm-*, kimi-*, minimax-*,
-// hy3*) stay out of them even though they dominate the CN catalog.
-//
-// Evidence for intl/global hy4-preview: Tencent's 2026-08-28 Hy4 Preview
-// launch covers WorkBuddy/CodeBuddy CN AND international editions (official
-// announcement; upstream API id "hy4-preview"). Community sessions on the
-// intl CLI additionally show claude/gpt/gemini families, but their exact
-// upstream IDs could not be verified without a live intl token — add them
-// via the models_intl / models_global config pins instead of guessing here.
-func staticModelsGlobal() []pluginapi.ModelInfo {
-	return []pluginapi.ModelInfo{
-		{ID: "hy4-preview", Name: "Hy4 Preview", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
-	}
-}
-
-// staticModelsIntl is the codebuddy.ai (Intl) fallback catalog. See
-// staticModelsGlobal for the inclusion policy.
-func staticModelsIntl() []pluginapi.ModelInfo {
-	return staticModelsGlobal()
-}
-
-// staticModelsForRealm dispatches a realm key to its static catalog. The
-// legacy default stays the CN list for unknown realms.
-func staticModelsForRealm(realm string) []pluginapi.ModelInfo {
-	switch realm {
-	case "intl":
-		return staticModelsIntl()
-	case "global":
-		return staticModelsGlobal()
-	default:
-		return wbModels()
-	}
-}
+// Historical note (v0.9.33, 2026-09-22): this file previously carried
+// hand-maintained per-realm static catalogs — CN: glm-5.2/glm-5.1/glm-5v-turbo,
+// kimi-k2.7, minimax-m3, hy3/hy3-preview/hy3-preview-agent, hy4-preview,
+// deepseek-v4-pro/deepseek-v4-flash/deepseek-v4.1-flash; Intl/Global:
+// hy4-preview. Upstream retires and renames model ids without notice: the
+// hy3 family was retired upstream on 2026-09-22 while the static catalog
+// still advertised it, producing host-level "unknown provider" 400s that no
+// plugin log could explain. Static catalogs are gone on purpose —
+// advertisement mirrors discovery only, chat passes the client's model id
+// through verbatim, and models_cn / models_intl / models_global config pins
+// remain the explicit user override.
 
 // pinnedModelsForRealm returns the ModelInfo list pinned via config_yaml
 // models_cn / models_global / models_intl for this realm, or nil. Pinned
@@ -102,23 +46,13 @@ func pinnedModelsForRealm(realm string) []pluginapi.ModelInfo {
 	return buildModelInfos(ids)
 }
 
-// buildModelInfos maps raw upstream model IDs to ModelInfo, reusing the
-// static catalogs' metadata for known IDs and generic defaults otherwise —
-// an unknown ID still gets advertised because the user pinned it deliberately.
+// buildModelInfos maps pinned upstream model IDs to ModelInfo with generic
+// metadata — an unknown ID still gets advertised because the user pinned it
+// deliberately. Display names come from upstream discovery, not a local
+// table (v0.9.33 removed the static catalogs).
 func buildModelInfos(ids []string) []pluginapi.ModelInfo {
-	meta := map[string]pluginapi.ModelInfo{}
-	for _, m := range wbModels() {
-		meta[strings.ToLower(m.ID)] = m
-	}
-	for _, m := range staticModelsGlobal() {
-		meta[strings.ToLower(m.ID)] = m
-	}
 	out := make([]pluginapi.ModelInfo, 0, len(ids))
 	for _, id := range ids {
-		if m, ok := meta[strings.ToLower(id)]; ok {
-			out = append(out, m)
-			continue
-		}
 		out = append(out, pluginapi.ModelInfo{ID: id, Name: id, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}})
 	}
 	return out
@@ -178,16 +112,19 @@ func extractAccountUID(raw []byte) string {
 // list, in priority order:
 //  1. the realm's pinned config (models_cn / models_global / models_intl) —
 //     the user-written "supported models" list, which also skips discovery;
-//  2. per-realm dynamic discovery, cached (v0.12.18);
-//  3. the realm's static catalog (v0.12.19: per-realm, no longer the shared
-//     CN-flavored list that made Intl credentials advertise
-//     deepseek-v4-flash and fail with upstream 11102).
+//  2. per-realm dynamic discovery: fresh answer > today's cache > stale
+//     cache (v0.12.18; stale-on-failure since v0.12.71);
+//  3. nothing — deliberate since v0.9.33. A hand-maintained static catalog
+//     rots silently: upstream retired the hy3 family (2026-09-22) while the
+//     old table still advertised it, and the stale ids turned into
+//     host-level "unknown provider" 400s no plugin log could explain.
+//     Advertising only what upstream currently serves keeps the visible
+//     list the truth; an empty list is honest, a wrong list is a trap.
 //
 // v0.9.9: every branch records its decision into the realm's diagnostics
 // entry (source + count + failure reason) so the panel and logs answer
 // "why does this realm show these models" without guesswork. Discovery
-// failures — the previously SILENT path that made realms look stuck on a
-// 1-model static catalog — now log a throttled reason line.
+// failures log a throttled reason line (the pre-v0.9.9 path was silent).
 func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 	list := fetchDynamicModelsFromStorageInner(storageJSON)
 	// v0.9.25: overlay runtime-learned alias→real display names on every
@@ -210,9 +147,10 @@ func fetchDynamicModelsFromStorageInner(storageJSON []byte) []pluginapi.ModelInf
 		return pinned
 	}
 	if accessToken == "" {
-		st := staticModelsForRealm(realm)
-		noteRealmSource(realm, "static (no token in storage)", len(st))
-		return st
+		// v0.9.33: no token → no discovery possible, and the static catalog
+		// that used to fake a list here is gone. Advertise nothing.
+		noteRealmSource(realm, "none (no token in storage)", 0)
+		return nil
 	}
 	if models, ok := cachedDynamicModels(realm); ok {
 		return models
@@ -223,14 +161,14 @@ func fetchDynamicModelsFromStorageInner(storageJSON []byte) []pluginapi.ModelInf
 		if stale, ok := cachedDynamicModelsStale(realm); ok {
 			return stale
 		}
-		return staticModelsForRealm(realm)
+		return nil
 	}
 	if len(dyn) == 0 {
 		noteRealmError(realm, "discovery payload had no user-facing models")
 		if stale, ok := cachedDynamicModelsStale(realm); ok {
 			return stale
 		}
-		return staticModelsForRealm(realm)
+		return nil
 	}
 	storeDynamicModels(realm, dyn)
 	log.Printf("models: realm=%s discovery ok: %d model(s)", realm, len(dyn))
@@ -278,7 +216,6 @@ func noteRealmError(realm, msg string) {
 	now := time.Now()
 	dynamicModelsCache.Lock()
 	entry := dynamicModelsCache.realms[realm]
-	fallback := staticModelsForRealm(realm)
 	entry.lastErr = msg
 	entry.lastErrAt = now
 	if len(entry.models) > 0 {
@@ -286,8 +223,8 @@ func noteRealmError(realm, msg string) {
 		entry.source = "last discovery (transient failure)"
 		entry.srcCount = len(entry.models)
 	} else {
-		entry.source = "static (discovery failed)"
-		entry.srcCount = len(fallback)
+		entry.source = "none (discovery failed)"
+		entry.srcCount = 0
 	}
 	shouldLog := entry.lastLogAt.IsZero() || now.Sub(entry.lastLogAt) >= time.Minute
 	if shouldLog {
@@ -299,7 +236,7 @@ func noteRealmError(realm, msg string) {
 		if len(entry.models) > 0 {
 			log.Printf("models: realm=%s discovery failed (%s) — serving last successful discovery (%d model(s)) until next success", realm, msg, len(entry.models))
 		} else {
-			log.Printf("models: realm=%s discovery failed (%s) — serving static catalog (%d model(s)) until next successful discovery", realm, msg, len(fallback))
+			log.Printf("models: realm=%s discovery failed (%s) — nothing cached and static catalogs removed (v0.9.33): advertising nothing until next successful discovery", realm, msg)
 		}
 	}
 }
@@ -1274,9 +1211,14 @@ func handleModelStatic(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	cacheModelAliases(req.Host)
-	models := wbModels()
-	models = filterExcludedModels(models, req.Host)
-	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: models})
+	// v0.9.33: static advertisement is deliberately EMPTY. Workbuddy model
+	// ids are upstream's to define and retire — the hy3 family vanished
+	// upstream on 2026-09-22 while static tables still advertised it, which
+	// surfaced as host-level "unknown provider" 400s no plugin log could
+	// explain. All advertisement flows through model.for_auth discovery;
+	// models_cn / models_intl / models_global pins remain the explicit
+	// user override.
+	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: []pluginapi.ModelInfo{}})
 }
 
 func handleModelForAuth(raw []byte) ([]byte, error) {

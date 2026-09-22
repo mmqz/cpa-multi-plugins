@@ -109,7 +109,7 @@ func TestRealmFromRegionDomain(t *testing.T) {
 func TestDynamicModelsCachePerRealm(t *testing.T) {
 	resetDynamicModelsCache()
 	defer resetDynamicModelsCache()
-	cn := wbModels()[:1]
+	cn := realmTestModels("cn-catalog-model")
 	intl := realmTestModels("intl-only-model")
 	storeDynamicModels("cn", cn)
 	storeDynamicModels("intl", intl)
@@ -130,51 +130,40 @@ func TestDynamicModelsCachePerRealm(t *testing.T) {
 	}
 }
 
-// TestStaticModelsPerRealm pins the v0.12.19 realm catalogs: only models
-// with direct upstream evidence may appear in a realm's static fallback, and
-// CN brand models must stay out of the Intl/Global lists — a false positive
-// is a hard upstream 11102, a false negative heals via discovery or pins.
-func TestStaticModelsPerRealm(t *testing.T) {
-	cnOnly := []string{
-		"deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4.1-flash",
-		"glm-5.2", "glm-5.1", "glm-5v-turbo",
-		"kimi-k2.7", "minimax-m3",
-		"hy3", "hy3-preview", "hy3-preview-agent",
+// TestStaticAdvertisementEmpty pins the v0.9.33 discovery-only policy: the
+// host's model.static call advertises NOTHING and a credential without a
+// token advertises nothing either. Upstream retired the hy3 family on
+// 2026-09-22 while the old hand-maintained static catalog still listed it —
+// the stale ids surfaced as host-level "unknown provider" 400s that no
+// plugin log could explain. Better empty than wrong: advertisement must
+// only ever mirror what upstream discovery currently serves.
+func TestStaticAdvertisementEmpty(t *testing.T) {
+	resetDynamicModelsCache()
+	defer resetDynamicModelsCache()
+	raw, err := handleModelStatic([]byte(`{}`))
+	if err != nil {
+		t.Fatalf("handleModelStatic: %v", err)
 	}
-	for _, realm := range []string{"intl", "global"} {
-		catalog := staticModelsForRealm(realm)
-		if len(catalog) == 0 {
-			t.Fatalf("%s static catalog must not be empty", realm)
-		}
-		for _, m := range catalog {
-			for _, banned := range cnOnly {
-				if strings.EqualFold(m.ID, banned) {
-					t.Errorf("%s static catalog must not advertise CN-only model %s", realm, banned)
-				}
-			}
-		}
-		if !realmCatalogHas(catalog, "hy4-preview") {
-			t.Errorf("%s static catalog must include hy4-preview (official intl+global launch)", realm)
-		}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("envelope: %v", err)
 	}
-	if !realmCatalogHas(staticModelsForRealm("cn"), "deepseek-v4-flash") {
-		t.Errorf("cn static catalog must keep the CN DeepSeek models")
+	var resp pluginapi.ModelResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatalf("result: %v", err)
 	}
-	// v0.9.8: DeepSeek V4.1 Flash launched 2026-09-10 with WorkBuddy/CodeBuddy
-	// as official launch partners (deepseek.com news260910) — the CN static
-	// fallback must carry it during the rollout window.
-	if !realmCatalogHas(staticModelsForRealm("cn"), "deepseek-v4.1-flash") {
-		t.Errorf("cn static catalog must include deepseek-v4.1-flash (official 2026-09-10 launch)")
+	if len(resp.Models) != 0 {
+		t.Fatalf("static advertisement must be empty, got %d model(s)", len(resp.Models))
 	}
-}
 
-func realmCatalogHas(models []pluginapi.ModelInfo, id string) bool {
-	for _, m := range models {
-		if strings.EqualFold(m.ID, id) {
-			return true
-		}
+	// Tokenless credential → discovery impossible → nothing advertised.
+	storage := []byte(`{"auth":{"region":"cn"}}`)
+	if got := fetchDynamicModelsFromStorage(storage); len(got) != 0 {
+		t.Fatalf("tokenless credential must advertise nothing, got %#v", got)
 	}
-	return false
+	if st := realmModelStateFor("cn"); st == nil || st.Source != "none (no token in storage)" {
+		t.Fatalf("state source = %+v", st)
+	}
 }
 
 // TestParsePinnedModelList covers quoting, YAML flow lists, dedup and empties.
@@ -228,8 +217,9 @@ func configYAMLEnvelope(yaml string) []byte {
 	return raw
 }
 
-// TestConfigurePinsModelsRealm pins the config_yaml → realm accessor path,
-// including metadata reuse for known IDs and generic metadata for unknowns.
+// TestConfigurePinsModelsRealm pins the config_yaml → realm accessor path.
+// v0.9.33: pinned IDs all get generic metadata (the static metadata table
+// is gone) — order, dedup and realm reset semantics are unchanged.
 func TestConfigurePinsModelsRealm(t *testing.T) {
 	resetPinnedModels()
 	defer resetPinnedModels()
@@ -238,8 +228,8 @@ func TestConfigurePinsModelsRealm(t *testing.T) {
 	if len(got) != 2 || got[0].ID != "hy4-preview" || got[1].ID != "claude-sonnet-5" {
 		t.Fatalf("pinned intl: got %#v", got)
 	}
-	if got[0].ContextLength != 1000000 {
-		t.Fatalf("known ID must reuse static metadata, got %#v", got[0])
+	if got[0].Name != "hy4-preview" || got[0].ContextLength != 0 {
+		t.Fatalf("pinned ID gets generic metadata (v0.9.33), got %#v", got[0])
 	}
 	if got[1].OwnedBy != providerName || got[1].ContextLength != 0 {
 		t.Fatalf("unknown ID gets generic metadata, got %#v", got[1])
@@ -279,10 +269,12 @@ func TestFetchDynamicModelsPinnedWins(t *testing.T) {
 	}
 }
 
-// TestFetchDynamicModelsFallbackPerRealm: discovery failure falls back to
-// the REALM's static catalog — the v0.12.18 bug (shared CN fallback
-// advertised deepseek-v4-flash to Intl accounts → upstream 11102) stays dead.
-func TestFetchDynamicModelsFallbackPerRealm(t *testing.T) {
+// TestFetchDynamicModelsFailurePerRealm: with the static catalogs gone
+// (v0.9.33), a discovery failure with no cache advertises NOTHING for every
+// realm — the v0.12.18 bug (shared CN fallback advertised deepseek-v4-flash
+// to Intl accounts → upstream 11102) stays dead by construction, and the
+// 2026-09-22 hy3 rot (stale static ids) cannot come back either.
+func TestFetchDynamicModelsFailurePerRealm(t *testing.T) {
 	resetPinnedModels()
 	resetDynamicModelsCache()
 	defer func() { resetPinnedModels(); resetDynamicModelsCache() }()
@@ -293,49 +285,40 @@ func TestFetchDynamicModelsFallbackPerRealm(t *testing.T) {
 	defer func() { discoverModelsFn = orig }()
 
 	intlRaw := []byte(`{"auth":{"domain":"codebuddy.ai","accessToken":"tok"}}`)
-	gotIntl := fetchDynamicModelsFromStorage(intlRaw)
-	if !realmCatalogHas(gotIntl, "hy4-preview") {
-		t.Fatalf("intl fallback must be the intl catalog, got %#v", gotIntl)
+	if got := fetchDynamicModelsFromStorage(intlRaw); len(got) != 0 {
+		t.Fatalf("intl failure must advertise nothing, got %#v", got)
 	}
-	if realmCatalogHas(gotIntl, "deepseek-v4-flash") {
-		t.Fatalf("intl fallback must never advertise deepseek-v4-flash (11102 regression)")
+	if st := realmModelStateFor("intl"); st == nil || st.Source != "none (discovery failed)" {
+		t.Fatalf("intl state = %+v", st)
 	}
 
 	cnRaw := []byte(`{"auth":{"region":"cn","accessToken":"tok"}}`)
-	gotCN := fetchDynamicModelsFromStorage(cnRaw)
-	if !realmCatalogHas(gotCN, "deepseek-v4-flash") {
-		t.Fatalf("cn fallback must keep the CN catalog, got %#v", gotCN)
+	if got := fetchDynamicModelsFromStorage(cnRaw); len(got) != 0 {
+		t.Fatalf("cn failure must advertise nothing, got %#v", got)
+	}
+	if st := realmModelStateFor("cn"); st == nil || st.Source != "none (discovery failed)" {
+		t.Fatalf("cn state = %+v", st)
 	}
 }
 
-// TestModelHintForRealm checks the 11102 error hint: cached discovery wins,
-// the static fallback is the REALM's own catalog (Intl accounts must never
-// be shown the CN list), and the list is bounded.
+// TestModelHintForRealm checks the 11102 error hint under the v0.9.33
+// discovery-only policy: the fresh cache wins, the stale cache (last known
+// discovery answer) is next, and with no cache at all the hint says so and
+// points at the models_<realm> pin instead of inventing model ids.
 func TestModelHintForRealm(t *testing.T) {
 	resetDynamicModelsCache()
 	defer resetDynamicModelsCache()
 	hint := modelHintForRealm("intl")
-	if strings.Contains(hint, "deepseek-v4-flash") {
-		t.Fatalf("intl static hint must not list CN-only models, got: %s", hint)
+	if strings.Contains(hint, "deepseek") || strings.Contains(hint, "hy4") {
+		t.Fatalf("empty-realm hint must not invent model ids, got: %s", hint)
 	}
-	if !strings.Contains(hint, "hy4-preview") {
-		t.Fatalf("intl static hint must list the intl catalog, got: %s", hint)
+	if !strings.Contains(hint, "no cached catalog") || !strings.Contains(hint, "models_intl") {
+		t.Fatalf("empty-realm hint must be bilingual and point at the pin, got: %s", hint)
 	}
-	if !strings.Contains(hint, "static INTL catalog") || !strings.Contains(hint, "静态 INTL 目录") {
-		t.Fatalf("intl static hint must be labeled bilingual, got: %s", hint)
-	}
-	// CN realm keeps the full CN catalog in its static hint.
-	hintCN := modelHintForRealm("cn")
-	if !strings.Contains(hintCN, "deepseek-v4-flash") || !strings.Contains(hintCN, "static CN catalog") {
-		t.Fatalf("cn static hint must list the CN catalog, got: %s", hintCN)
-	}
-	// After a successful intl discovery the hint switches to the cached label.
+	// After a successful intl discovery the hint lists the cached ids.
 	storeDynamicModels("intl", realmTestModels("intl-real-model"))
 	hint = modelHintForRealm("intl")
-	if strings.Contains(hint, "static INTL catalog") {
-		t.Fatalf("cached catalog must not be labeled static, got: %s", hint)
-	}
-	if !strings.Contains(hint, "cached realm catalog") {
+	if !strings.Contains(hint, "intl-real-model") || !strings.Contains(hint, "cached realm catalog") {
 		t.Fatalf("cached label missing, got: %s", hint)
 	}
 }
@@ -355,7 +338,7 @@ func TestTranslateChatUpstreamError_11102(t *testing.T) {
 			t.Errorf("11102 error missing %q: %s", want, msg)
 		}
 	}
-	if !strings.Contains(msg, "static INTL catalog") && !strings.Contains(msg, "cached realm catalog") {
+	if !strings.Contains(msg, "cached realm catalog") && !strings.Contains(msg, "last known realm catalog") && !strings.Contains(msg, "no cached catalog") {
 		t.Errorf("11102 error must carry a realm model catalog hint: %s", msg)
 	}
 
