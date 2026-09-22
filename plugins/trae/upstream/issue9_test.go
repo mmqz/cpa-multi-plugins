@@ -65,8 +65,14 @@ func TestClassify4001ModelUnavailable(t *testing.T) {
 }
 
 func TestConfigIsSoloAgentOnly(t *testing.T) {
-	dead := []string{"agnes-agent-x", "Agnes-Code", "DeepSeek-V4-Flash", "deepseek-v4-pro-official", "DEEPSEEK-V4"}
-	live := []string{"deepseek-v5-flash", "kimi-k2.6", "glm-5.2", "Doubao-Seed-2.1-Pro", "seed_m8"}
+	// v0.12.83 (issue #10): 精确死名单 —— 前缀 "deepseek-v4" 曾把实测可用的
+	// -Official 正式版条目一起误杀，两者是目录里的不同 config。
+	dead := []string{"agnes-agent-x", "agnes-2.0-flash", "Agnes-Agent-X",
+		"DeepSeek-V4-Flash", "deepseek-v4-flash", "DeepSeek-V4-Pro", "DEEPSEEK-V4-PRO"}
+	live := []string{"DeepSeek-V4-Flash-Official", "deepseek-v4-flash-official",
+		"DeepSeek-V4-Pro-Official", "deepseek-v4-pro-official",
+		"deepseek-v4", "deepseek-v5-flash", "kimi-k2.6", "glm-5.2",
+		"Doubao-Seed-2.1-Pro", "seed_m8"}
 	for _, n := range dead {
 		if !configIsSoloAgentOnly(n) {
 			t.Errorf("%q should be solo_agent-only (dead on llm_utils_chat)", n)

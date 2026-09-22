@@ -128,16 +128,19 @@ func TestFetchModelsSendsVariantFunction(t *testing.T) {
 	}
 }
 
-// v0.12.79 (issue #9): solo_agent-only 死模型过滤 —— agnes-*/deepseek-v4-*
-// 在 solo_work_lite 通道必 4001（llm_raw_chat 通道才服务它们），不得注册为
-// 可选模型；大小写不敏感（目录两种写法都出现过）；正常模型不受牵连。
+// v0.12.79 (issue #9): solo_agent-only 死模型过滤 —— 精确名单里的死键在
+// solo_work_lite 通道必 4001（llm_raw_chat 通道才服务它们），不得注册为
+// 可选模型；大小写不敏感（目录两种写法都出现过）。v0.12.83 (issue #10)：
+// 前缀匹配改精确名单，-Official 正式版条目实测可用，必须放行。
 func TestFetchModelsFiltersSoloAgentOnlyModels(t *testing.T) {
 	catalog := `{"config_info_list":[
                 {"config_name":"agnes-agent-x","is_invisible_to_user":false,
                  "display_config":{"display_name":"Agnes X"}},
                 {"config_name":"DeepSeek-V4-Flash","is_invisible_to_user":false,
                  "display_config":{"display_name":"DeepSeek-V4-Flash"}},
-                {"config_name":"deepseek-v4-pro-official","is_invisible_to_user":false,
+                {"config_name":"deepseek-v4-pro","is_invisible_to_user":false,
+                 "display_config":{"display_name":"DeepSeek-V4-Pro"}},
+                {"config_name":"DeepSeek-V4-Pro-Official","is_invisible_to_user":false,
                  "display_config":{"display_name":"DeepSeek-V4-Pro 正式版"}},
                 {"config_name":"deepseek-v5-flash","is_invisible_to_user":false,
                  "display_config":{"display_name":"DeepSeek-V5-Flash"}},
@@ -154,14 +157,14 @@ func TestFetchModelsFiltersSoloAgentOnlyModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := idsOf(ms)
-	for _, dead := range []string{"agnes-agent-x", "DeepSeek-V4-Flash", "deepseek-v4-pro-official"} {
+	for _, dead := range []string{"agnes-agent-x", "DeepSeek-V4-Flash", "deepseek-v4-pro"} {
 		for _, id := range got {
 			if strings.EqualFold(id, dead) {
 				t.Errorf("dead model %q leaked into catalog: %v", dead, got)
 			}
 		}
 	}
-	for _, live := range []string{"deepseek-v5-flash", "kimi-k2.6"} {
+	for _, live := range []string{"DeepSeek-V4-Pro-Official", "deepseek-v5-flash", "kimi-k2.6"} {
 		found := false
 		for _, id := range got {
 			if id == live {

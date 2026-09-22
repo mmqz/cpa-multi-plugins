@@ -75,15 +75,18 @@ func TestStaticFallbackCatalogMatchesChatLane(t *testing.T) {
 	for _, id := range idsOfModelInfos(staticUnionModels()) {
 		all[id] = append(all[id], "staticUnionModels()")
 	}
+	// v0.12.83 (issue #10)：-Official 两条是独立 config 且实测可用（同通道
+	// 200 出话），从死名单移回静态目录；死名单只剩非正式死键。
 	dead := []string{"seed_m8", "kimi-k2", "Doubao-Seed-Code", "agnes-agent-x",
-		"DeepSeek-V4-Flash", "DeepSeek-V4-Pro", "DeepSeek-V4-Flash-Official", "DeepSeek-V4-Pro-Official"}
+		"DeepSeek-V4-Flash", "DeepSeek-V4-Pro"}
 	for _, d := range dead {
 		if _, ok := all[d]; ok {
 			t.Errorf("dead model %q back in static fallback (%v)", d, all[d])
 		}
 	}
 	live := []string{"glm-5.2", "glm-5.3", "kimi-k2.6", "kimi-k2.7-code", "minimax-m3",
-		"Doubao-Seed-2.1-Pro", "qwen-3.7-plus", "qwen3.8-max"}
+		"Doubao-Seed-2.1-Pro", "qwen-3.7-plus", "qwen3.8-max",
+		"DeepSeek-V4-Flash-Official", "DeepSeek-V4-Pro-Official"}
 	for _, l := range live {
 		if _, ok := all[l]; !ok {
 			t.Errorf("live model %q missing from static fallback", l)

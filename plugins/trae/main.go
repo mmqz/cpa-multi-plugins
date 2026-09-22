@@ -140,7 +140,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.55"
+var version = "0.12.56"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -672,13 +672,19 @@ func staticUnionModels() []pluginapi.ModelInfo {
 // is_invisible_to_user / empty display_name / config_switch=false; tenant
 // custom models are deliberately NOT snapshotted since they are tenant
 // specific). glm-5.3 added per issue #9 (2026-09-21 reporter chat-verified);
-// DeepSeek-V4-* removed — solo_agent-only dead lane on llm_utils_chat (same
-// blocklist as the dynamic FetchModels). Everything dynamic comes from
-// FetchModels, so upstream model additions/rollouts appear WITHOUT a plugin
-// update (the host re-runs model.for_auth on every auth register/refresh).
+// DeepSeek-V4-Flash / DeepSeek-V4-Pro removed — solo_agent-only dead lane on
+// llm_utils_chat (same blocklist as the dynamic FetchModels). v0.12.83 (issue
+// #10): the DeepSeek-V4-{Flash,Pro}-Official entries are a different pair of
+// configs and chat-verified live (2026-09-22, three CN credentials), so they
+// are restored with their original snapshot metadata; only the non-Official
+// dead keys stay blocklisted. Everything dynamic comes from FetchModels, so
+// upstream model additions/rollouts appear WITHOUT a plugin update (the host
+// re-runs model.for_auth on every auth register/refresh).
 
 func staticSoloModels() []pluginapi.ModelInfo {
 	return staticToModelInfos([]staticModel{
+		{"DeepSeek-V4-Flash-Official", "DeepSeek-V4-Flash 正式版", 200000},
+		{"DeepSeek-V4-Pro-Official", "DeepSeek-V4-Pro 正式版", 200000},
 		{"Doubao-Seed-Evolving", "Seed-Evolving", 256000},
 		{"Doubao-Seed-2.1-Pro", "Seed-2.1-Pro", 256000},
 		{"Doubao-Seed-2.1-Turbo", "Seed-2.1-Turbo", 256000},

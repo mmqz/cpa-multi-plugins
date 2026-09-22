@@ -17,7 +17,7 @@ func TestCheckinRetryDelay(t *testing.T) {
 		{3, 8 * time.Minute},
 		{4, 16 * time.Minute},
 		{6, 64 * time.Minute},
-		{7, 2 * time.Hour}, // 128m → 封顶 2h
+		{7, 2 * time.Hour},  // 128m → 封顶 2h
 		{24, 2 * time.Hour}, // 移位溢出防护
 	}
 	for _, c := range cases {

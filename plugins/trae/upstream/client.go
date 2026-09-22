@@ -376,24 +376,32 @@ type ModelInfo struct {
 	MaxTokens     int64 // 目录不透出输出上限，恒 0（model_detail_list 为加密参数）
 }
 
-// soloAgentOnlyPrefixes 目录里的死模型名单（issue #9，2026-09-21 双账号实测）：
-// 这些 config 在 solo_work_lite 通道必定流内 4001 —— 它们由 IDE 加密 agent
-// 通道 / llm_raw_chat（solo_agent function）服务，llm_utils_chat 不提供。
-// 前缀匹配、大小写不敏感（目录同时出现 DeepSeek-V4-Flash 与 deepseek-v4-flash
-// 两种写法）。与 TraeWorkAssistant 的 solo_agent-only 名单吻合。过滤优于注册
-// 后报错：客户端永远选不到必然失败的模型。
-var soloAgentOnlyPrefixes = []string{"agnes", "deepseek-v4"}
+// soloAgentOnlyDeadNames 目录里的死模型精确名单（issue #9，2026-09-21 双账号
+// 实测；issue #10 修正，2026-09-22 三账号实测）：这些 config 在 solo_work_lite
+// 通道必定流内 4001 —— 它们由 IDE 加密 agent 通道 / llm_raw_chat（solo_agent
+// function）服务，llm_utils_chat 不提供。过滤优于注册后报错：客户端永远选
+// 不到必然失败的模型。
+//
+// v0.12.83 (issue #10)：原前缀匹配（"agnes"、"deepseek-v4"）过宽，把实测可用的
+// DeepSeek-V4-{Flash,Pro}-Official 一起误杀 —— 两者在同一 solo_work_lite 通道
+// 200 正常出话（报告者三凭据复现；判别依据：目录里 -Official 段是与非正式
+// 死键不同的独立 config，命名即"正式版"条目）。改为精确 config_name 集合，
+// 只收当场验证过的死键。代价是新死模型会先放行，而 PR #11 之后流内 4001 已是
+// 可降级的 404 失败（不再是 200 空壳），放行风险可接受；确认新的死模型后在
+// 这里补名字。大小写不敏感（目录同时出现 DeepSeek-V4-Flash 与 deepseek-v4-flash
+// 两种写法）。
+var soloAgentOnlyDeadNames = map[string]struct{}{
+	"agnes-2.0-flash":   {},
+	"agnes-agent-x":     {},
+	"deepseek-v4-flash": {},
+	"deepseek-v4-pro":   {},
+}
 
 // configIsSoloAgentOnly reports whether a catalog config_name is served only
 // by the solo_agent/llm_raw_chat lane and therefore dead on llm_utils_chat.
 func configIsSoloAgentOnly(configName string) bool {
-	lower := strings.ToLower(configName)
-	for _, p := range soloAgentOnlyPrefixes {
-		if strings.HasPrefix(lower, p) {
-			return true
-		}
-	}
-	return false
+	_, dead := soloAgentOnlyDeadNames[strings.ToLower(configName)]
+	return dead
 }
 
 // FetchModels 拉 SOLO/CN 模型表（get_detail_param），只返回用户可见的正式条目。

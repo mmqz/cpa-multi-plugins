@@ -18,20 +18,20 @@
 package main
 
 import (
-        _ "embed"
-        "encoding/json"
-        "errors"
-        "fmt"
-        "log"
-        "net/http"
-        "strings"
-        "sync"
-        "time"
+	_ "embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
 
-        "github.com/mmqz/cpa-multi-plugins/plugins/trae/auth"
-        "github.com/mmqz/cpa-multi-plugins/plugins/trae/upstream"
-        "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-        "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/mmqz/cpa-multi-plugins/plugins/trae/auth"
+	"github.com/mmqz/cpa-multi-plugins/plugins/trae/upstream"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // -----------------------------------------------------------------------------
@@ -39,44 +39,44 @@ import (
 // -----------------------------------------------------------------------------
 
 type managementRoute struct {
-        Method      string `json:"method"`
-        Path        string `json:"path"`
-        Description string `json:"description,omitempty"`
+	Method      string `json:"method"`
+	Path        string `json:"path"`
+	Description string `json:"description,omitempty"`
 }
 
 type resourceRoute struct {
-        Path        string `json:"path"`
-        Menu        string `json:"menu,omitempty"`
-        Description string `json:"description,omitempty"`
+	Path        string `json:"path"`
+	Menu        string `json:"menu,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 type managementRegistrationResponse struct {
-        Routes    []managementRoute `json:"routes,omitempty"`
-        Resources []resourceRoute   `json:"resources,omitempty"`
+	Routes    []managementRoute `json:"routes,omitempty"`
+	Resources []resourceRoute   `json:"resources,omitempty"`
 }
 
 // managementBasePathCache holds the host-injected BasePath so handleManagement
 // doesn't hardcode /v0/management. Falls back to the historical default if the
 // host doesn't provide one (older CPA builds).
 var (
-        managementBasePathCache   = "/v0/management"
-        managementBasePathCacheMu sync.RWMutex
+	managementBasePathCache   = "/v0/management"
+	managementBasePathCacheMu sync.RWMutex
 )
 
 func loadedManagementBasePath() string {
-        managementBasePathCacheMu.RLock()
-        defer managementBasePathCacheMu.RUnlock()
-        return managementBasePathCache
+	managementBasePathCacheMu.RLock()
+	defer managementBasePathCacheMu.RUnlock()
+	return managementBasePathCache
 }
 
 func setManagementBasePath(p string) {
-        p = strings.TrimRight(strings.TrimSpace(p), "/")
-        if p == "" {
-                return
-        }
-        managementBasePathCacheMu.Lock()
-        managementBasePathCache = p
-        managementBasePathCacheMu.Unlock()
+	p = strings.TrimRight(strings.TrimSpace(p), "/")
+	if p == "" {
+		return
+	}
+	managementBasePathCacheMu.Lock()
+	managementBasePathCache = p
+	managementBasePathCacheMu.Unlock()
 }
 
 // managementRegistration describes the routes + resources this plugin serves.
@@ -84,30 +84,30 @@ func setManagementBasePath(p string) {
 // either /v0/management or /v0/resource/plugins/<provider> based on which list
 // they appear in (Routes vs Resources).
 func managementRegistration() managementRegistrationResponse {
-        base := "/plugins/" + providerName
-        return managementRegistrationResponse{
-                Routes: []managementRoute{
-                        {Method: http.MethodGet, Path: base + "/accounts", Description: "List Trae SOLO CN accounts with credits, plan, and check-in status."},
-                        {Method: http.MethodPost, Path: base + "/checkin", Description: "Manually check in one account (auth_index) or all accounts."},
-                        {Method: http.MethodGet, Path: base + "/credits", Description: "Get real-time credits for one (auth_index query) or all accounts."},
-                        {Method: http.MethodPost, Path: base + "/refresh", Description: "Force refresh access tokens + credits for all accounts."},
-                        {Method: http.MethodGet, Path: base + "/status", Description: "Account-pool state: cooling / disabled reasons per account."},
-                        {Method: http.MethodPost, Path: base + "/import", Description: "Import Trae credential JSON (nested or flat) into host auth store."},
-                        {Method: http.MethodGet, Path: base + "/intl/accounts", Description: "Trae Intl: list accounts with uid, nickname, and token expiry."},
-                        {Method: http.MethodGet, Path: base + "/intl/status", Description: "Trae Intl: plugin status."},
-                        {Method: http.MethodPost, Path: base + "/intl/import", Description: "Trae Intl: import credential JSON into host auth store."},
-                },
-                // Single menu entry (v0.12.2): /panel covers CN + SOLO + Intl
-                // accounts. Legacy /intl_panel path serves the same panel.
-                Resources: []resourceRoute{
-                        {Path: "/panel", Menu: "Trae", Description: "Trae dashboard: CN/SOLO credits, check-in, accounts + Intl accounts."},
-                        // Menu-less: routable browser resources without UI entries.
-                        {Path: "/intl_panel", Description: "Trae Intl dashboard (linked from the main panel)."},
-                        {Path: "/oauth_callback", Description: "OAuth login callback redirect target."},
-                        {Path: "/oauth_submit", Description: "Paste-to-complete fallback: GET with cb_url=<url-encoded failed redirect URL> finishes the login remotely (host resource routes are GET-only)."},
-                        {Path: "/login_status", Description: "Live login state for the panel status line: pending variant, callback endpoint, TTL remaining, last outcome (data only, no secrets)."},
-                },
-        }
+	base := "/plugins/" + providerName
+	return managementRegistrationResponse{
+		Routes: []managementRoute{
+			{Method: http.MethodGet, Path: base + "/accounts", Description: "List Trae SOLO CN accounts with credits, plan, and check-in status."},
+			{Method: http.MethodPost, Path: base + "/checkin", Description: "Manually check in one account (auth_index) or all accounts."},
+			{Method: http.MethodGet, Path: base + "/credits", Description: "Get real-time credits for one (auth_index query) or all accounts."},
+			{Method: http.MethodPost, Path: base + "/refresh", Description: "Force refresh access tokens + credits for all accounts."},
+			{Method: http.MethodGet, Path: base + "/status", Description: "Account-pool state: cooling / disabled reasons per account."},
+			{Method: http.MethodPost, Path: base + "/import", Description: "Import Trae credential JSON (nested or flat) into host auth store."},
+			{Method: http.MethodGet, Path: base + "/intl/accounts", Description: "Trae Intl: list accounts with uid, nickname, and token expiry."},
+			{Method: http.MethodGet, Path: base + "/intl/status", Description: "Trae Intl: plugin status."},
+			{Method: http.MethodPost, Path: base + "/intl/import", Description: "Trae Intl: import credential JSON into host auth store."},
+		},
+		// Single menu entry (v0.12.2): /panel covers CN + SOLO + Intl
+		// accounts. Legacy /intl_panel path serves the same panel.
+		Resources: []resourceRoute{
+			{Path: "/panel", Menu: "Trae", Description: "Trae dashboard: CN/SOLO credits, check-in, accounts + Intl accounts."},
+			// Menu-less: routable browser resources without UI entries.
+			{Path: "/intl_panel", Description: "Trae Intl dashboard (linked from the main panel)."},
+			{Path: "/oauth_callback", Description: "OAuth login callback redirect target."},
+			{Path: "/oauth_submit", Description: "Paste-to-complete fallback: GET with cb_url=<url-encoded failed redirect URL> finishes the login remotely (host resource routes are GET-only)."},
+			{Path: "/login_status", Description: "Live login state for the panel status line: pending variant, callback endpoint, TTL remaining, last outcome (data only, no secrets)."},
+		},
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -123,44 +123,44 @@ func managementRegistration() managementRegistrationResponse {
 // resp.Body to the browser (with resp.Headers / resp.StatusCode) — the envelope
 // never reaches the browser, so JSON.parse works on the raw JSON body.
 func handleManagement(raw []byte) ([]byte, error) {
-        var req pluginapi.ManagementRequest
-        if err := json.Unmarshal(raw, &req); err != nil {
-                return nil, err
-        }
-        path := strings.TrimRight(req.Path, "/")
+	var req pluginapi.ManagementRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, err
+	}
+	path := strings.TrimRight(req.Path, "/")
 
-        // Browser UI resource routes (unauthenticated).
-        resPrefix := "/v0/resource/plugins/" + providerName
-        if req.Method == http.MethodGet && path == resPrefix+"/oauth_callback" {
-                return okEnvelope(mgmtHTMLResponse(handleOAuthCallbackResource(req)))
-        }
-        if (req.Method == http.MethodGet || req.Method == http.MethodPost) && path == resPrefix+"/oauth_submit" {
-                return okEnvelope(mgmtHTMLResponse(handleOAuthSubmitResource(req)))
-        }
-        if req.Method == http.MethodGet && path == resPrefix+"/login_status" {
-                return okEnvelope(mgmtJSONResourceResponse(handleLoginStatusResource()))
-        }
-        if req.Method == http.MethodGet && strings.HasPrefix(path, resPrefix) {
-                sub := strings.TrimPrefix(path, resPrefix)
-                return okEnvelope(mgmtHTMLResponse(servePanel(sub)))
-        }
+	// Browser UI resource routes (unauthenticated).
+	resPrefix := "/v0/resource/plugins/" + providerName
+	if req.Method == http.MethodGet && path == resPrefix+"/oauth_callback" {
+		return okEnvelope(mgmtHTMLResponse(handleOAuthCallbackResource(req)))
+	}
+	if (req.Method == http.MethodGet || req.Method == http.MethodPost) && path == resPrefix+"/oauth_submit" {
+		return okEnvelope(mgmtHTMLResponse(handleOAuthSubmitResource(req)))
+	}
+	if req.Method == http.MethodGet && path == resPrefix+"/login_status" {
+		return okEnvelope(mgmtJSONResourceResponse(handleLoginStatusResource()))
+	}
+	if req.Method == http.MethodGet && strings.HasPrefix(path, resPrefix) {
+		sub := strings.TrimPrefix(path, resPrefix)
+		return okEnvelope(mgmtHTMLResponse(servePanel(sub)))
+	}
 
-        base := loadedManagementBasePath() + "/plugins/" + providerName
-        switch {
-        case req.Method == http.MethodGet && path == base+"/accounts":
-                return okEnvelope(mgmtJSONResponse(http.StatusOK, buildDashboard()))
-        case req.Method == http.MethodPost && path == base+"/checkin":
-                return okEnvelope(mgmtJSONResponse(http.StatusOK, handleManualCheckin(req)))
-        case req.Method == http.MethodGet && path == base+"/credits":
-                return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCreditsQuery(req)))
-        case req.Method == http.MethodPost && path == base+"/refresh":
-                return okEnvelope(mgmtJSONResponse(http.StatusOK, handleRefresh()))
-        case req.Method == http.MethodGet && path == base+"/status":
-                return okEnvelope(mgmtJSONResponse(http.StatusOK, buildPoolStatus()))
-        case req.Method == http.MethodPost && path == base+"/import":
-                return okEnvelope(mgmtJSONResponse(http.StatusOK, handleImportAuth(req)))
-        }
-        return okEnvelope(mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": "not found: " + path}))
+	base := loadedManagementBasePath() + "/plugins/" + providerName
+	switch {
+	case req.Method == http.MethodGet && path == base+"/accounts":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, buildDashboard()))
+	case req.Method == http.MethodPost && path == base+"/checkin":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleManualCheckin(req)))
+	case req.Method == http.MethodGet && path == base+"/credits":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCreditsQuery(req)))
+	case req.Method == http.MethodPost && path == base+"/refresh":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleRefresh()))
+	case req.Method == http.MethodGet && path == base+"/status":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, buildPoolStatus()))
+	case req.Method == http.MethodPost && path == base+"/import":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleImportAuth(req)))
+	}
+	return okEnvelope(mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": "not found: " + path}))
 }
 
 // -----------------------------------------------------------------------------
@@ -168,16 +168,16 @@ func handleManagement(raw []byte) ([]byte, error) {
 // -----------------------------------------------------------------------------
 
 func mgmtJSONResponse(status int, v any) pluginapi.ManagementResponse {
-        body, _ := json.Marshal(v)
-        h := http.Header{}
-        h.Set("Content-Type", "application/json; charset=utf-8")
-        return pluginapi.ManagementResponse{StatusCode: status, Headers: h, Body: body}
+	body, _ := json.Marshal(v)
+	h := http.Header{}
+	h.Set("Content-Type", "application/json; charset=utf-8")
+	return pluginapi.ManagementResponse{StatusCode: status, Headers: h, Body: body}
 }
 
 func mgmtHTMLResponse(body []byte) pluginapi.ManagementResponse {
-        h := http.Header{}
-        h.Set("Content-Type", "text/html; charset=utf-8")
-        return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: h, Body: body}
+	h := http.Header{}
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: h, Body: body}
 }
 
 // -----------------------------------------------------------------------------
@@ -190,12 +190,12 @@ var panelHTML []byte
 // servePanel returns the embedded panel.html for valid sub-paths, or a 404
 // stub for unknown resources.
 func servePanel(sub string) []byte {
-        // /intl_panel stays as a hidden alias — it serves the unified panel
-        // (v0.12.2 removed the separate Intl menu entry).
-        if sub != "" && sub != "/" && sub != "/panel" && sub != "/panel.html" && sub != "/intl_panel" {
-                return []byte("<h1>404</h1>")
-        }
-        return panelHTML
+	// /intl_panel stays as a hidden alias — it serves the unified panel
+	// (v0.12.2 removed the separate Intl menu entry).
+	if sub != "" && sub != "/" && sub != "/panel" && sub != "/panel.html" && sub != "/intl_panel" {
+		return []byte("<h1>404</h1>")
+	}
+	return panelHTML
 }
 
 // -----------------------------------------------------------------------------
@@ -206,155 +206,155 @@ func servePanel(sub string) []byte {
 // store (host.auth.list) so it reflects the CPA UI's on-disk truth — the
 // accountPool may lag behind by one config-reload cycle.
 type traeAccount struct {
-        AuthIndex string       `json:"auth_index"`
-        AuthID    string       `json:"auth_id,omitempty"`
-        Name      string       `json:"name"`
-        Label     string       `json:"label"`
-        UID       string       `json:"uid"`
-        Nickname  string       `json:"nickname"`
-        Status    string       `json:"status"`
-        Disabled  bool         `json:"disabled"`
-        Credits   *traeCredits `json:"credits,omitempty"`
-        Checkin   *traeCheckin `json:"checkin,omitempty"`
-        Error     string       `json:"error,omitempty"`
-        Variant   string       `json:"variant,omitempty"`
-        // v0.12.32: 凭证文件是否携带 deviceId。官方 claim 要求 x-device-id 携带
-        // 真实绑定 did，缺失时服务端可能静默不入账 —— 面板徽标告警用。
-        DeviceIDSet bool `json:"device_id_set"`
-        // v0.12.44: 凭证谱系 + CheckLogin 探测的服务端绑定设备状态。
-        Platform         string `json:"platform,omitempty"`          // platformId（trae_solo_cn 等）
-        BoundDeviceID    string `json:"bound_device_id,omitempty"`   // 服务端绑定的 deviceId
-        DeviceBindStatus string `json:"device_bind_status,omitempty"` // BOUND / 其他
-        DeviceMatch      *bool  `json:"device_match,omitempty"`      // nil = 未探测
-        IsLogin          *bool  `json:"is_login,omitempty"`          // nil = 未探测
+	AuthIndex string       `json:"auth_index"`
+	AuthID    string       `json:"auth_id,omitempty"`
+	Name      string       `json:"name"`
+	Label     string       `json:"label"`
+	UID       string       `json:"uid"`
+	Nickname  string       `json:"nickname"`
+	Status    string       `json:"status"`
+	Disabled  bool         `json:"disabled"`
+	Credits   *traeCredits `json:"credits,omitempty"`
+	Checkin   *traeCheckin `json:"checkin,omitempty"`
+	Error     string       `json:"error,omitempty"`
+	Variant   string       `json:"variant,omitempty"`
+	// v0.12.32: 凭证文件是否携带 deviceId。官方 claim 要求 x-device-id 携带
+	// 真实绑定 did，缺失时服务端可能静默不入账 —— 面板徽标告警用。
+	DeviceIDSet bool `json:"device_id_set"`
+	// v0.12.44: 凭证谱系 + CheckLogin 探测的服务端绑定设备状态。
+	Platform         string `json:"platform,omitempty"`           // platformId（trae_solo_cn 等）
+	BoundDeviceID    string `json:"bound_device_id,omitempty"`    // 服务端绑定的 deviceId
+	DeviceBindStatus string `json:"device_bind_status,omitempty"` // BOUND / 其他
+	DeviceMatch      *bool  `json:"device_match,omitempty"`       // nil = 未探测
+	IsLogin          *bool  `json:"is_login,omitempty"`           // nil = 未探测
 }
 
 type traeCredits struct {
-        // TotalRemain is the SUBSCRIPTION pack quota. nil = never fetched — NOT
-        // the same as 0 (a checkin-only free account has a 0 pack but a non-zero
-        // wallet). v0.12.25: the check-in WALLET lives in checkin.credits
-        // (traeCheckin).
-        // v0.12.28: TotalRemain 改为上游用量模型值（fast 可用次数 / basic 剩余），
-        // 且 RemainKnown=false 时为 nil —— 未知剩余不再渲染成 0（对齐 cockpit-tools
-        // "无可靠剩余时不猜测"：Free 显示 "免费剩余：--"）。
-        TotalRemain *int64 `json:"total_remain"`
-        Plan        string `json:"plan"`
-        FetchedAt   string `json:"fetched_at,omitempty"`
-        // v0.12.28 用量模型扩展（对齐 trae.ts TraeUsage）。
-        UsageModel  string `json:"usage_model,omitempty"` // fast|basic|unknown
-        RemainKnown bool   `json:"remain_known"`
-        Used        *int64 `json:"used,omitempty"`  // basic: 已用
-        Total       *int64 `json:"total,omitempty"` // basic: 额度池
-        FastLimit   *int64 `json:"fast_limit,omitempty"`
-        FastUsed    *int64 `json:"fast_used,omitempty"`
-        // v0.12.29 ide_user_pay_status 补充维度（Free/SOLO 账户的真实数值）。
-        FastRequestPer *int64  `json:"fast_request_per,omitempty"` // 快请求/月
-        SoloParallel   *int64  `json:"solo_parallel,omitempty"`    // SOLO 并发数
-        SoloPackage    bool    `json:"solo_package,omitempty"`     // enable_solo_* 任一
-        PlanType       string  `json:"plan_type,omitempty"`        // user_pay_identity_str
+	// TotalRemain is the SUBSCRIPTION pack quota. nil = never fetched — NOT
+	// the same as 0 (a checkin-only free account has a 0 pack but a non-zero
+	// wallet). v0.12.25: the check-in WALLET lives in checkin.credits
+	// (traeCheckin).
+	// v0.12.28: TotalRemain 改为上游用量模型值（fast 可用次数 / basic 剩余），
+	// 且 RemainKnown=false 时为 nil —— 未知剩余不再渲染成 0（对齐 cockpit-tools
+	// "无可靠剩余时不猜测"：Free 显示 "免费剩余：--"）。
+	TotalRemain *int64 `json:"total_remain"`
+	Plan        string `json:"plan"`
+	FetchedAt   string `json:"fetched_at,omitempty"`
+	// v0.12.28 用量模型扩展（对齐 trae.ts TraeUsage）。
+	UsageModel  string `json:"usage_model,omitempty"` // fast|basic|unknown
+	RemainKnown bool   `json:"remain_known"`
+	Used        *int64 `json:"used,omitempty"`  // basic: 已用
+	Total       *int64 `json:"total,omitempty"` // basic: 额度池
+	FastLimit   *int64 `json:"fast_limit,omitempty"`
+	FastUsed    *int64 `json:"fast_used,omitempty"`
+	// v0.12.29 ide_user_pay_status 补充维度（Free/SOLO 账户的真实数值）。
+	FastRequestPer *int64 `json:"fast_request_per,omitempty"` // 快请求/月
+	SoloParallel   *int64 `json:"solo_parallel,omitempty"`    // SOLO 并发数
+	SoloPackage    bool   `json:"solo_package,omitempty"`     // enable_solo_* 任一
+	PlanType       string `json:"plan_type,omitempty"`        // user_pay_identity_str
 
-        // v0.12.34: 官方 cashier 同口径积分池（模型调用真正扣减的钱；
-        // 签到钱包在 checkin.credits，两笔分开的钱不再混显）。
-        CreditsPoolRemain    *int64 `json:"credits_pool_remain,omitempty"`
-        CreditsPoolKnown     bool   `json:"credits_pool_known,omitempty"`
-        CreditsPoolUnlimited bool   `json:"credits_pool_unlimited,omitempty"`
+	// v0.12.34: 官方 cashier 同口径积分池（模型调用真正扣减的钱；
+	// 签到钱包在 checkin.credits，两笔分开的钱不再混显）。
+	CreditsPoolRemain    *int64 `json:"credits_pool_remain,omitempty"`
+	CreditsPoolKnown     bool   `json:"credits_pool_known,omitempty"`
+	CreditsPoolUnlimited bool   `json:"credits_pool_unlimited,omitempty"`
 }
 
 type traeCheckin struct {
-        CheckedIn bool  `json:"checked_in"`
-        Credits   int64 `json:"credits"`
-        Enable    bool  `json:"enable"`
+	CheckedIn bool  `json:"checked_in"`
+	Credits   int64 `json:"credits"`
+	Enable    bool  `json:"enable"`
 }
 
 // buildDashboard aggregates every Trae SOLO CN credential from the host auth
 // store, plus a snapshot of credits / checkin status from the account cache
 // (or live upstream if the cache is stale).
 func buildDashboard() map[string]any {
-        // v0.12.27: migrate shared-namespace solo credentials FIRST (rename +
-        // re-register) so the inventory below and the heal scan both see the
-        // final names. Idempotent; a no-op once every solo file is namespaced.
-        if n := migrateSoloFileNames(); n > 0 {
-                log.Printf("trae dashboard: migrated %d solo credential(s) into the solo namespace", n)
-        }
-        // v0.12.26: heal next — if the host's manager dropped any on-disk
-        // credential (torn-read reconciliation, see heal.go), re-register it so
-        // the panel reflects the REAL credential inventory, not the manager's.
-        if n := healAuthRegistration(providerName+"-", hostAuthList); n > 0 {
-                log.Printf("trae dashboard: healed %d credential(s) missing from host manager", n)
-        }
-        files, err := hostAuthList()
-        if err != nil {
-                return map[string]any{"error": err.Error()}
-        }
-        out := make([]traeAccount, 0, len(files))
-        for _, f := range files {
-                acct := traeAccount{
-                        AuthIndex: f.AuthIndex,
-                        AuthID:    f.ID,
-                        Name:      f.Name,
-                        Label:     f.Label,
-                        Status:    f.Status,
-                        Disabled:  f.Disabled,
-                }
-                sa, err := hostAuthGet(f.AuthIndex)
-                if err != nil {
-                        acct.Error = "load auth: " + err.Error()
-                        out = append(out, acct)
-                        continue
-                }
-                acct.UID = sa.Account.UID
-                acct.Nickname = sa.Account.Nickname
-                acct.Variant = sa.Variant
-                acct.DeviceIDSet = strings.TrimSpace(sa.Auth.DeviceID) != ""
-                // v0.12.44: 凭证自证谱系 + 缓存的 CheckLogin 绑定快照。
-                acct.Platform = upstream.PlatformIDFor(sa.Variant)
-                if v, ok := accountCache.Load(f.AuthIndex); ok {
-                        if e, ok2 := v.(*accountCacheEntry); ok2 && e.bind != nil && e.bind.Known {
-                                acct.BoundDeviceID = e.bind.BoundDeviceID
-                                acct.DeviceBindStatus = e.bind.DeviceBindStatus
-                                dm := e.bind.DeviceMatch
-                                il := e.bind.IsLogin
-                                acct.DeviceMatch = &dm
-                                acct.IsLogin = &il
-                        }
-                }
+	// v0.12.27: migrate shared-namespace solo credentials FIRST (rename +
+	// re-register) so the inventory below and the heal scan both see the
+	// final names. Idempotent; a no-op once every solo file is namespaced.
+	if n := migrateSoloFileNames(); n > 0 {
+		log.Printf("trae dashboard: migrated %d solo credential(s) into the solo namespace", n)
+	}
+	// v0.12.26: heal next — if the host's manager dropped any on-disk
+	// credential (torn-read reconciliation, see heal.go), re-register it so
+	// the panel reflects the REAL credential inventory, not the manager's.
+	if n := healAuthRegistration(providerName+"-", hostAuthList); n > 0 {
+		log.Printf("trae dashboard: healed %d credential(s) missing from host manager", n)
+	}
+	files, err := hostAuthList()
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	out := make([]traeAccount, 0, len(files))
+	for _, f := range files {
+		acct := traeAccount{
+			AuthIndex: f.AuthIndex,
+			AuthID:    f.ID,
+			Name:      f.Name,
+			Label:     f.Label,
+			Status:    f.Status,
+			Disabled:  f.Disabled,
+		}
+		sa, err := hostAuthGet(f.AuthIndex)
+		if err != nil {
+			acct.Error = "load auth: " + err.Error()
+			out = append(out, acct)
+			continue
+		}
+		acct.UID = sa.Account.UID
+		acct.Nickname = sa.Account.Nickname
+		acct.Variant = sa.Variant
+		acct.DeviceIDSet = strings.TrimSpace(sa.Auth.DeviceID) != ""
+		// v0.12.44: 凭证自证谱系 + 缓存的 CheckLogin 绑定快照。
+		acct.Platform = upstream.PlatformIDFor(sa.Variant)
+		if v, ok := accountCache.Load(f.AuthIndex); ok {
+			if e, ok2 := v.(*accountCacheEntry); ok2 && e.bind != nil && e.bind.Known {
+				acct.BoundDeviceID = e.bind.BoundDeviceID
+				acct.DeviceBindStatus = e.bind.DeviceBindStatus
+				dm := e.bind.DeviceMatch
+				il := e.bind.IsLogin
+				acct.DeviceMatch = &dm
+				acct.IsLogin = &il
+			}
+		}
 
-                // Cached credits / checkin (filled by scheduler + manual endpoints).
-                // v0.12.25: credits < 0 = pack quota never fetched — leave the
-                // object off so the panel lazy-loads it via /credits.
-                if v, ok := accountCache.Load(f.AuthIndex); ok {
-                        if e, ok2 := v.(*accountCacheEntry); ok2 && (e.credits >= 0 || e.usageFilled) {
-                                acct.Credits = creditsFromCache(e)
-                        }
-                        if e, ok2 := v.(*accountCacheEntry); ok2 && e.checkin != nil {
-                                acct.Checkin = &traeCheckin{
-                                        CheckedIn: e.checkin.CheckedIn,
-                                        Credits:   e.checkin.Credits,
-                                        Enable:    e.checkin.Enable,
-                                }
-                        }
-                }
-                out = append(out, acct)
-        }
-        return map[string]any{
-                "accounts":    out,
-                "provider":    providerName,
-                "server_time": time.Now().Format("2006-01-02 15:04:05"),
-        }
+		// Cached credits / checkin (filled by scheduler + manual endpoints).
+		// v0.12.25: credits < 0 = pack quota never fetched — leave the
+		// object off so the panel lazy-loads it via /credits.
+		if v, ok := accountCache.Load(f.AuthIndex); ok {
+			if e, ok2 := v.(*accountCacheEntry); ok2 && (e.credits >= 0 || e.usageFilled) {
+				acct.Credits = creditsFromCache(e)
+			}
+			if e, ok2 := v.(*accountCacheEntry); ok2 && e.checkin != nil {
+				acct.Checkin = &traeCheckin{
+					CheckedIn: e.checkin.CheckedIn,
+					Credits:   e.checkin.Credits,
+					Enable:    e.checkin.Enable,
+				}
+			}
+		}
+		out = append(out, acct)
+	}
+	return map[string]any{
+		"accounts":    out,
+		"provider":    providerName,
+		"server_time": time.Now().Format("2006-01-02 15:04:05"),
+	}
 }
 
 // buildPoolStatus surfaces the accountPool's cooling / disabled state — useful
 // for debugging why traffic is being routed away from an account.
 func buildPoolStatus() map[string]any {
-        if accountPool == nil {
-                return map[string]any{"provider": providerName, "accounts": []any{}}
-        }
-        statuses := accountPool.List()
-        return map[string]any{
-                "provider":    providerName,
-                "accounts":    statuses,
-                "server_time": time.Now().Format("2006-01-02 15:04:05"),
-        }
+	if accountPool == nil {
+		return map[string]any{"provider": providerName, "accounts": []any{}}
+	}
+	statuses := accountPool.List()
+	return map[string]any{
+		"provider":    providerName,
+		"accounts":    statuses,
+		"server_time": time.Now().Format("2006-01-02 15:04:05"),
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -363,112 +363,112 @@ func buildPoolStatus() map[string]any {
 
 // rpcHostAuthListResponse mirrors the host's host.auth.list envelope result.
 type rpcHostAuthListResponse struct {
-        Files []pluginapi.HostAuthFileEntry `json:"files"`
+	Files []pluginapi.HostAuthFileEntry `json:"files"`
 }
 
 type rpcHostAuthGetResponse struct {
-        AuthIndex string          `json:"auth_index"`
-        Name      string          `json:"name"`
-        Path      string          `json:"path"`
-        JSON      json.RawMessage `json:"json"`
+	AuthIndex string          `json:"auth_index"`
+	Name      string          `json:"name"`
+	Path      string          `json:"path"`
+	JSON      json.RawMessage `json:"json"`
 }
 
 // hostAuthList returns all Trae SOLO CN credentials known to the host. We
 // filter by filename prefix because some legacy auth files don't carry a
 // "type"/"provider" field (pre-config-convention files).
 func hostAuthList() ([]pluginapi.HostAuthFileEntry, error) {
-        raw, err := hostCall(pluginabi.MethodHostAuthList, nil)
-        if err != nil {
-                return nil, err
-        }
-        var env envelope
-        if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
-                return nil, fmt.Errorf("host.auth.list: bad envelope")
-        }
-        var resp rpcHostAuthListResponse
-        if err := json.Unmarshal(env.Result, &resp); err != nil {
-                return nil, err
-        }
-        out := make([]pluginapi.HostAuthFileEntry, 0, len(resp.Files))
-        prefix := providerName + "-"
-        for _, f := range resp.Files {
-                if strings.HasPrefix(strings.ToLower(f.Name), prefix) {
-                        out = append(out, f)
-                }
-        }
-        return out, nil
+	raw, err := hostCall(pluginabi.MethodHostAuthList, nil)
+	if err != nil {
+		return nil, err
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
+		return nil, fmt.Errorf("host.auth.list: bad envelope")
+	}
+	var resp rpcHostAuthListResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		return nil, err
+	}
+	out := make([]pluginapi.HostAuthFileEntry, 0, len(resp.Files))
+	prefix := providerName + "-"
+	for _, f := range resp.Files {
+		if strings.HasPrefix(strings.ToLower(f.Name), prefix) {
+			out = append(out, f)
+		}
+	}
+	return out, nil
 }
 
 // hostAuthGet fetches one credential (by auth_index) from the host and parses
 // it into the nested {auth, account} shape used by upstreamClient.
 type storedAuth struct {
-        Auth    storedTokens  `json:"auth"`
-        Account storedAccount `json:"account"`
-        // Variant is not persisted separately (it lives in Auth in the JSON);
-        // it is resolved at load time (hostAuthGet) so management operations
-        // hit the right upstream endpoints for cn/solo/intl accounts (v0.12.2).
-        Variant string `json:"-"`
+	Auth    storedTokens  `json:"auth"`
+	Account storedAccount `json:"account"`
+	// Variant is not persisted separately (it lives in Auth in the JSON);
+	// it is resolved at load time (hostAuthGet) so management operations
+	// hit the right upstream endpoints for cn/solo/intl accounts (v0.12.2).
+	Variant string `json:"-"`
 }
 
 type storedTokens struct {
-        AccessToken  string `json:"accessToken"`
-        RefreshToken string `json:"refreshToken"`
-        ExpiresAt    int64  `json:"expiresAt"`
-        Domain       string `json:"domain"`
-        APIHost      string `json:"apiHost"`
-        MachineID    string `json:"machineId"`
-        DeviceID     string `json:"deviceId"`
-        Variant      string `json:"variant"`
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+	ExpiresAt    int64  `json:"expiresAt"`
+	Domain       string `json:"domain"`
+	APIHost      string `json:"apiHost"`
+	MachineID    string `json:"machineId"`
+	DeviceID     string `json:"deviceId"`
+	Variant      string `json:"variant"`
 }
 
 type storedAccount struct {
-        UID          string `json:"uid"`
-        EnterpriseID string `json:"enterpriseId"`
-        Nickname     string `json:"nickname"`
+	UID          string `json:"uid"`
+	EnterpriseID string `json:"enterpriseId"`
+	Nickname     string `json:"nickname"`
 }
 
 func hostAuthGet(authIndex string) (*storedAuth, error) {
-        reqBody, _ := json.Marshal(map[string]string{"auth_index": authIndex})
-        raw, err := hostCall(pluginabi.MethodHostAuthGet, reqBody)
-        if err != nil {
-                return nil, err
-        }
-        var env envelope
-        if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
-                return nil, fmt.Errorf("host.auth.get: bad envelope")
-        }
-        var resp rpcHostAuthGetResponse
-        if err := json.Unmarshal(env.Result, &resp); err != nil {
-                return nil, err
-        }
-        var sa storedAuth
-        if err := json.Unmarshal(resp.JSON, &sa); err != nil {
-                return nil, fmt.Errorf("parse stored auth: %w", err)
-        }
-        // Explicit auth.variant wins; sniff covers legacy files (v0.12.2).
-        sa.Variant = sa.Auth.Variant
-        if sa.Variant == "" {
-                sa.Variant = sniffVariantFromJSON(resp.JSON)
-        }
-        return &sa, nil
+	reqBody, _ := json.Marshal(map[string]string{"auth_index": authIndex})
+	raw, err := hostCall(pluginabi.MethodHostAuthGet, reqBody)
+	if err != nil {
+		return nil, err
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
+		return nil, fmt.Errorf("host.auth.get: bad envelope")
+	}
+	var resp rpcHostAuthGetResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		return nil, err
+	}
+	var sa storedAuth
+	if err := json.Unmarshal(resp.JSON, &sa); err != nil {
+		return nil, fmt.Errorf("parse stored auth: %w", err)
+	}
+	// Explicit auth.variant wins; sniff covers legacy files (v0.12.2).
+	sa.Variant = sa.Auth.Variant
+	if sa.Variant == "" {
+		sa.Variant = sniffVariantFromJSON(resp.JSON)
+	}
+	return &sa, nil
 }
 
 // hostAuthAsUpstream converts the host-stored nested shape into the upstream
 // *auth.Auth the trae-solo-cn upstream client expects.
 func hostAuthAsUpstream(sa *storedAuth) *auth.Auth {
-        return &auth.Auth{
-                AccessToken:  sa.Auth.AccessToken,
-                RefreshToken: sa.Auth.RefreshToken,
-                ExpiresAt:    sa.Auth.ExpiresAt,
-                Domain:       sa.Auth.Domain,
-                APIHost:      sa.Auth.APIHost,
-                MachineID:    sa.Auth.MachineID,
-                DeviceID:     sa.Auth.DeviceID,
-                UID:          sa.Account.UID,
-                EnterpriseID: sa.Account.EnterpriseID,
-                Nickname:     sa.Account.Nickname,
-                Variant:      sa.Variant,
-        }
+	return &auth.Auth{
+		AccessToken:  sa.Auth.AccessToken,
+		RefreshToken: sa.Auth.RefreshToken,
+		ExpiresAt:    sa.Auth.ExpiresAt,
+		Domain:       sa.Auth.Domain,
+		APIHost:      sa.Auth.APIHost,
+		MachineID:    sa.Auth.MachineID,
+		DeviceID:     sa.Auth.DeviceID,
+		UID:          sa.Account.UID,
+		EnterpriseID: sa.Account.EnterpriseID,
+		Nickname:     sa.Account.Nickname,
+		Variant:      sa.Variant,
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -479,44 +479,44 @@ func hostAuthAsUpstream(sa *storedAuth) *auth.Auth {
 // v0.12.28: usageFilled entries carry the upstream usage model; legacy
 // cache entries (pre-upgrade) keep the old pack-only number.
 func creditsFromCache(e *accountCacheEntry) *traeCredits {
-        if e.usageFilled {
-                c := &traeCredits{
-                        Plan:        e.usagePlan(),
-                        FetchedAt:   e.fetched.Format(time.RFC3339),
-                        UsageModel:  e.usage.UsageModel,
-                        RemainKnown: e.usage.RemainKnown,
-                }
-                if e.usage.RemainKnown {
-                        r := e.usage.Remain
-                        c.TotalRemain = &r
-                }
-                if e.usage.UsageModel == "basic" {
-                        u, t := e.usage.Used, e.usage.Total
-                        c.Used, c.Total = &u, &t
-                }
-                if e.usage.UsageModel == "fast" {
-                        fl, fu := e.usage.FastLimit, e.usage.FastUsed
-                        c.FastLimit, c.FastUsed = &fl, &fu
-                }
-                // v0.12.29: pay_status 补充维度随缓存透出（/accounts 免刷新可见）。
-                c.FastRequestPer = e.usage.FastRequestPer
-                c.SoloParallel = e.usage.SoloParallel
-                c.SoloPackage = e.usage.SoloPackage
-                c.PlanType = e.usage.PlanType
-                // v0.12.34: 积分池随缓存透出（/accounts 免刷新可见）。
-                if e.usage.CreditsPool.Known {
-                        pr := e.usage.CreditsPool.Remain
-                        c.CreditsPoolRemain = &pr
-                        c.CreditsPoolKnown = true
-                        c.CreditsPoolUnlimited = e.usage.CreditsPool.Unlimited
-                }
-                return c
-        }
-        if e.credits < 0 {
-                return nil
-        }
-        remain := e.credits
-        return &traeCredits{TotalRemain: &remain, FetchedAt: e.fetched.Format(time.RFC3339), RemainKnown: true, UsageModel: "legacy"}
+	if e.usageFilled {
+		c := &traeCredits{
+			Plan:        e.usagePlan(),
+			FetchedAt:   e.fetched.Format(time.RFC3339),
+			UsageModel:  e.usage.UsageModel,
+			RemainKnown: e.usage.RemainKnown,
+		}
+		if e.usage.RemainKnown {
+			r := e.usage.Remain
+			c.TotalRemain = &r
+		}
+		if e.usage.UsageModel == "basic" {
+			u, t := e.usage.Used, e.usage.Total
+			c.Used, c.Total = &u, &t
+		}
+		if e.usage.UsageModel == "fast" {
+			fl, fu := e.usage.FastLimit, e.usage.FastUsed
+			c.FastLimit, c.FastUsed = &fl, &fu
+		}
+		// v0.12.29: pay_status 补充维度随缓存透出（/accounts 免刷新可见）。
+		c.FastRequestPer = e.usage.FastRequestPer
+		c.SoloParallel = e.usage.SoloParallel
+		c.SoloPackage = e.usage.SoloPackage
+		c.PlanType = e.usage.PlanType
+		// v0.12.34: 积分池随缓存透出（/accounts 免刷新可见）。
+		if e.usage.CreditsPool.Known {
+			pr := e.usage.CreditsPool.Remain
+			c.CreditsPoolRemain = &pr
+			c.CreditsPoolKnown = true
+			c.CreditsPoolUnlimited = e.usage.CreditsPool.Unlimited
+		}
+		return c
+	}
+	if e.credits < 0 {
+		return nil
+	}
+	remain := e.credits
+	return &traeCredits{TotalRemain: &remain, FetchedAt: e.fetched.Format(time.RFC3339), RemainKnown: true, UsageModel: "legacy"}
 }
 
 // usagePlan returns the plan label stored alongside the usage snapshot
@@ -526,13 +526,13 @@ func (e *accountCacheEntry) usagePlan() string { return e.plan }
 // notifyCheckinRateLimited 把手动签到路径遇到的 9074（官方瞬时限流）交给
 // 调度器进入当日退避重试；非 9074 错误（token 失效等）不重试。
 func notifyCheckinRateLimited(err error) {
-        var ue *upstream.Error
-        if !errors.As(err, &ue) || !upstream.IsRateLimit9074(ue.BizCode) {
-                return
-        }
-        if sched != nil {
-                sched.NotifyCheckinRateLimited()
-        }
+	var ue *upstream.Error
+	if !errors.As(err, &ue) || !upstream.IsRateLimit9074(ue.BizCode) {
+		return
+	}
+	if sched != nil {
+		sched.NotifyCheckinRateLimited()
+	}
 }
 
 // handleManualCheckin triggers checkin for one (auth_index) or all accounts.
@@ -541,428 +541,428 @@ func notifyCheckinRateLimited(err error) {
 // 重建后 auth_index 会变化，面板仍持旧 index 点击签到会匹配 0 个文件；
 // 此时改按 uid 匹配（uid 稳定），并把实际使用的 auth_index 回传给面板。
 func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
-        var body struct {
-                AuthIndex string `json:"auth_index"`
-                UID       string `json:"uid"`
-        }
-        if len(req.Body) > 0 {
-                _ = json.Unmarshal(req.Body, &body)
-        }
-        results := []map[string]any{}
+	var body struct {
+		AuthIndex string `json:"auth_index"`
+		UID       string `json:"uid"`
+	}
+	if len(req.Body) > 0 {
+		_ = json.Unmarshal(req.Body, &body)
+	}
+	results := []map[string]any{}
 
-        files, err := hostAuthList()
-        if err != nil {
-                return map[string]any{"error": err.Error()}
-        }
-        // v0.12.28: auth_index 失效检测。面板传了 index 却匹配不到任何文件
-        // （凭证被 migrate/heal/adopt 改名或宿主重建过），改按 uid 匹配；
-        // 两者都匹配不到时返回明确的 stale_index 错误而不是空 results
-        // （空 results 曾被面板渲染成"签到完成"假成功）。
-        targets := make([]pluginapi.HostAuthFileEntry, 0, len(files))
-        indexMatched := false
-        for _, f := range files {
-                if body.AuthIndex != "" && f.AuthIndex == body.AuthIndex {
-                        indexMatched = true
-                }
-        }
-        fallbackByUID := !indexMatched && body.AuthIndex != "" && body.UID != ""
-        for _, f := range files {
-                if body.AuthIndex == "" {
-                        // all accounts
-                } else if indexMatched {
-                        if f.AuthIndex != body.AuthIndex {
-                                continue
-                        }
-                } else if fallbackByUID {
-                        // stale auth_index → uid 兜底
-                } else {
-                        continue
-                }
-                targets = append(targets, f)
-        }
-        if body.AuthIndex != "" && len(targets) == 0 {
-                return map[string]any{
-                        "provider":    providerName,
-                        "results":     results,
-                        "error":       "stale_index: auth_index 不存在（凭证可能已被重命名/重注册），请刷新列表后重试",
-                        "stale_index": true,
-                }
-        }
-        for _, f := range targets {
-                entry := map[string]any{"auth_index": f.AuthIndex, "uid": "", "nickname": ""}
-                sa, err := hostAuthGet(f.AuthIndex)
-                if err != nil {
-                        entry["error"] = "load auth: " + err.Error()
-                        results = append(results, entry)
-                        continue
-                }
-                if fallbackByUID && strings.TrimSpace(sa.Account.UID) != strings.TrimSpace(body.UID) {
-                        continue // uid 兜底时只处理同 uid 账号
-                }
-                entry["uid"] = sa.Account.UID
-                entry["nickname"] = sa.Account.Nickname
-                a := hostAuthAsUpstream(sa)
-                // v0.12.32: 官方客户端 claim 要求 x-device-id 携带真实绑定的数字 did
-                // （BlueChonk 逆向报告 FINDINGS §四/§五；did 缺失/未绑定时服务端
-                // 可能 code=0 但静默不入账）。导入的账号文件可能缺 deviceId ——
-                // 透出诊断，别让"签到成功但不到账"隐形。
-                entry["device_id_set"] = strings.TrimSpace(a.DeviceID) != ""
-                if strings.TrimSpace(a.DeviceID) == "" {
-                        // v0.12.43: 从"告警后硬签"改为硬性拦截 —— 官方 claim 要求
-                        // x-device-id（FINDINGS §四/§五：缺失时服务端可能 code=0 但
-                        // 静默不入账），硬签只会产生"成功但不到账"的假结果。给出
-                        // 可行动的修复路径；账号仍在面板展示，重新登录即可补齐。
-                        entry["error"] = "缺少 deviceId：官方 claim 要求 x-device-id（真实绑定 did），凭证缺设备身份，硬签可能成功但不入账 —— 请用插件 OAuth 重新登录该账号补齐后再签"
-                        results = append(results, entry)
-                        continue
-                }
-                // v0.12.38: 签到前保鲜。宿主对 trae 无主动刷新调度（无 RefreshLead/
-                // refresh_interval 元数据，CLIProxyAPI auto_refresh_loop 只调度内置
-                // provider），面板签到读的是 hostAuthGet 快照；若执行器侧已轮换而
-                // 快照滞后，签到会撞过期 token。过期即刷新，并写回宿主——refreshToken
-                // 轮换后不落盘，下次宿主侧刷新用旧 token 必失败（会话死）。
-                if a.RefreshTokenValue() != "" {
-                        refreshed, rerr := upstreamClient.RefreshTokenIfNeeded(a, 0)
-                        if rerr != nil {
-                                log.Printf("checkin %s: pre-flight refresh failed: %v", sa.Account.UID, rerr)
-                                entry["refresh_error"] = rerr.Error()
-                        } else if refreshed {
-                                name := f.Name
-                                if strings.TrimSpace(name) == "" {
-                                        name = credentialFileName(a.Variant, a.UID)
-                                }
-                                if serr := hostAuthSave(name, storageJSONForAuth(a)); serr != nil {
-                                        log.Printf("checkin %s: CRITICAL token refreshed but persist failed: %v — host copy may hold a stale refreshToken", sa.Account.UID, serr)
-                                        entry["persist_error"] = serr.Error()
-                                } else {
-                                        entry["refreshed"] = true
-                                }
-                        }
-                }
-                entry["expires_at"] = a.ExpiresAt
-                // v0.12.65: 本轮 attempt 生成全新签到设备号，贯穿 status→claim→回查
-                // （随机 16 位数字串实测可领，登录 hex32 必败 9074——见 upstream.NewCheckinDeviceID）。
-                did := upstream.NewCheckinDeviceID()
-                status, err := upstreamClient.CheckinStatus(a, did)
-                if err != nil {
-                        entry["error"] = "checkin_status: " + err.Error()
-                        notifyCheckinRateLimited(err)
-                        results = append(results, entry)
-                        continue
-                }
-                // v0.12.40: credits 语义修正（反编译官方 TraeWork CN 2.3.81345 定案）——
-                // status.credits 是"每日签到奖励数额"（官方卡片 "Daily check-in:
-                // {credits} credits"），非钱包余额；签到后不增长，旧"签到后-签到前"
-                // 差值算法作废。入账证据优先取 claim 响应携带的数额，缺省回退
-                // 签到前奖励配置（基础 credits + 加码 extra_credits）。
-                beforeCredits := status.Credits
-                awarded := int64(-1)
-                if !status.CheckedIn && !status.DidCheckedIn && status.Enable {
-                        claim, err := upstreamClient.CheckinClaim(a, did)
-                        if err != nil {
-                                entry["error"] = "checkin_claim: " + err.Error()
-                                // v0.12.33: 手动签到撞 9074 也纳入当日退避重试（与调度器同节奏）。
-                                notifyCheckinRateLimited(err)
-                        } else {
-                                entry["claim_code"] = claim.Code
-                                entry["claim_message"] = claim.Message
-                                // 入账证据：claim 响应携带的数额优先。
-                                if claim.ClaimCredits != nil {
-                                        entry["claim_credits"] = *claim.ClaimCredits
-                                        awarded = *claim.ClaimCredits
-                                } else {
-                                        awarded = beforeCredits + status.ExtraCredits
-                                }
-                                // 领取成功后重查状态（对齐官方 workbench claim 后 refresh）。
-                                if after, stErr := upstreamClient.CheckinStatus(a, did); stErr == nil {
-                                        status = after
-                                        // v0.12.65: code:0 存在幂等假成功（当日已签账号任何 device_id 都回 code:0），
-                                        // checked_in 未翻转 -> 标记未确认，面板如实展示，不伪装成功。
-                                        if !after.CheckedIn && !after.DidCheckedIn {
-                                                entry["claim_unconfirmed"] = true
-                                        }
-                                }
-                        }
-                }
-                entry["already_checked_in"] = status.CheckedIn || status.DidCheckedIn
-                entry["credits"] = status.Credits
-                if status.ExtraCredits > 0 {
-                        entry["extra_credits"] = status.ExtraCredits
-                }
-                if awarded >= 0 {
-                        entry["awarded"] = awarded
-                }
-                // Refresh cached checkin / credits.
-                // v0.12.40 语义：e.credits = SUBSCRIPTION pack quota（订阅包余额）；
-                // e.checkin.Credits = 签到奖励数额（非钱包、非可花余额）。此前
-                // "签到 150 积分一刷新就归零"即误把奖励当余额存进 e.credits 所致。
-                prevCredits := int64(-1) // -1 = unknown, keep previous
-                prevUsageFilled := false
-                if v, ok := accountCache.Load(f.AuthIndex); ok {
-                        if e, ok2 := v.(*accountCacheEntry); ok2 {
-                                prevCredits = e.credits
-                                prevUsageFilled = e.usageFilled
-                        }
-                }
-                newEntry := &accountCacheEntry{
-                        credits: prevCredits,
-                        checkin: &checkinStatus{
-                                CheckedIn: status.CheckedIn || status.DidCheckedIn,
-                                Credits:   status.Credits,
-                                Enable:    status.Enable,
-                        },
-                        fetched:     time.Now(),
-                        usageFilled: prevUsageFilled,
-                }
-                if prevUsageFilled {
-                        newEntry.usage = cacheUsage(f.AuthIndex)
-                        newEntry.plan = cachePlan(f.AuthIndex)
-                }
-                accountCache.Store(f.AuthIndex, newEntry)
-                // Re-enable account in pool if checkin restored credits.
-                // v0.12.28: pool score prefers the usage-model remain when known
-                // (fast/basic). v0.12.40: credits 是奖励配置而非可花余额，不再叠加进
-                // 评分（旧 pack+wallet 叠加源于同一误读）。
-                if accountPool != nil {
-                        score := int64(0)
-                        if prevUsageFilled && newEntry.usage.RemainKnown && newEntry.usage.Remain > 0 {
-                                r := newEntry.usage.Remain
-                                if r < 0 { // unlimited fast requests
-                                        r = 1 << 30
-                                }
-                                score = r
-                        } else if prevCredits > 0 {
-                                score = prevCredits
-                        }
-                        accountPool.ReenableIfCredits(sa.Account.UID, score)
-                }
-                results = append(results, entry)
-        }
-        return map[string]any{
-                "provider":    providerName,
-                "results":     results,
-                "server_time": time.Now().Format("2006-01-02 15:04:05"),
-        }
+	files, err := hostAuthList()
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	// v0.12.28: auth_index 失效检测。面板传了 index 却匹配不到任何文件
+	// （凭证被 migrate/heal/adopt 改名或宿主重建过），改按 uid 匹配；
+	// 两者都匹配不到时返回明确的 stale_index 错误而不是空 results
+	// （空 results 曾被面板渲染成"签到完成"假成功）。
+	targets := make([]pluginapi.HostAuthFileEntry, 0, len(files))
+	indexMatched := false
+	for _, f := range files {
+		if body.AuthIndex != "" && f.AuthIndex == body.AuthIndex {
+			indexMatched = true
+		}
+	}
+	fallbackByUID := !indexMatched && body.AuthIndex != "" && body.UID != ""
+	for _, f := range files {
+		if body.AuthIndex == "" {
+			// all accounts
+		} else if indexMatched {
+			if f.AuthIndex != body.AuthIndex {
+				continue
+			}
+		} else if fallbackByUID {
+			// stale auth_index → uid 兜底
+		} else {
+			continue
+		}
+		targets = append(targets, f)
+	}
+	if body.AuthIndex != "" && len(targets) == 0 {
+		return map[string]any{
+			"provider":    providerName,
+			"results":     results,
+			"error":       "stale_index: auth_index 不存在（凭证可能已被重命名/重注册），请刷新列表后重试",
+			"stale_index": true,
+		}
+	}
+	for _, f := range targets {
+		entry := map[string]any{"auth_index": f.AuthIndex, "uid": "", "nickname": ""}
+		sa, err := hostAuthGet(f.AuthIndex)
+		if err != nil {
+			entry["error"] = "load auth: " + err.Error()
+			results = append(results, entry)
+			continue
+		}
+		if fallbackByUID && strings.TrimSpace(sa.Account.UID) != strings.TrimSpace(body.UID) {
+			continue // uid 兜底时只处理同 uid 账号
+		}
+		entry["uid"] = sa.Account.UID
+		entry["nickname"] = sa.Account.Nickname
+		a := hostAuthAsUpstream(sa)
+		// v0.12.32: 官方客户端 claim 要求 x-device-id 携带真实绑定的数字 did
+		// （BlueChonk 逆向报告 FINDINGS §四/§五；did 缺失/未绑定时服务端
+		// 可能 code=0 但静默不入账）。导入的账号文件可能缺 deviceId ——
+		// 透出诊断，别让"签到成功但不到账"隐形。
+		entry["device_id_set"] = strings.TrimSpace(a.DeviceID) != ""
+		if strings.TrimSpace(a.DeviceID) == "" {
+			// v0.12.43: 从"告警后硬签"改为硬性拦截 —— 官方 claim 要求
+			// x-device-id（FINDINGS §四/§五：缺失时服务端可能 code=0 但
+			// 静默不入账），硬签只会产生"成功但不到账"的假结果。给出
+			// 可行动的修复路径；账号仍在面板展示，重新登录即可补齐。
+			entry["error"] = "缺少 deviceId：官方 claim 要求 x-device-id（真实绑定 did），凭证缺设备身份，硬签可能成功但不入账 —— 请用插件 OAuth 重新登录该账号补齐后再签"
+			results = append(results, entry)
+			continue
+		}
+		// v0.12.38: 签到前保鲜。宿主对 trae 无主动刷新调度（无 RefreshLead/
+		// refresh_interval 元数据，CLIProxyAPI auto_refresh_loop 只调度内置
+		// provider），面板签到读的是 hostAuthGet 快照；若执行器侧已轮换而
+		// 快照滞后，签到会撞过期 token。过期即刷新，并写回宿主——refreshToken
+		// 轮换后不落盘，下次宿主侧刷新用旧 token 必失败（会话死）。
+		if a.RefreshTokenValue() != "" {
+			refreshed, rerr := upstreamClient.RefreshTokenIfNeeded(a, 0)
+			if rerr != nil {
+				log.Printf("checkin %s: pre-flight refresh failed: %v", sa.Account.UID, rerr)
+				entry["refresh_error"] = rerr.Error()
+			} else if refreshed {
+				name := f.Name
+				if strings.TrimSpace(name) == "" {
+					name = credentialFileName(a.Variant, a.UID)
+				}
+				if serr := hostAuthSave(name, storageJSONForAuth(a)); serr != nil {
+					log.Printf("checkin %s: CRITICAL token refreshed but persist failed: %v — host copy may hold a stale refreshToken", sa.Account.UID, serr)
+					entry["persist_error"] = serr.Error()
+				} else {
+					entry["refreshed"] = true
+				}
+			}
+		}
+		entry["expires_at"] = a.ExpiresAt
+		// v0.12.65: 本轮 attempt 生成全新签到设备号，贯穿 status→claim→回查
+		// （随机 16 位数字串实测可领，登录 hex32 必败 9074——见 upstream.NewCheckinDeviceID）。
+		did := upstream.NewCheckinDeviceID()
+		status, err := upstreamClient.CheckinStatus(a, did)
+		if err != nil {
+			entry["error"] = "checkin_status: " + err.Error()
+			notifyCheckinRateLimited(err)
+			results = append(results, entry)
+			continue
+		}
+		// v0.12.40: credits 语义修正（反编译官方 TraeWork CN 2.3.81345 定案）——
+		// status.credits 是"每日签到奖励数额"（官方卡片 "Daily check-in:
+		// {credits} credits"），非钱包余额；签到后不增长，旧"签到后-签到前"
+		// 差值算法作废。入账证据优先取 claim 响应携带的数额，缺省回退
+		// 签到前奖励配置（基础 credits + 加码 extra_credits）。
+		beforeCredits := status.Credits
+		awarded := int64(-1)
+		if !status.CheckedIn && !status.DidCheckedIn && status.Enable {
+			claim, err := upstreamClient.CheckinClaim(a, did)
+			if err != nil {
+				entry["error"] = "checkin_claim: " + err.Error()
+				// v0.12.33: 手动签到撞 9074 也纳入当日退避重试（与调度器同节奏）。
+				notifyCheckinRateLimited(err)
+			} else {
+				entry["claim_code"] = claim.Code
+				entry["claim_message"] = claim.Message
+				// 入账证据：claim 响应携带的数额优先。
+				if claim.ClaimCredits != nil {
+					entry["claim_credits"] = *claim.ClaimCredits
+					awarded = *claim.ClaimCredits
+				} else {
+					awarded = beforeCredits + status.ExtraCredits
+				}
+				// 领取成功后重查状态（对齐官方 workbench claim 后 refresh）。
+				if after, stErr := upstreamClient.CheckinStatus(a, did); stErr == nil {
+					status = after
+					// v0.12.65: code:0 存在幂等假成功（当日已签账号任何 device_id 都回 code:0），
+					// checked_in 未翻转 -> 标记未确认，面板如实展示，不伪装成功。
+					if !after.CheckedIn && !after.DidCheckedIn {
+						entry["claim_unconfirmed"] = true
+					}
+				}
+			}
+		}
+		entry["already_checked_in"] = status.CheckedIn || status.DidCheckedIn
+		entry["credits"] = status.Credits
+		if status.ExtraCredits > 0 {
+			entry["extra_credits"] = status.ExtraCredits
+		}
+		if awarded >= 0 {
+			entry["awarded"] = awarded
+		}
+		// Refresh cached checkin / credits.
+		// v0.12.40 语义：e.credits = SUBSCRIPTION pack quota（订阅包余额）；
+		// e.checkin.Credits = 签到奖励数额（非钱包、非可花余额）。此前
+		// "签到 150 积分一刷新就归零"即误把奖励当余额存进 e.credits 所致。
+		prevCredits := int64(-1) // -1 = unknown, keep previous
+		prevUsageFilled := false
+		if v, ok := accountCache.Load(f.AuthIndex); ok {
+			if e, ok2 := v.(*accountCacheEntry); ok2 {
+				prevCredits = e.credits
+				prevUsageFilled = e.usageFilled
+			}
+		}
+		newEntry := &accountCacheEntry{
+			credits: prevCredits,
+			checkin: &checkinStatus{
+				CheckedIn: status.CheckedIn || status.DidCheckedIn,
+				Credits:   status.Credits,
+				Enable:    status.Enable,
+			},
+			fetched:     time.Now(),
+			usageFilled: prevUsageFilled,
+		}
+		if prevUsageFilled {
+			newEntry.usage = cacheUsage(f.AuthIndex)
+			newEntry.plan = cachePlan(f.AuthIndex)
+		}
+		accountCache.Store(f.AuthIndex, newEntry)
+		// Re-enable account in pool if checkin restored credits.
+		// v0.12.28: pool score prefers the usage-model remain when known
+		// (fast/basic). v0.12.40: credits 是奖励配置而非可花余额，不再叠加进
+		// 评分（旧 pack+wallet 叠加源于同一误读）。
+		if accountPool != nil {
+			score := int64(0)
+			if prevUsageFilled && newEntry.usage.RemainKnown && newEntry.usage.Remain > 0 {
+				r := newEntry.usage.Remain
+				if r < 0 { // unlimited fast requests
+					r = 1 << 30
+				}
+				score = r
+			} else if prevCredits > 0 {
+				score = prevCredits
+			}
+			accountPool.ReenableIfCredits(sa.Account.UID, score)
+		}
+		results = append(results, entry)
+	}
+	return map[string]any{
+		"provider":    providerName,
+		"results":     results,
+		"server_time": time.Now().Format("2006-01-02 15:04:05"),
+	}
 }
 
 // cacheUsage/cachePlan read the current usage snapshot without mutating cache.
 func cacheUsage(authIndex string) (u upstream.UsageSummary) {
-        if v, ok := accountCache.Load(authIndex); ok {
-                if e, ok2 := v.(*accountCacheEntry); ok2 {
-                        return e.usage
-                }
-        }
-        return
+	if v, ok := accountCache.Load(authIndex); ok {
+		if e, ok2 := v.(*accountCacheEntry); ok2 {
+			return e.usage
+		}
+	}
+	return
 }
 func cachePlan(authIndex string) (p string) {
-        if v, ok := accountCache.Load(authIndex); ok {
-                if e, ok2 := v.(*accountCacheEntry); ok2 {
-                        return e.plan
-                }
-        }
-        return
+	if v, ok := accountCache.Load(authIndex); ok {
+		if e, ok2 := v.(*accountCacheEntry); ok2 {
+			return e.plan
+		}
+	}
+	return
 }
 
 // handleCreditsQuery fetches live credits from upstream for one (auth_index)
 // or all accounts. Updates the cache so the next /accounts reflects the new
 // numbers.
 func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
-        // Read auth_index from query string (?auth_index=xxx) first, then body JSON.
-        // panel.html uses GET /credits?auth_index=xxx, so req.Query is the primary source.
-        authIndex := ""
-        if req.Query != nil {
-                authIndex = strings.TrimSpace(req.Query.Get("auth_index"))
-        }
-        if authIndex == "" && len(req.Body) > 0 {
-                var body struct {
-                        AuthIndex string `json:"auth_index"`
-                }
-                _ = json.Unmarshal(req.Body, &body)
-                authIndex = body.AuthIndex
-        }
-        results := []map[string]any{}
+	// Read auth_index from query string (?auth_index=xxx) first, then body JSON.
+	// panel.html uses GET /credits?auth_index=xxx, so req.Query is the primary source.
+	authIndex := ""
+	if req.Query != nil {
+		authIndex = strings.TrimSpace(req.Query.Get("auth_index"))
+	}
+	if authIndex == "" && len(req.Body) > 0 {
+		var body struct {
+			AuthIndex string `json:"auth_index"`
+		}
+		_ = json.Unmarshal(req.Body, &body)
+		authIndex = body.AuthIndex
+	}
+	results := []map[string]any{}
 
-        files, err := hostAuthList()
-        if err != nil {
-                return map[string]any{"error": err.Error()}
-        }
-        for _, f := range files {
-                if authIndex != "" && f.AuthIndex != authIndex {
-                        continue
-                }
-                entry := map[string]any{"auth_index": f.AuthIndex, "uid": "", "nickname": ""}
-                sa, err := hostAuthGet(f.AuthIndex)
-                if err != nil {
-                        entry["error"] = "load auth: " + err.Error()
-                        results = append(results, entry)
-                        continue
-                }
-                entry["uid"] = sa.Account.UID
-                entry["nickname"] = sa.Account.Nickname
-                a := hostAuthAsUpstream(sa)
-                usage, err := upstreamClient.UserEntUsage(a)
-                if err != nil {
-                        entry["error"] = "ent_usage: " + err.Error()
-                        results = append(results, entry)
-                        continue
-                }
-                // v0.12.28: 套餐剩余对齐 cockpit-tools 的用量模型（trae.ts）：
-                //   fast  → 速通可用次数（-1 无限）
-                //   basic → 选中包 basic_usage_limit - basic_usage_amount（含 bonus）
-                //   unknown → 剩余不可知（面板显示 "--"；旧代码读不存在的
-                //             credits_limit 字段把这里渲染成"剩余 0 积分 · 00%"）。
-                sum := upstream.SummarizeUsage(usage.UserEntitlementPackList, true)
-                // v0.12.34: 官方 cashier 同口径积分池（Σ max(credits_limit-usage,0)，
-                // -1 不限）。这是模型调用真正扣减的池子——此前把签到钱包当
-                // "剩余积分"展示，与官方数字对不上（用户实测反馈）。
-                sum.CreditsPool = upstream.CreditsPoolUsage(usage.UserEntitlementPackList, usage.IsCreditsBilling)
-                selected := upstream.SelectActivePack(usage.UserEntitlementPackList, true)
-                plan := "Unknown"
-                if selected != nil {
-                        // 上游 identityStr 优先取选中包 display_desc，回退 product_type 映射。
-                        if d := strings.TrimSpace(selected.DisplayDesc); d != "" {
-                                plan = d
-                        } else {
-                                plan = upstream.ProductTypeIdentity(selected.EntitlementBaseInfo.ProductType, true)
-                        }
-                }
-                // v0.12.29: ide_user_pay_status —— 上游刷新链路的第二个数据源
-                // （trae_account_core_refresh.rs 先 pay_status 再 ent_usage）。Free CN/SOLO
-                // 的 ent_usage pack 里没有可解析 quota，剩余维度（快请求/月、SOLO 并发）
-                // 只在 pay_status 的 detail/quota 里。best-effort：失败不阻塞 credits。
-                if ps, psErr := upstreamClient.PayStatus(a); psErr == nil && ps.Code == 0 {
-                        sum.FastRequestPer = ps.FastRequestPer()
-                        sum.SoloParallel = ps.SoloParallelLimit()
-                        sum.SoloPackage = ps.HasSoloPackage()
-                        sum.PlanType = ps.PlanIdentity()
-                        // 选中包缺失时回退 user_pay_identity_str 作为计划显示
-                        // （上游 account.plan_type 即来自这里）。
-                        if selected == nil {
-                                if id := ps.PlanIdentity(); id != "" {
-                                        plan = id
-                                }
-                        }
-                }
-                // v0.12.44: CheckLogin —— 登录态 + 服务端绑定设备探测（best-effort，
-                // cockpit-tools 刷新链路同款，trae_account_core_refresh.rs:1035-1045）。
-                // BoundDeviceID 与本账号 deviceId 不一致 / DeviceBindStatus != BOUND /
-                // IsLogin=false → 签到风控高危（9074 高危画像），日志告警 + 面板亮标。
-                bind := &bindStatus{}
-                if cl, clErr := upstreamClient.CheckLogin(a); clErr == nil && cl != nil {
-                        bind.Known = true
-                        bind.IsLogin = cl.IsLogin
-                        bind.BoundDeviceID = cl.BoundDeviceID
-                        bind.DeviceBindStatus = cl.DeviceBindStatus
-                        bind.DeviceMatch = cl.BoundDeviceID != "" && cl.BoundDeviceID == a.DeviceID
-                        entry["is_login"] = cl.IsLogin
-                        if cl.BoundDeviceID != "" {
-                                entry["bound_device_id"] = cl.BoundDeviceID
-                                entry["device_bind_status"] = cl.DeviceBindStatus
-                                entry["device_match"] = bind.DeviceMatch
-                        }
-                        if !cl.IsLogin || (cl.DeviceBindStatus != "" && cl.DeviceBindStatus != "BOUND") || (cl.BoundDeviceID != "" && cl.BoundDeviceID != a.DeviceID) {
-                                log.Printf("checkin device-bind warning uid=%s: isLogin=%v bindStatus=%q bound=%q local=%q — 绑定不一致为 9074 风控高危，建议面板退出重新登录以重绑设备", sa.Account.UID, cl.IsLogin, cl.DeviceBindStatus, cl.BoundDeviceID, a.DeviceID)
-                        }
-                } else if clErr != nil {
-                        entry["checklogin_error"] = clErr.Error()
-                }
-                entry["usage_model"] = sum.UsageModel
-                entry["remain_known"] = sum.RemainKnown
-                if sum.RemainKnown {
-                        entry["total_remain"] = sum.Remain
-                } else {
-                        entry["total_remain"] = 0 // 向后兼容；remain_known=false 时面板显示 "--"
-                }
-                entry["plan"] = plan
-                // v0.12.34: 积分池透出（面板"剩余积分"对齐官方口径）。
-                entry["credits_pool_known"] = sum.CreditsPool.Known
-                if sum.CreditsPool.Known {
-                        entry["credits_pool_remain"] = sum.CreditsPool.Remain
-                        entry["credits_pool_unlimited"] = sum.CreditsPool.Unlimited
-                }
-                if sum.UsageModel == "basic" {
-                        entry["used"] = sum.Used
-                        entry["total"] = sum.Total
-                }
-                if sum.UsageModel == "fast" {
-                        entry["fast_limit"] = sum.FastLimit
-                        entry["fast_used"] = sum.FastUsed
-                }
-                // v0.12.29: pay_status 补充维度透传（面板"快请求/月 / Solo 并发"）。
-                if sum.FastRequestPer != nil {
-                        entry["fast_request_per"] = *sum.FastRequestPer
-                }
-                if sum.SoloParallel != nil {
-                        entry["solo_parallel"] = *sum.SoloParallel
-                }
-                if sum.SoloPackage {
-                        entry["solo_package"] = true
-                }
-                if sum.PlanType != "" {
-                        entry["plan_type"] = sum.PlanType
-                }
-                // v0.12.25: also fetch the CHECK-IN status. v0.12.40: credits 语义
-                // 修正——它是签到奖励数额（非钱包），仅作展示与"已签"判定，不再
-                // 计入池子评分/可花余额。
-                wallet := int64(-1)
-                checkedIn, enable := false, false
-                if st, stErr := upstreamClient.CheckinStatus(a); stErr == nil {
-                        wallet = st.Credits
-                        checkedIn, enable = st.CheckedIn || st.DidCheckedIn, st.Enable
-                } else {
-                        entry["checkin_status_error"] = stErr.Error()
-                }
-                if wallet >= 0 {
-                        entry["checkin_credits"] = wallet
-                        entry["checked_in"] = checkedIn
-                }
-                // Update cache + pool. e.credits stays pack-only (legacy field); the
-                // reward lives in e.checkin.Credits. v0.12.40: pool score = usage
-                // remain / credits pool only — the reward config is not spendable.
-                scoreRemain := int64(0)
-                if sum.RemainKnown {
-                        scoreRemain = sum.Remain
-                        if scoreRemain < 0 { // unlimited
-                                scoreRemain = 1 << 30
-                        }
-                }
-                if sum.CreditsPool.Known { // v0.12.34: 积分池参与池子评分
-                        pr := sum.CreditsPool.Remain
-                        if pr < 0 {
-                                pr = 1 << 30
-                        }
-                        if pr > scoreRemain {
-                                scoreRemain = pr
-                        }
-                }
-                accountCache.Store(f.AuthIndex, &accountCacheEntry{
-                        credits:     scoreRemain,
-                        checkin:     &checkinStatus{CheckedIn: checkedIn, Credits: wallet, Enable: enable},
-                        fetched:     time.Now(),
-                        usage:       sum,
-                        usageFilled: true,
-                        plan:        plan,
-                        bind:        bind,
-                })
-                if accountPool != nil {
-                        // v0.12.40: 不再叠加奖励配置（wallet 变量名保留为历史语义，
-                        // 现含义 = 签到奖励数额）。
-                        accountPool.SetCredits(sa.Account.UID, scoreRemain)
-                }
-                results = append(results, entry)
-        }
-        return map[string]any{
-                "provider":    providerName,
-                "results":     results,
-                "server_time": time.Now().Format("2006-01-02 15:04:05"),
-        }
+	files, err := hostAuthList()
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	for _, f := range files {
+		if authIndex != "" && f.AuthIndex != authIndex {
+			continue
+		}
+		entry := map[string]any{"auth_index": f.AuthIndex, "uid": "", "nickname": ""}
+		sa, err := hostAuthGet(f.AuthIndex)
+		if err != nil {
+			entry["error"] = "load auth: " + err.Error()
+			results = append(results, entry)
+			continue
+		}
+		entry["uid"] = sa.Account.UID
+		entry["nickname"] = sa.Account.Nickname
+		a := hostAuthAsUpstream(sa)
+		usage, err := upstreamClient.UserEntUsage(a)
+		if err != nil {
+			entry["error"] = "ent_usage: " + err.Error()
+			results = append(results, entry)
+			continue
+		}
+		// v0.12.28: 套餐剩余对齐 cockpit-tools 的用量模型（trae.ts）：
+		//   fast  → 速通可用次数（-1 无限）
+		//   basic → 选中包 basic_usage_limit - basic_usage_amount（含 bonus）
+		//   unknown → 剩余不可知（面板显示 "--"；旧代码读不存在的
+		//             credits_limit 字段把这里渲染成"剩余 0 积分 · 00%"）。
+		sum := upstream.SummarizeUsage(usage.UserEntitlementPackList, true)
+		// v0.12.34: 官方 cashier 同口径积分池（Σ max(credits_limit-usage,0)，
+		// -1 不限）。这是模型调用真正扣减的池子——此前把签到钱包当
+		// "剩余积分"展示，与官方数字对不上（用户实测反馈）。
+		sum.CreditsPool = upstream.CreditsPoolUsage(usage.UserEntitlementPackList, usage.IsCreditsBilling)
+		selected := upstream.SelectActivePack(usage.UserEntitlementPackList, true)
+		plan := "Unknown"
+		if selected != nil {
+			// 上游 identityStr 优先取选中包 display_desc，回退 product_type 映射。
+			if d := strings.TrimSpace(selected.DisplayDesc); d != "" {
+				plan = d
+			} else {
+				plan = upstream.ProductTypeIdentity(selected.EntitlementBaseInfo.ProductType, true)
+			}
+		}
+		// v0.12.29: ide_user_pay_status —— 上游刷新链路的第二个数据源
+		// （trae_account_core_refresh.rs 先 pay_status 再 ent_usage）。Free CN/SOLO
+		// 的 ent_usage pack 里没有可解析 quota，剩余维度（快请求/月、SOLO 并发）
+		// 只在 pay_status 的 detail/quota 里。best-effort：失败不阻塞 credits。
+		if ps, psErr := upstreamClient.PayStatus(a); psErr == nil && ps.Code == 0 {
+			sum.FastRequestPer = ps.FastRequestPer()
+			sum.SoloParallel = ps.SoloParallelLimit()
+			sum.SoloPackage = ps.HasSoloPackage()
+			sum.PlanType = ps.PlanIdentity()
+			// 选中包缺失时回退 user_pay_identity_str 作为计划显示
+			// （上游 account.plan_type 即来自这里）。
+			if selected == nil {
+				if id := ps.PlanIdentity(); id != "" {
+					plan = id
+				}
+			}
+		}
+		// v0.12.44: CheckLogin —— 登录态 + 服务端绑定设备探测（best-effort，
+		// cockpit-tools 刷新链路同款，trae_account_core_refresh.rs:1035-1045）。
+		// BoundDeviceID 与本账号 deviceId 不一致 / DeviceBindStatus != BOUND /
+		// IsLogin=false → 签到风控高危（9074 高危画像），日志告警 + 面板亮标。
+		bind := &bindStatus{}
+		if cl, clErr := upstreamClient.CheckLogin(a); clErr == nil && cl != nil {
+			bind.Known = true
+			bind.IsLogin = cl.IsLogin
+			bind.BoundDeviceID = cl.BoundDeviceID
+			bind.DeviceBindStatus = cl.DeviceBindStatus
+			bind.DeviceMatch = cl.BoundDeviceID != "" && cl.BoundDeviceID == a.DeviceID
+			entry["is_login"] = cl.IsLogin
+			if cl.BoundDeviceID != "" {
+				entry["bound_device_id"] = cl.BoundDeviceID
+				entry["device_bind_status"] = cl.DeviceBindStatus
+				entry["device_match"] = bind.DeviceMatch
+			}
+			if !cl.IsLogin || (cl.DeviceBindStatus != "" && cl.DeviceBindStatus != "BOUND") || (cl.BoundDeviceID != "" && cl.BoundDeviceID != a.DeviceID) {
+				log.Printf("checkin device-bind warning uid=%s: isLogin=%v bindStatus=%q bound=%q local=%q — 绑定不一致为 9074 风控高危，建议面板退出重新登录以重绑设备", sa.Account.UID, cl.IsLogin, cl.DeviceBindStatus, cl.BoundDeviceID, a.DeviceID)
+			}
+		} else if clErr != nil {
+			entry["checklogin_error"] = clErr.Error()
+		}
+		entry["usage_model"] = sum.UsageModel
+		entry["remain_known"] = sum.RemainKnown
+		if sum.RemainKnown {
+			entry["total_remain"] = sum.Remain
+		} else {
+			entry["total_remain"] = 0 // 向后兼容；remain_known=false 时面板显示 "--"
+		}
+		entry["plan"] = plan
+		// v0.12.34: 积分池透出（面板"剩余积分"对齐官方口径）。
+		entry["credits_pool_known"] = sum.CreditsPool.Known
+		if sum.CreditsPool.Known {
+			entry["credits_pool_remain"] = sum.CreditsPool.Remain
+			entry["credits_pool_unlimited"] = sum.CreditsPool.Unlimited
+		}
+		if sum.UsageModel == "basic" {
+			entry["used"] = sum.Used
+			entry["total"] = sum.Total
+		}
+		if sum.UsageModel == "fast" {
+			entry["fast_limit"] = sum.FastLimit
+			entry["fast_used"] = sum.FastUsed
+		}
+		// v0.12.29: pay_status 补充维度透传（面板"快请求/月 / Solo 并发"）。
+		if sum.FastRequestPer != nil {
+			entry["fast_request_per"] = *sum.FastRequestPer
+		}
+		if sum.SoloParallel != nil {
+			entry["solo_parallel"] = *sum.SoloParallel
+		}
+		if sum.SoloPackage {
+			entry["solo_package"] = true
+		}
+		if sum.PlanType != "" {
+			entry["plan_type"] = sum.PlanType
+		}
+		// v0.12.25: also fetch the CHECK-IN status. v0.12.40: credits 语义
+		// 修正——它是签到奖励数额（非钱包），仅作展示与"已签"判定，不再
+		// 计入池子评分/可花余额。
+		wallet := int64(-1)
+		checkedIn, enable := false, false
+		if st, stErr := upstreamClient.CheckinStatus(a); stErr == nil {
+			wallet = st.Credits
+			checkedIn, enable = st.CheckedIn || st.DidCheckedIn, st.Enable
+		} else {
+			entry["checkin_status_error"] = stErr.Error()
+		}
+		if wallet >= 0 {
+			entry["checkin_credits"] = wallet
+			entry["checked_in"] = checkedIn
+		}
+		// Update cache + pool. e.credits stays pack-only (legacy field); the
+		// reward lives in e.checkin.Credits. v0.12.40: pool score = usage
+		// remain / credits pool only — the reward config is not spendable.
+		scoreRemain := int64(0)
+		if sum.RemainKnown {
+			scoreRemain = sum.Remain
+			if scoreRemain < 0 { // unlimited
+				scoreRemain = 1 << 30
+			}
+		}
+		if sum.CreditsPool.Known { // v0.12.34: 积分池参与池子评分
+			pr := sum.CreditsPool.Remain
+			if pr < 0 {
+				pr = 1 << 30
+			}
+			if pr > scoreRemain {
+				scoreRemain = pr
+			}
+		}
+		accountCache.Store(f.AuthIndex, &accountCacheEntry{
+			credits:     scoreRemain,
+			checkin:     &checkinStatus{CheckedIn: checkedIn, Credits: wallet, Enable: enable},
+			fetched:     time.Now(),
+			usage:       sum,
+			usageFilled: true,
+			plan:        plan,
+			bind:        bind,
+		})
+		if accountPool != nil {
+			// v0.12.40: 不再叠加奖励配置（wallet 变量名保留为历史语义，
+			// 现含义 = 签到奖励数额）。
+			accountPool.SetCredits(sa.Account.UID, scoreRemain)
+		}
+		results = append(results, entry)
+	}
+	return map[string]any{
+		"provider":    providerName,
+		"results":     results,
+		"server_time": time.Now().Format("2006-01-02 15:04:05"),
+	}
 }
 
 func max64(a, b int64) int64 {
-        if a > b {
-                return a
-        }
-        return b
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // handleRefresh forces an ExchangeToken refresh on every account whose token
@@ -970,85 +970,85 @@ func max64(a, b int64) int64 {
 // is the host's responsibility (we only mutate the in-memory Auth and trigger
 // upstream refresh); the next host.auth.refresh RPC will persist the new tokens.
 func handleRefresh() map[string]any {
-        files, err := hostAuthList()
-        if err != nil {
-                return map[string]any{"error": err.Error()}
-        }
-        results := []map[string]any{}
-        for _, f := range files {
-                entry := map[string]any{"auth_index": f.AuthIndex, "uid": "", "nickname": ""}
-                sa, err := hostAuthGet(f.AuthIndex)
-                if err != nil {
-                        entry["error"] = "load auth: " + err.Error()
-                        results = append(results, entry)
-                        continue
-                }
-                entry["uid"] = sa.Account.UID
-                entry["nickname"] = sa.Account.Nickname
-                a := hostAuthAsUpstream(sa)
-                refreshed, err := upstreamClient.RefreshTokenIfNeeded(a, defaultRefreshSkew)
-                if err != nil {
-                        entry["error"] = "refresh: " + err.Error()
-                        results = append(results, entry)
-                        continue
-                }
-                entry["refreshed"] = refreshed
-                results = append(results, entry)
-        }
-        return map[string]any{
-                "provider":    providerName,
-                "results":     results,
-                "server_time": time.Now().Format("2006-01-02 15:04:05"),
-        }
+	files, err := hostAuthList()
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	results := []map[string]any{}
+	for _, f := range files {
+		entry := map[string]any{"auth_index": f.AuthIndex, "uid": "", "nickname": ""}
+		sa, err := hostAuthGet(f.AuthIndex)
+		if err != nil {
+			entry["error"] = "load auth: " + err.Error()
+			results = append(results, entry)
+			continue
+		}
+		entry["uid"] = sa.Account.UID
+		entry["nickname"] = sa.Account.Nickname
+		a := hostAuthAsUpstream(sa)
+		refreshed, err := upstreamClient.RefreshTokenIfNeeded(a, defaultRefreshSkew)
+		if err != nil {
+			entry["error"] = "refresh: " + err.Error()
+			results = append(results, entry)
+			continue
+		}
+		entry["refreshed"] = refreshed
+		results = append(results, entry)
+	}
+	return map[string]any{
+		"provider":    providerName,
+		"results":     results,
+		"server_time": time.Now().Format("2006-01-02 15:04:05"),
+	}
 }
 
 // hostAuthSave persists credential JSON via host.auth.save RPC.
 // Used by executor to write back refreshed tokens so they survive CPA restart.
 func hostAuthSave(name string, raw []byte) error {
-        // Use pluginapi.HostAuthSaveRequest so JSON field (json.RawMessage) is
-        // embedded raw, NOT base64-encoded (which map[string]any{"json": raw} would do).
-        saveReq := pluginapi.HostAuthSaveRequest{
-                Name: name,
-                JSON: raw,
-        }
-        saveBody, _ := json.Marshal(saveReq)
-        rawResp, err := hostCall(pluginabi.MethodHostAuthSave, saveBody)
-        if err != nil {
-                return fmt.Errorf("host.auth.save RPC: %w", err)
-        }
-        var env envelope
-        if err := json.Unmarshal(rawResp, &env); err != nil || !env.OK {
-                return fmt.Errorf("host.auth.save: bad envelope")
-        }
-        return nil
+	// Use pluginapi.HostAuthSaveRequest so JSON field (json.RawMessage) is
+	// embedded raw, NOT base64-encoded (which map[string]any{"json": raw} would do).
+	saveReq := pluginapi.HostAuthSaveRequest{
+		Name: name,
+		JSON: raw,
+	}
+	saveBody, _ := json.Marshal(saveReq)
+	rawResp, err := hostCall(pluginabi.MethodHostAuthSave, saveBody)
+	if err != nil {
+		return fmt.Errorf("host.auth.save RPC: %w", err)
+	}
+	var env envelope
+	if err := json.Unmarshal(rawResp, &env); err != nil || !env.OK {
+		return fmt.Errorf("host.auth.save: bad envelope")
+	}
+	return nil
 }
 
 // storageJSONForAuth 构建嵌套形 credential JSON（host.auth.save 载荷）。
 // type/provider 字段必须有——CPA 按它们把文件路由给本插件（v0.12.6+）。
 func storageJSONForAuth(a *auth.Auth) []byte {
-        storageJSON, _ := json.MarshalIndent(map[string]any{
-                "type":     providerName,
-                "provider": providerName,
-                "auth": map[string]any{
-                        "accessToken":  a.AccessToken,
-                        "refreshToken": a.RefreshToken,
-                        "expiresAt":    a.ExpiresAt,
-                        "domain":       a.Domain,
-                        "apiHost":      a.APIHost,
-                        "machineId":    a.MachineID,
-                        "deviceId":     a.DeviceID,
-                        // v0.12.6: keep the parsed variant — dropping it made a solo
-                        // account degrade to cn on refresh/import.
-                        "variant": a.Variant,
-                },
-                "account": map[string]any{
-                        "uid":          a.UID,
-                        "enterpriseId": a.EnterpriseID,
-                        "nickname":     a.Nickname,
-                },
-                "disabled": false,
-        }, "", "  ")
-        return storageJSON
+	storageJSON, _ := json.MarshalIndent(map[string]any{
+		"type":     providerName,
+		"provider": providerName,
+		"auth": map[string]any{
+			"accessToken":  a.AccessToken,
+			"refreshToken": a.RefreshToken,
+			"expiresAt":    a.ExpiresAt,
+			"domain":       a.Domain,
+			"apiHost":      a.APIHost,
+			"machineId":    a.MachineID,
+			"deviceId":     a.DeviceID,
+			// v0.12.6: keep the parsed variant — dropping it made a solo
+			// account degrade to cn on refresh/import.
+			"variant": a.Variant,
+		},
+		"account": map[string]any{
+			"uid":          a.UID,
+			"enterpriseId": a.EnterpriseID,
+			"nickname":     a.Nickname,
+		},
+		"disabled": false,
+	}, "", "  ")
+	return storageJSON
 }
 
 // mergeAuthStorage v0.12.44 — refresh 写回从"按内存结构重建"改为"合并进现有
@@ -1060,68 +1060,68 @@ func storageJSONForAuth(a *auth.Auth) []byte {
 // 绑定设备、profile 富字段……）原样保留；existing 不可解析或缺 auth 块时
 // 回退旧的重建行为（兼容 legacy 扁平形）。
 func mergeAuthStorage(existing []byte, a *auth.Auth) []byte {
-        base := map[string]any{}
-        if err := json.Unmarshal(existing, &base); err != nil {
-                return storageJSONForAuth(a)
-        }
-        authMap, ok := base["auth"].(map[string]any)
-        if !ok {
-                return storageJSONForAuth(a)
-        }
-        authMap["accessToken"] = a.AccessToken
-        authMap["refreshToken"] = a.RefreshToken
-        authMap["expiresAt"] = a.ExpiresAt
-        authMap["domain"] = a.Domain
-        authMap["apiHost"] = a.APIHost
-        if a.MachineID != "" {
-                authMap["machineId"] = a.MachineID
-        }
-        if a.DeviceID != "" {
-                authMap["deviceId"] = a.DeviceID
-        }
-        if a.Variant != "" {
-                authMap["variant"] = a.Variant
-        }
-        accountMap, okAcc := base["account"].(map[string]any)
-        if !okAcc {
-                accountMap = map[string]any{}
-                base["account"] = accountMap
-        }
-        if a.UID != "" {
-                accountMap["uid"] = a.UID
-        }
-        if a.Nickname != "" {
-                accountMap["nickname"] = a.Nickname
-        }
-        if a.EnterpriseID != "" {
-                accountMap["enterpriseId"] = a.EnterpriseID
-        }
-        base["type"] = providerName
-        base["provider"] = providerName
-        out, err := json.MarshalIndent(base, "", "  ")
-        if err != nil {
-                return storageJSONForAuth(a)
-        }
-        return out
+	base := map[string]any{}
+	if err := json.Unmarshal(existing, &base); err != nil {
+		return storageJSONForAuth(a)
+	}
+	authMap, ok := base["auth"].(map[string]any)
+	if !ok {
+		return storageJSONForAuth(a)
+	}
+	authMap["accessToken"] = a.AccessToken
+	authMap["refreshToken"] = a.RefreshToken
+	authMap["expiresAt"] = a.ExpiresAt
+	authMap["domain"] = a.Domain
+	authMap["apiHost"] = a.APIHost
+	if a.MachineID != "" {
+		authMap["machineId"] = a.MachineID
+	}
+	if a.DeviceID != "" {
+		authMap["deviceId"] = a.DeviceID
+	}
+	if a.Variant != "" {
+		authMap["variant"] = a.Variant
+	}
+	accountMap, okAcc := base["account"].(map[string]any)
+	if !okAcc {
+		accountMap = map[string]any{}
+		base["account"] = accountMap
+	}
+	if a.UID != "" {
+		accountMap["uid"] = a.UID
+	}
+	if a.Nickname != "" {
+		accountMap["nickname"] = a.Nickname
+	}
+	if a.EnterpriseID != "" {
+		accountMap["enterpriseId"] = a.EnterpriseID
+	}
+	base["type"] = providerName
+	base["provider"] = providerName
+	out, err := json.MarshalIndent(base, "", "  ")
+	if err != nil {
+		return storageJSONForAuth(a)
+	}
+	return out
 }
 
 // persistRefreshedAuth writes updated token fields back to host auth store
 // after a successful RefreshTokenIfNeeded in the executor path.
 func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *auth.Auth) {
-        // Derive file name from auth ID or StorageJSON.
-        fileName := req.AuthID
-        if fileName == "" {
-                // v0.12.27: per-variant fallback naming (solo → its own namespace).
-                fileName = credentialFileName(a.Variant, a.UID)
-        } else if !strings.HasSuffix(strings.ToLower(fileName), ".json") {
-                // v0.12.8: a uid-shaped AuthID would land as an extension-less
-                // file the watcher ignores, losing the refreshed token on restart.
-                fileName += ".json"
-        }
-        // v0.12.44: merge (preserve device keys + parity extras), don't rebuild.
-        if err := hostAuthSave(fileName, mergeAuthStorage(req.StorageJSON, a)); err != nil {
-                log.Printf("persist refreshed auth %s: %v", a.UID, err)
-        }
+	// Derive file name from auth ID or StorageJSON.
+	fileName := req.AuthID
+	if fileName == "" {
+		// v0.12.27: per-variant fallback naming (solo → its own namespace).
+		fileName = credentialFileName(a.Variant, a.UID)
+	} else if !strings.HasSuffix(strings.ToLower(fileName), ".json") {
+		// v0.12.8: a uid-shaped AuthID would land as an extension-less
+		// file the watcher ignores, losing the refreshed token on restart.
+		fileName += ".json"
+	}
+	// v0.12.44: merge (preserve device keys + parity extras), don't rebuild.
+	if err := hostAuthSave(fileName, mergeAuthStorage(req.StorageJSON, a)); err != nil {
+		log.Printf("persist refreshed auth %s: %v", a.UID, err)
+	}
 }
 
 // handleImportAuth imports a Trae credential JSON (nested or flat) into the
@@ -1129,36 +1129,36 @@ func persistRefreshedAuth(req pluginapi.ExecutorRequest, a *auth.Auth) {
 // This lets users paste a token from another tool (e.g. traework2api login.sh)
 // without going through the browser OAuth flow.
 func handleImportAuth(req pluginapi.ManagementRequest) map[string]any {
-        var body struct {
-                JSON json.RawMessage `json:"json"`
-                Raw  string          `json:"raw"`
-        }
-        _ = json.Unmarshal(req.Body, &body)
-        raw := []byte(strings.TrimSpace(body.Raw))
-        if len(body.JSON) > 0 {
-                raw = body.JSON
-        }
-        if len(raw) == 0 {
-                return map[string]any{"success": false, "error": "missing json/raw credential payload"}
-        }
-        a, err := auth.Parse(raw)
-        if err != nil {
-                return map[string]any{"success": false, "error": err.Error()}
-        }
-        // Build nested storage JSON for host.auth.save (v0.12.38: shared builder).
-        storageJSON := storageJSONForAuth(a)
-        // v0.12.27: per-variant namespace — an imported solo credential must
-        // not overwrite the cn file of the same Trae account.
-        fileName := credentialFileName(a.Variant, a.UID)
-        if err := hostAuthSave(fileName, storageJSON); err != nil {
-                return map[string]any{"success": false, "error": err.Error()}
-        }
-        // Register in pool.
-        accountPool.Add(a)
-        return map[string]any{
-                "success":  true,
-                "name":     fileName,
-                "uid":      a.UID,
-                "nickname": a.Nickname,
-        }
+	var body struct {
+		JSON json.RawMessage `json:"json"`
+		Raw  string          `json:"raw"`
+	}
+	_ = json.Unmarshal(req.Body, &body)
+	raw := []byte(strings.TrimSpace(body.Raw))
+	if len(body.JSON) > 0 {
+		raw = body.JSON
+	}
+	if len(raw) == 0 {
+		return map[string]any{"success": false, "error": "missing json/raw credential payload"}
+	}
+	a, err := auth.Parse(raw)
+	if err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+	// Build nested storage JSON for host.auth.save (v0.12.38: shared builder).
+	storageJSON := storageJSONForAuth(a)
+	// v0.12.27: per-variant namespace — an imported solo credential must
+	// not overwrite the cn file of the same Trae account.
+	fileName := credentialFileName(a.Variant, a.UID)
+	if err := hostAuthSave(fileName, storageJSON); err != nil {
+		return map[string]any{"success": false, "error": err.Error()}
+	}
+	// Register in pool.
+	accountPool.Add(a)
+	return map[string]any{
+		"success":  true,
+		"name":     fileName,
+		"uid":      a.UID,
+		"nickname": a.Nickname,
+	}
 }
