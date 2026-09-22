@@ -1910,7 +1910,10 @@ func handleExecExecute(request []byte) ([]byte, error) {
 	if err != nil {
 		if se, ok := err.(*upstream.SOLOStreamError); ok {
 			applyCooldown(a.UID, se.Kind())
-			err = soloStreamErrorCopy(se)
+			// v0.12.83: 这里原来只把错误 `aggregate: %w` 一层包装就返回，状态被
+			// 洗成"无状态"，宿主看不见账号配额已经耗尽，会继续选这个号。
+			return nil, upstreamStatusError(soloFaultStatus(se),
+				fmt.Errorf("aggregate: %w", soloStreamErrorCopy(se)))
 		}
 		return nil, fmt.Errorf("aggregate: %w", err)
 	}
@@ -1959,6 +1962,117 @@ func streamClose(streamID string) {
 	_, _ = hostCall(pluginabi.MethodHostStreamClose, body)
 }
 
+// soloFaultTracker 记录一次流里出现过的第一个流内错误。
+// convertSOLOStreamToOpenAI 是先回调 onErr、再吐出错误帧，所以 take() 可以用来
+// 判断"刚读到的这一帧是不是错误本身"。
+type soloFaultTracker struct {
+	mu    sync.Mutex
+	fault *upstream.SOLOStreamError
+	seen  bool
+}
+
+func (t *soloFaultTracker) record(se *upstream.SOLOStreamError) {
+	t.mu.Lock()
+	if t.fault == nil {
+		t.fault = se
+	}
+	t.seen = true
+	t.mu.Unlock()
+}
+
+// take 取走并清空当前待报告的错误。
+func (t *soloFaultTracker) take() *upstream.SOLOStreamError {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	fault := t.fault
+	t.fault = nil
+	return fault
+}
+
+// any 只问"这一路出过错没有"，不消费，用于决定能不能记 NoteSuccess。
+func (t *soloFaultTracker) any() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.seen
+}
+
+// soloFaultStatus 把流内业务码映射成宿主看得见的 HTTP 状态。
+// 上游把这些错误发成 HTTP 200 + 流内 error 帧，不带状态的话宿主只会看到
+// "成功但没内容"，既不会换号也不会冷却。
+//   - 1005/4008 账号配额耗尽 → 402，宿主换凭据并冷却该号；
+//   - 输入过大 → 413，请求级问题，不换号也不冷却；
+//   - 4001 模型不在当前通道 → 404，换下一家但不长冷却；
+//   - 其余 → 502。
+func soloFaultStatus(se *upstream.SOLOStreamError) int {
+	switch se.Kind() {
+	case upstream.ErrPlanLimit:
+		return http.StatusPaymentRequired
+	case upstream.ErrInputTooLarge:
+		return http.StatusRequestEntityTooLarge
+	case upstream.ErrModelUnavailable:
+		return http.StatusNotFound
+	default:
+		return http.StatusBadGateway
+	}
+}
+
+// streamChunkAnswers 判断一个已转发的 chunk 是否真的带了答案内容。
+// convertSOLOStreamToOpenAI 会先吐一个只有 role 的开场帧，所以"收到第一帧"
+// 并不等于"开始答话"，门必须按内容判断，否则永远放行。
+func streamChunkAnswers(chunk []byte) bool {
+	var frame struct {
+		Choices []struct {
+			Delta struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if errUnmarshal := json.Unmarshal(chunk, &frame); errUnmarshal != nil {
+		return false
+	}
+	for _, choice := range frame.Choices {
+		if choice.Delta.Content != "" || choice.Delta.ReasoningContent != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// streamChunkFaults 判断一帧是不是转换后的错误帧：convertSOLOStreamToOpenAI 把
+// 上游的 event:error 变成带顶层 error 的 chunk。必须按帧本身判断，不能看"当前
+// 有没有记录到错误"——转换器是独立 goroutine 且通道有缓冲，等我们读第一帧时
+// 错误早就记录好了，那样会把已经产出的答案丢掉。
+func streamChunkFaults(chunk []byte) bool {
+	var frame struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if errUnmarshal := json.Unmarshal(chunk, &frame); errUnmarshal != nil {
+		return false
+	}
+	return len(frame.Error) > 0 && string(frame.Error) != "null"
+}
+
+// soloStreamHead 取出开场期的帧，直到流真的开始答话。返回的帧由调用方补发，
+// 所以不会丢 role 开场帧。拿到错误说明还没有交付任何内容，调用方可以把它当
+// 普通失败请求返回。
+func soloStreamHead(ch <-chan []byte, faults *soloFaultTracker) ([][]byte, *upstream.SOLOStreamError) {
+	var pending [][]byte
+	for chunk := range ch {
+		if streamChunkFaults(chunk) {
+			if se := faults.take(); se != nil {
+				return nil, se
+			}
+			// 错误帧但没有可映射的错误（理论上不该发生）：维持原样转发。
+		}
+		pending = append(pending, chunk)
+		if streamChunkAnswers(chunk) {
+			return pending, nil
+		}
+	}
+	return pending, nil
+}
+
 func handleExecStream(request []byte) ([]byte, error) {
 	var req executorStreamRequest
 	if err := json.Unmarshal(request, &req); err != nil {
@@ -2002,6 +2116,7 @@ func handleExecStream(request []byte) ([]byte, error) {
 		_ = json.Unmarshal(req.Payload, &peek)
 		model = peek.Model
 	}
+	faults := &soloFaultTracker{}
 	onSoloErr := func(se *upstream.SOLOStreamError) {
 		// v0.12.37: upstream SSE error events were previously invisible
 		// server-side (only relayed to the client) — log them with the
@@ -2009,6 +2124,7 @@ func handleExecStream(request []byte) ([]byte, error) {
 		// 1005 plan limit...) are diagnosable from CPA logs.
 		log.Printf("chat_stream uid=%s variant=%s model=%s: upstream SSE error code=%d msg=%s",
 			a.UID, a.Variant, model, se.Code, se.Msg)
+		faults.record(se)
 		applyCooldown(a.UID, se.Kind())
 	}
 
@@ -2018,9 +2134,23 @@ func handleExecStream(request []byte) ([]byte, error) {
 	// The pump goroutine owns rc (handleExecStream returns before the
 	// upstream is drained, so no defer Close here).
 	if req.StreamID != "" {
+		ch := convertSOLOStreamToOpenAI(rc, model, onSoloErr)
+		// v0.12.83: 先确认这一路真的开始答话，再决定移不移交流。chunk 一旦到了
+		// 客户端，响应状态就定死了，1005/4008 这种账号级错误会被宿主当成
+		// "成功的空回答"。首包之前失败仍然可以当普通失败返回，带上宿主用于
+		// 冷却/换号的状态码。
+		head, se := soloStreamHead(ch, faults)
+		if se != nil {
+			rc.Close()
+			return nil, upstreamStatusError(soloFaultStatus(se), soloStreamErrorCopy(se))
+		}
 		go func() {
 			defer rc.Close()
-			ch := convertSOLOStreamToOpenAI(rc, model, onSoloErr)
+			for _, chunk := range head {
+				if err := streamEmit(req.StreamID, chunk); err != nil {
+					return
+				}
+			}
 			for chunk := range ch {
 				// Emit failure = the host stream is gone (client
 				// disconnected); stop reading the dead upstream.
@@ -2028,7 +2158,11 @@ func handleExecStream(request []byte) ([]byte, error) {
 					return
 				}
 			}
-			accountPool.NoteSuccess(a.UID)
+			// 只有真的答过话才算一次成功：此前流内错误之后仍然 NoteSuccess，
+			// 会把 errCount 清零，让耗尽的账号一直留在池子里。
+			if !faults.any() {
+				accountPool.NoteSuccess(a.UID)
+			}
 			streamClose(req.StreamID)
 		}()
 		return okEnvelope(streamResponse{
@@ -2039,11 +2173,20 @@ func handleExecStream(request []byte) ([]byte, error) {
 	// Synchronous fallback (no stream id): collect everything, return once.
 	defer rc.Close()
 	ch := convertSOLOStreamToOpenAI(rc, model, onSoloErr)
-	var chunks []pluginapi.ExecutorStreamChunk
+	head, se := soloStreamHead(ch, faults)
+	if se != nil {
+		return nil, upstreamStatusError(soloFaultStatus(se), soloStreamErrorCopy(se))
+	}
+	chunks := make([]pluginapi.ExecutorStreamChunk, 0, len(head)+4)
+	for _, chunk := range head {
+		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: chunk})
+	}
 	for chunk := range ch {
 		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: chunk})
 	}
-	accountPool.NoteSuccess(a.UID)
+	if !faults.any() {
+		accountPool.NoteSuccess(a.UID)
+	}
 	return okEnvelope(streamResponse{
 		Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
 		Chunks:  chunks,
