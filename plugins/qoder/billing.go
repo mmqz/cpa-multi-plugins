@@ -29,6 +29,21 @@ func billingBaseFor(sa *storedAuth) string {
 	return upstreamBaseFor(sa)
 }
 
+// billingClientType/Version are the desktop client's Cosy identity headers.
+// v0.8.22 (adapted from bfSan/qoder-cpa-plugin 30d6c16, live-verified 2026-09-21
+// against openapi.qoder.com.cn and openapi.qoder.sh): the billing surface gates
+// the campaigns response on Cosy-ClientType — the same credential that answers
+// showCampaign:false to a bare request returns the live daily "100 Credits"
+// campaign once the header is present. Without it the CN campaigns list can
+// come back flag-less AND row-less, which the v0.12.80 CLAIMABLE-row inference
+// cannot recover from: the panel shows "今日暂无可领取权益" and the day's
+// benefit is silently skipped. Sending a desktop identity on every billing
+// call is idempotent — where upstream does not gate, the response is unchanged.
+const (
+	billingClientType = "10"
+	billingClientVer  = "0.3.4"
+)
+
 func billingHeaders(req *http.Request, sa *storedAuth) {
 	// QoderWork billing endpoints authenticate with the active token as a
 	// plain Bearer — jobToken (jt-) or device token (dt-), both accepted
@@ -36,6 +51,9 @@ func billingHeaders(req *http.Request, sa *storedAuth) {
 	req.Header.Set("Authorization", "Bearer "+sa.Auth.AccessToken)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Qoder")
+	req.Header.Set("Cosy-ClientType", billingClientType)
+	req.Header.Set("Cosy-Version", billingClientVer)
 }
 
 // checkinStatusResponse mirrors GET /sash/api/v1/me/daily-check-in/status
