@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +71,17 @@ var (
 	// key absent resets that realm to discovery + static fallback.
 	pinnedModels   = map[string][]string{}
 	pinnedModelsMu sync.RWMutex
+
+	// streamHeadTimeout is the opt-in async-stream "head gate", in integer
+	// seconds. 0 (the default) disables it entirely: the pump hands the stream
+	// to the host immediately, exactly as before, including emission timing.
+	// When > 0, handleExecStream waits up to this many seconds for the pump's
+	// first decisive upstream event before opening the host stream, so a
+	// pre-answer failure (upstream >=400 or an error frame before the model
+	// starts answering) can surface as a normal failed request WITH an HTTP
+	// status instead of a lossy in-band text error on an already-200 stream.
+	streamHeadTimeout   = 0
+	streamHeadTimeoutMu sync.RWMutex
 )
 
 // pinnedModelIDsForRealm snapshots the pinned ID list for a realm (nil when
@@ -105,6 +117,7 @@ func configure(raw []byte) {
 	nextMgmtKey := ""
 	nextLoginPlatform := "CLI"
 	nextLoginRegion := regionCN
+	nextStreamHeadTimeout := 0 // default off: 0 seconds
 
 	nextPinned := map[string][]string{}
 	cfgURL, cfgKey := "", ""
@@ -166,6 +179,15 @@ func configure(raw []byte) {
 					v := strings.TrimSpace(strings.TrimPrefix(line, "tasks_auto:"))
 					nextTasksAuto = v == "true" || v == "1" || v == "yes" || v == "on"
 				}
+				if strings.HasPrefix(line, "stream_head_timeout:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "stream_head_timeout:"))
+					v = strings.Trim(v, "\"'")
+					// Opt-in only: absent, unparseable or non-positive (incl.
+					// negatives) all normalize to 0 = disabled.
+					if n, err := strconv.Atoi(v); err == nil && n > 0 {
+						nextStreamHeadTimeout = n
+					}
+				}
 				if strings.HasPrefix(line, "models_cn:") {
 					if ids := parsePinnedModelList(strings.TrimPrefix(line, "models_cn:")); len(ids) > 0 {
 						nextPinned["cn"] = ids
@@ -221,6 +243,10 @@ func configure(raw []byte) {
 	pinnedModelsMu.Lock()
 	pinnedModels = nextPinned
 	pinnedModelsMu.Unlock()
+
+	streamHeadTimeoutMu.Lock()
+	streamHeadTimeout = nextStreamHeadTimeout
+	streamHeadTimeoutMu.Unlock()
 
 	// management key: config_yaml > env > keep existing. Empty stays empty
 	// (plugin-layer auth disabled, host middleware still guards).
@@ -329,6 +355,19 @@ func loadedLoginRegion() string {
 	loginRegionMu.RLock()
 	defer loginRegionMu.RUnlock()
 	return loginRegion
+}
+
+// loadedStreamHeadTimeout returns the configured async-stream head-gate wait in
+// integer seconds. Values <= 0 mean disabled (0 = the default, which preserves
+// the exact pre-feature pump behavior: hand off the stream immediately and
+// report any later failure in-band).
+func loadedStreamHeadTimeout() int {
+	streamHeadTimeoutMu.RLock()
+	defer streamHeadTimeoutMu.RUnlock()
+	if streamHeadTimeout > 0 {
+		return streamHeadTimeout
+	}
+	return 0
 }
 
 // platformForAuth returns the login platform recorded for an existing

@@ -171,6 +171,76 @@ func upstreamStatusError(status int, payload string, err error) error {
 	return err
 }
 
+// containsAny reports whether s holds any of the given substrings.
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// streamFaultError turns a pre-answer in-stream error frame (the transport
+// status was 200, so there is no HTTP status on the wire) into a failure the
+// async hand-off can return as a NORMAL failed envelope, so the status survives
+// instead of degrading into a lossy in-band text error the host reads as a
+// "successful empty answer".
+//
+// The status is not invented: streamFaultStatus derives the status the gateway
+// *would* have used, then upstreamStatusError applies the exact account-vs-
+// request policy (401/402/429/business-403 ride the envelope; request/IP-level
+// shapes and the model-scoped 6004 stay status 0). payload must be the raw
+// frame body (stripDataPrefix'd), NOT the redacted/truncated error string, so
+// the classifiers see the real business envelope.
+func streamFaultError(frameErr error, payload string, sa *storedAuth) error {
+	status := streamFaultStatus(payload)
+	if status == 0 {
+		// Unrecognised / request-level / model-scoped 6004: keep the frame
+		// error plain (status 0), matching the transient-cooldown behavior an
+		// unknown stream error had before the gate existed.
+		return frameErr
+	}
+	// Reuse the exact synchronous error surface (actionable 11102/11115/… copy
+	// + Retry-After is absent here since a 200 stream carries none) so a
+	// pre-answer frame and a real >=400 produce the same user-facing message,
+	// then let upstreamStatusError apply the account-vs-request policy.
+	return upstreamStatusError(status, payload, translateChatUpstreamErrorFull(status, payload, sa, nil))
+}
+
+// streamFaultStatus maps an in-stream error frame's body to the HTTP status the
+// host cooldown layer should attribute to the credential. It is deliberately
+// conservative: only unambiguous account-level shapes earn a status, every-
+// thing else (and the model-scoped 6004) stays 0 so a healthy credential is
+// never cooled on a guess.
+func streamFaultStatus(payload string) int {
+	if strings.TrimSpace(payload) == "" {
+		return 0
+	}
+	// Model-scoped 6004 first: it parks the (credential, model) pair in the
+	// plugin registry, not the credential, and is intentionally status-less on
+	// every host version (see model_ratelimit.go). Checked before the wording
+	// probes so its reset text can never be re-read as credential quota.
+	if isModelScopedRateLimit(http.StatusTooManyRequests, payload) {
+		return 0
+	}
+	low := strings.ToLower(payload)
+	switch {
+	case containsAny(low, "unauthorized", "invalid token", "token expired", "未授权", "登录已失效", "登录失效"):
+		return http.StatusUnauthorized
+	case isHardCreditError(0, payload): // credit / quota-exhausted wording (402 is account-level)
+		return http.StatusPaymentRequired
+	case isSoftRateLimit(0, payload): // throttle wording — 6004 already excluded above
+		return http.StatusTooManyRequests
+	case containsAny(low, "forbidden", "permission", "无权限", "没有权限"):
+		// upstreamStatusError keeps a bare (no-envelope) 403 status-less; only a
+		// business-envelope 403 (e.g. 11140) earns the credential-level status.
+		return http.StatusForbidden
+	default:
+		return 0
+	}
+}
+
 // inputTooLargeMarkers 过大错误文案词族（除 11115/"prompt is too long"
 // 外的变体；对齐 qoder 0.8.11 chatSizeMarkers）。大小写不敏感。
 var inputTooLargeMarkers = []string{

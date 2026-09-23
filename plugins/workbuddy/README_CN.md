@@ -110,6 +110,14 @@ plugins:
       # 写端点要求该 Bearer token。空（默认）则只靠宿主 management middleware。
       # 也可从 WB_MANAGEMENT_KEY 环境变量读。
       management_key: ""
+
+      # 可选的异步流式「首包门」（单位秒，默认 0=关闭；关闭时行为与从前逐字节
+      # 一致）。>0 时执行器在把流交给宿主前最多等这么久，看首个上游事件：若
+      # 上游非 200、或在模型真正开始答话之前收到 error 帧，就按带 HTTP 状态的普
+      # 通失败信封返回（而不是交给宿主后被当成「成功的空回答」的纯文本 in-band
+      # 错误）。绝不会等超过这个值，也不会因上游只是开流慢就判失败（静默窗口正常
+      # 放行）。
+      stream_head_timeout: 0
 ```
 
 模型 alias 和排除走 CPA 原生 `oauth-model-alias` 和 `oauth-excluded-models`

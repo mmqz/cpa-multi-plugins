@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.9.34
+
+### Opt-in async-stream head gate — `stream_head_timeout` (repo workbuddy 0.9.34)
+
+On the async executor path the plugin returns the stream-open envelope as soon as
+it holds a `stream_id`, so every failure that surfaces afterwards can only travel
+as `host.stream.emit{error}` — plain text, HTTP status discarded. The host then
+neither cools the credential nor fails over, and the client sees a "successful
+empty answer". The two worst shapes: an upstream `>=400`, and an HTTP-200 stream
+carrying an in-stream error frame (CodeBuddy's `event:error` / `{"code":...}`
+quota body) **before the model ever answered**.
+
+**Decide the hand-off before committing it (opt-in).** `stream_head_timeout`
+(integer seconds, default `0` = disabled, which keeps the pre-feature pump
+byte-for-byte, emission timing included) makes `handleExecStream` hold the
+stream-open envelope until `pumpUpstreamStream` reports its first decisive event
+through a one-time buffered-channel verdict (structure aligned with trae PR #11):
+
+- upstream `>=400` / transport error → the existing synchronous failure path,
+  now surfaced as a status-bearing failed envelope instead of an in-band text
+  error;
+- a `workBuddyStreamFrame` error before any answer → a failed envelope whose
+  HTTP status is derived by **reusing the chat_error classifier** (`streamFaultStatus`
+  synthesises the status the gateway *would* have used, then `upstreamStatusError`
+  applies the account-vs-request policy): 401 / 402 / 429 and business-envelope 403
+  ride the envelope; request/IP-level shapes and the model-scoped **6004 stay
+  status-less on purpose** (a drained credential rotates, a healthy one never
+  cools on a guess);
+- the first frame that actually answers (content / reasoning — a **role-only
+  opener does not count**, the trap trae documented) → release and stream the rest
+  exactly as before;
+- a silent window → release normally. A stalled or never-answering upstream is
+  never turned into a hang, and no goroutine is left blocked (both channels are
+  buffered and the hand-off always answers once).
+
+**No rollback, no new accounting.** A post-answer error is still in-band only —
+bytes already on the wire are not swallowed. `NoteSuccess`/usage semantics are
+untouched: workbuddy already publishes a stream's success only after it drains
+cleanly (unlike trae, there was no hand-off-time success miscount to fix).
+Structural seam for tests: the frame loop is `pumpStreamFrames` over a `streamSink`
++ optional `streamHeadGate`. Tests (stream_head_gate_test.go) drive real SSE
+frames through it — abort-before-handoff (zero chunks emitted, 402/6004 status
+pinned), release-after-answer (in-band error preserved, answer intact), silent
+timeout (released near the wall-clock window), and the `stream_head_timeout: 0`
+regression.
+
 ## 0.9.33
 
 ### Static model catalogs removed — advertisement is discovery-only (repo v0.12.82)

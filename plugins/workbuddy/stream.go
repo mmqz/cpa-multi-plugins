@@ -76,6 +76,119 @@ func streamHeaders() http.Header {
 	return h
 }
 
+// streamSink delivers the async pump's output to the host stream. The
+// production implementation (hostStreamSink) forwards to the host bridge; tests
+// inject a recorder so the two head-gate invariants are observable without cgo:
+// nothing is emitted before a pre-answer failure, and an already-answered
+// stream keeps flowing after it.
+type streamSink interface {
+	emit(payload []byte) error
+	emitError(message string)
+}
+
+type hostStreamSink struct{ streamID string }
+
+func (s hostStreamSink) emit(payload []byte) error { return streamEmit(s.streamID, payload) }
+func (s hostStreamSink) emitError(message string)  { streamEmitError(s.streamID, message) }
+
+// streamHeadOutcome is the one-time verdict the pump reports to the async
+// hand-off BEFORE the host stream is opened (only when the head gate is armed).
+type streamHeadOutcome struct {
+	// answered: the upstream began answering (or the head window simply ended
+	// with no failure) — release the hand-off and keep streaming.
+	answered bool
+	// failure: a pre-answer error to return as a normal failed request, already
+	// wrapped with an HTTP status where the classifier assigns one; nil when
+	// answered.
+	failure error
+}
+
+// streamHeadGate coordinates the pump goroutine and the hand-off in
+// handleExecStream so a failure that lands before the model answers can become
+// a status-bearing failed envelope instead of a lossy in-band text error on an
+// already-200 stream. Both channels are buffered (cap 1): the pump reports at
+// most one verdict and the hand-off answers with exactly one proceed/abort
+// token, so neither side can deadlock on the other and no goroutine leaks. A
+// nil *streamHeadGate (stream_head_timeout == 0) disables gating entirely.
+type streamHeadGate struct {
+	timeout time.Duration
+	outcome chan streamHeadOutcome
+	proceed chan bool // true = keep streaming (in-band as before); false = abort
+}
+
+// newStreamHeadGate builds an armed gate with a sub-second-bounded wait. Call
+// ers must run awaitStreamHead in the hand-off goroutine and pass this gate to
+// the pump.
+func newStreamHeadGate(timeout time.Duration) *streamHeadGate {
+	return &streamHeadGate{
+		timeout: timeout,
+		outcome: make(chan streamHeadOutcome, 1),
+		proceed: make(chan bool, 1),
+	}
+}
+
+// fail reports a pre-answer failure and blocks for the hand-off's decision.
+// Returns false when the hand-off accepted the failure (abort: the pump must
+// NOT emit in-band — the failed envelope is the response), or true when it
+// released (the head window had already elapsed, so emit in-band exactly as the
+// pre-feature pump did). A nil gate is a no-op that returns true immediately.
+func (g *streamHeadGate) fail(err error) bool {
+	if g == nil {
+		return true
+	}
+	select {
+	case g.outcome <- streamHeadOutcome{failure: err}:
+	default:
+	}
+	return <-g.proceed
+}
+
+// release reports that the head window resolved without a failure so the
+// hand-off can open the host stream. Non-blocking: the pump continues streaming
+// regardless, mirroring the pre-feature behavior. A nil gate is a no-op.
+func (g *streamHeadGate) release() {
+	if g == nil {
+		return
+	}
+	select {
+	case g.outcome <- streamHeadOutcome{answered: true}:
+	default:
+	}
+}
+
+// awaitStreamHead blocks until the pump reports a decisive head event or the
+// timeout elapses. It always hands the pump exactly one proceed/abort token and
+// returns the pre-answer failure (nil when the hand-off should proceed with the
+// normal stream-open envelope). A timeout releases the hand-off, so a stalled
+// or silent upstream is never turned into a hang and never fails a request that
+// has not been answered.
+func awaitStreamHead(g *streamHeadGate) error {
+	select {
+	case o := <-g.outcome:
+		if o.failure != nil {
+			g.proceed <- false
+			return o.failure
+		}
+		g.proceed <- true
+		return nil
+	case <-time.After(g.timeout):
+		g.proceed <- true
+		return nil
+	}
+}
+
+// emitChunks flushes buffered head frames to the sink, returning the first
+// emit error (client disconnected / host stream gone) so the pump can abort
+// like the pre-feature loop.
+func emitChunks(sink streamSink, chunks [][]byte) error {
+	for _, c := range chunks {
+		if err := sink.emit(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // pumpUpstreamStream reads the upstream SSE response in the background and
 // emits each cleaned chunk to the host stream. It closes the stream when done.
 // An emit failure (client disconnected → host closed the stream) aborts the
@@ -86,7 +199,18 @@ func streamHeaders() http.Header {
 // the outbound call and host transport policy applies. The host bridge emits
 // arbitrary 32KB chunks, so we adapt to io.Reader and keep the bufio.Scanner
 // SSE line framing unchanged.
-func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID string, sa *storedAuth) {
+//
+// stream_head_timeout (opt-in): when gate is non-nil the async hand-off in
+// handleExecStream has NOT yet opened the host stream. This pump then reports
+// its first decisive event through the gate BEFORE committing anything to the
+// host: an upstream >=400 (status already known), a transport error, or — in
+// pumpStreamFrames — an error frame before the model answers. Each becomes a
+// normal failed envelope carrying an HTTP status. A clean answer, end of
+// stream, or the head-window timeout releases the hand-off, after which the
+// pump behaves exactly as it always has (in-band errors, no rollback). A nil
+// gate preserves the byte-for-byte pre-feature behavior, including emission
+// timing.
+func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID string, sa *storedAuth, gate *streamHeadGate) {
 	// Always close the host stream exactly once on every exit path.
 	closed := false
 	closeOnce := func() {
@@ -104,6 +228,12 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 	stream, statusCode, respHdr, err := hostHTTPDoStream(httpReq)
 	if err != nil {
 		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
+		// The transport-level failure carries no upstream status; surface it to
+		// the hand-off as a plain pre-answer failure (status 0) so a stalled
+		// stream that errors before answering never opens the host stream.
+		if !gate.fail(fmt.Errorf("http_error: %v", err)) {
+			return
+		}
 		streamEmitError(streamID, fmt.Sprintf("http_error: %v", err))
 		return
 	}
@@ -116,37 +246,25 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		if authUID != "" {
 			go reconcileByUID(authUID, statusCode, string(errPayload))
 		}
-		streamEmitError(streamID, translateChatUpstreamErrorFull(statusCode, string(errPayload), sa, respHdr).Error())
+		fullErr := translateChatUpstreamErrorFull(statusCode, string(errPayload), sa, respHdr)
+		// An upstream >=400 already has a real status: hand it to the hand-off
+		// synchronously as a status-bearing failed envelope (the existing
+		// upstreamStatusError policy) instead of the lossy in-band text error.
+		if !gate.fail(upstreamStatusError(statusCode, string(errPayload), fullErr)) {
+			return
+		}
+		streamEmitError(streamID, fullErr.Error())
 		return
 	}
 	collector := &sseUsageCollector{}
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	seenPayload := false
-	for scanner.Scan() {
-		content, meaningful, frameErr := workBuddyStreamFrame(scanner.Text())
-		if frameErr != nil {
-			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, frameErr.Error())
-			streamEmitError(streamID, frameErr.Error())
-			return
-		}
-		seenPayload = seenPayload || meaningful
-		if content == "" || content == "[DONE]" {
-			continue
-		}
-		collector.feed(content)
-		cleaned := cleanChunkJSON(content)
-		if cleaned == "" {
-			continue
-		}
-		if sseFramed {
-			cleaned = "data: " + cleaned
-		}
-		if err := streamEmit(streamID, []byte(cleaned)); err != nil {
-			// Client disconnected / host closed stream — abort; do not report success.
-			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
-			return
-		}
+	seenPayload, handled := pumpStreamFrames(scanner, hostStreamSink{streamID}, gate, sseFramed, collector, requestedModel, upstreamModel, authUID, started, sa)
+	if handled {
+		// The frame loop already reported the terminal state (a surfaced
+		// pre-answer failure or an emit abort); running the tail here would
+		// double-publish usage and re-emit an error.
+		return
 	}
 	// v0.9.29 empty-stream guard: a 200 stream that ended without a single
 	// completion payload is an upstream failure, not a silent success.
@@ -169,6 +287,98 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 	// echo (Intl only — no-op for every other id).
 	noteLearnedRealModel(upstreamModel, collector.respModel)
 	invalidateAccountCredits(authID, authUID)
+}
+
+// pumpStreamFrames runs the async pump's SSE read loop. With a nil gate it
+// mirrors the pre-feature pump exactly — every cleaned chunk is emitted the
+// moment it is read, error frames and read failures abort in-band. With the
+// head gate armed it holds the leading frames back and decides the hand-off on
+// the first decisive event:
+//   - a workBuddyStreamFrame error BEFORE the model answers → report a failed
+//     envelope via the gate (streamFaultError carries the classifier's HTTP
+//     status); if the hand-off accepts it, emit nothing and abort;
+//   - the first frame that actually answers (content / reasoning — a role-only
+//     opener does not count) → release the hand-off, flush the buffered frames
+//     and stream the rest as before;
+//   - end of stream with no answer → release and flush whatever was buffered.
+//
+// A post-answer error is always in-band — bytes already on the wire cannot be
+// rolled back. Returns (seenPayload, handled); handled==true means the loop
+// already recorded the terminal state (surfaced failure or emit abort) and the
+// caller must not run the empty-stream / read-error tail.
+func pumpStreamFrames(scanner *bufio.Scanner, sink streamSink, gate *streamHeadGate, sseFramed bool, collector *sseUsageCollector, requestedModel, upstreamModel, authUID string, started time.Time, sa *storedAuth) (bool, bool) {
+	seenPayload := false
+	gating := gate != nil
+	var pending [][]byte
+	for scanner.Scan() {
+		line := scanner.Text()
+		content, meaningful, frameErr := workBuddyStreamFrame(line)
+		if frameErr != nil {
+			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, frameErr.Error())
+			if gating {
+				// Classify from the raw frame body (the error string only
+				// carries a redacted/truncated copy) so 6004 etc. stay honest.
+				payload := stripDataPrefix(line)
+				if !gate.fail(streamFaultError(frameErr, payload, sa)) {
+					// Hand-off accepted: the buffered leading frames are
+					// dropped and the failed envelope is the whole response.
+					return seenPayload, true
+				}
+			}
+			// Gate off, or the window already elapsed: in-band exactly as the
+			// pre-feature pump did.
+			sink.emitError(frameErr.Error())
+			return seenPayload, true
+		}
+		seenPayload = seenPayload || meaningful
+		if content == "" || content == "[DONE]" {
+			continue
+		}
+		collector.feed(content)
+		cleaned := cleanChunkJSON(content)
+		if cleaned == "" {
+			continue
+		}
+		payload := cleaned
+		if sseFramed {
+			payload = "data: " + cleaned
+		}
+		if gating {
+			if !streamChunkAnswers([]byte(cleaned)) {
+				// Leading (role-only / empty-delta) frame: buffer it so a later
+				// pre-answer error still emits zero chunks, but never lose it.
+				pending = append(pending, []byte(payload))
+				continue
+			}
+			pending = append(pending, []byte(payload))
+			gating = false
+			// Release BEFORE flushing so the hand-off opens the host stream and
+			// the pump never blocks on a host emit the hand-off has to grant.
+			gate.release()
+			if err := emitChunks(sink, pending); err != nil {
+				publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
+				return seenPayload, true
+			}
+			pending = nil
+			continue
+		}
+		if err := sink.emit([]byte(payload)); err != nil {
+			// Client disconnected / host closed stream — abort; do not report success.
+			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
+			return seenPayload, true
+		}
+	}
+	if gating {
+		// The stream ended (cleanly or on a read failure) before answering:
+		// release the hand-off and flush any buffered leading frames. The
+		// caller's tail still classifies empty-stream / read-error in-band.
+		gate.release()
+		if err := emitChunks(sink, pending); err != nil {
+			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
+			return seenPayload, true
+		}
+	}
+	return seenPayload, false
 }
 
 // collectUpstreamStream is the synchronous fallback (no async stream id): drain
@@ -559,6 +769,33 @@ func workBuddyStreamFrame(line string) (string, bool, error) {
 		return "", false, fmt.Errorf("workbuddy upstream error: %s", truncateRedacted(content, 200))
 	}
 	return content, true, nil
+}
+
+// streamChunkAnswers reports whether a cleaned, already-emitted chunk actually
+// begins the answer: non-empty content or reasoning_content on some choice.
+// The head gate keys on frame CONTENT, not "a frame arrived" — upstream always
+// sends a role-only opener first ({"delta":{"role":"assistant"}}), so treating
+// any first frame as "answered" would let the gate release before a pre-answer
+// error frame ever surfaces (the exact trap trae PR #11 documented). An empty
+// content delta is a legal no-op frame and still does not count.
+func streamChunkAnswers(chunk []byte) bool {
+	var frame struct {
+		Choices []struct {
+			Delta struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(chunk, &frame) != nil {
+		return false
+	}
+	for _, choice := range frame.Choices {
+		if choice.Delta.Content != "" || choice.Delta.ReasoningContent != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func firstNonEmpty(vals ...string) string {
