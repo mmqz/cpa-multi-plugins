@@ -1,13 +1,16 @@
 // stream.go owns the upstream SSE data plane: emitting cleaned chunks back to
 // the host stream (streamEmit/close), pumping the upstream SSE in a goroutine
 // (pumpUpstreamStream), collecting it synchronously (collectUpstreamStream),
-// and the SSE-frame helpers that re-frame, filter, and aggregate chunks.
+// the opt-in head gate that keeps a pre-hand-off failure reportable
+// (streamHeadGate), and the SSE-frame helpers that re-frame, filter, and
+// aggregate chunks.
 package main
 
 import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -60,7 +63,19 @@ func streamErrorFrame(streamID, message string) ([]byte, error) {
 	})
 }
 
+// streamCloseOnce makes host.stream.close idempotent per stream id: every pump
+// exit path closes, and a double close would otherwise surface as a host error.
 var streamCloseOnce sync.Map // streamID -> sync.Once
+
+// The pump's two host-facing sinks are package vars so the head-gate tests can
+// watch exactly what a stream delivered (and what it reported in-band) without
+// a live host RPC table. Production wiring is the real bridge above them and
+// nothing outside tests ever reassigns them, so the gate-off path stays
+// byte-identical — one extra function-pointer hop, no behavioural change.
+var (
+	streamEmitSink  = streamEmit
+	streamErrorSink = streamEmitError
+)
 
 func streamClose(streamID string) {
 	if streamID == "" {
@@ -82,6 +97,205 @@ func streamHeaders() http.Header {
 	return h
 }
 
+// qoderFrameError is a terminal upstream failure carried by one SSE frame.
+//
+// Its Error() text is byte-identical to the plain errors it replaced — that
+// text is what travels in-band today — but it also keeps the frame's numeric
+// statusCodeValue, so the head gate can hand the *real* status to the host
+// instead of inventing one (see streamHeadGate).
+//
+// It deliberately does NOT implement StatusCode(). The synchronous collector
+// and the non-stream aggregator return this error straight to the host, where
+// errorEnvelopeFor would promote it into an http_status and start cooling
+// credentials on frames that never cooled them before — a behavior change
+// outside the opt-in gate. Only frameGateStatus reads the number, and only the
+// head gate acts on it.
+type qoderFrameError struct {
+	msg string
+	// status is the frame's statusCodeValue: 0 when the frame carried none
+	// (an {"error":...} body inside a 200-OK envelope, or a bare event:error
+	// line), which is not the same thing as "the upstream said 200".
+	status int
+}
+
+func (e *qoderFrameError) Error() string { return e.msg }
+
+// streamHeadGate is the one-shot handshake between the async pump (which reads
+// the first upstream frames) and the executor hand-off (which decides what the
+// host gets for this call).
+//
+// The ABI fixes the outcome at hand-off: once handleExecStream has returned the
+// 200 envelope, anything that goes wrong can only reach the host as in-band
+// host.stream.emit error *text*, with the HTTP status lost — no credential
+// rotation, no cooldown, and a client that saw "a successful empty answer".
+// A failure that lands before the model starts answering is still an ordinary
+// failed request, so with stream_head_timeout set the hand-off waits for the
+// first decisive event instead of committing blindly.
+//
+// The zero-value/nil gate is "disabled": the pump emits as it reads and the
+// hand-off returns immediately, exactly as before.
+type streamHeadGate struct {
+	// verdict carries at most one decision and is buffered, so the pump can
+	// always report without a listener: it never blocks on the hand-off, and
+	// the hand-off never blocks on the pump.
+	verdict chan headVerdict
+	// mu guards handedOff, which makes "who reports this failure" exclusive:
+	// once the hand-off has claimed the stream, the pump must fall back to the
+	// historical in-band error frame.
+	mu        sync.Mutex
+	handedOff bool
+}
+
+// headVerdict is the pump's first-frame decision. A zero verdict releases the
+// hand-off with no failure to report.
+type headVerdict struct {
+	// status is the HTTP status the hand-off must report; non-zero only when
+	// err is set.
+	status int
+	// err is the pre-hand-off failure, nil when the stream may be handed over.
+	err error
+}
+
+// newStreamHeadGate returns nil when the gate is off — callers pass that nil
+// straight to the pump, which is nil-receiver safe.
+func newStreamHeadGate(timeout time.Duration) *streamHeadGate {
+	if timeout <= 0 {
+		return nil
+	}
+	return &streamHeadGate{verdict: make(chan headVerdict, 1)}
+}
+
+// abort reports a pre-hand-off failure. It reports whether the hand-off is
+// still listening: false means the stream was already handed over (or the gate
+// is off), so the caller must keep the in-band error frame or the failure would
+// be silently dropped.
+func (g *streamHeadGate) abort(status int, err error) bool {
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.handedOff {
+		return false
+	}
+	select {
+	case g.verdict <- headVerdict{status: status, err: err}:
+		return true
+	default:
+		// A verdict is already queued. The pump reports exactly once per stream,
+		// so this is unreachable today; still, refuse rather than claim a
+		// failure nobody will read.
+		return false
+	}
+}
+
+// release tells the hand-off that the stream is live (or that the pump is about
+// to emit something in-band), so no failure envelope is possible any more.
+func (g *streamHeadGate) release() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	// Buffered and single-slot: the pump reports once per stream, so the send
+	// either lands here or the hand-off has already been woken by the verdict
+	// that matters. Never block — the pump must be able to run to completion
+	// with nobody listening.
+	select {
+	case g.verdict <- headVerdict{}:
+	default:
+	}
+}
+
+// awaitHandoff blocks for the pump's first verdict, up to timeout. ok=false
+// means the window elapsed with nothing decided: the caller hands the stream
+// over — equivalent to the gate being off — and the gate is claimed here so any
+// later pump failure keeps travelling in-band.
+func (g *streamHeadGate) awaitHandoff(timeout time.Duration) (headVerdict, bool) {
+	if g == nil {
+		return headVerdict{}, false
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case v := <-g.verdict:
+		return v, true
+	case <-timer.C:
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.handedOff = true
+	// One last look under the lock: the pump may have reported a moment before
+	// this claim, and it already suppressed its in-band frame on the strength of
+	// abort() returning true. Honouring the verdict is the only way that failure
+	// does not vanish.
+	select {
+	case v := <-g.verdict:
+		return v, true
+	default:
+		return headVerdict{}, false
+	}
+}
+
+// headGateStatus picks the HTTP status for a pre-hand-off failure.
+//
+//   - a frame-carried numeric status that is a real HTTP error code (the gateway
+//     frames carry statusCodeValue, and qoderUnwrapFrame keeps it) rides
+//     through verbatim: CPA's MarkResult cooldown table keys on exactly this
+//     number, so 429 gets the escalating quota backoff and 500/502/503 get the
+//     transient retry window;
+//   - anything else ({"error":...} inside a 200-OK envelope, an event:error
+//     line, an out-of-range value) reports 502. We have no evidence to name the
+//     failure more precisely, and guessing 401/403 would suspend the credential
+//     for 30 minutes on a hunch while guessing 404 would suspend the model for
+//     12 hours.
+func headGateStatus(frameStatus int) int {
+	if frameStatus >= 400 && frameStatus <= 599 {
+		return frameStatus
+	}
+	return http.StatusBadGateway
+}
+
+// frameGateStatus recovers the numeric status a failing frame rode, for
+// headGateStatus. Non-envelope errors (a bare event:error line) report 0.
+func frameGateStatus(err error) int {
+	var frameErr *qoderFrameError
+	if errors.As(err, &frameErr) {
+		return frameErr.status
+	}
+	return 0
+}
+
+// streamChunkAnswers reports whether an outgoing chunk actually starts
+// answering the request.
+//
+// The role-only opener ({"delta":{"role":"assistant"}}) is not an answer — the
+// gate must key on delivered content or it releases before every error frame
+// and never gates anything at all. Tool-call deltas count (that IS the answer),
+// empty padding fields do not, and cleanChunkJSON has already stripped the
+// noise the upstream pads terminal deltas with.
+func streamChunkAnswers(chunk string) bool {
+	var frame struct {
+		Choices []struct {
+			Delta map[string]any `json:"delta"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal([]byte(chunk), &frame) != nil {
+		return false
+	}
+	for _, choice := range frame.Choices {
+		for key, value := range choice.Delta {
+			if key == "role" {
+				continue
+			}
+			if !isEmptyValue(value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // pumpUpstreamStream reads the upstream SSE response in the background and
 // emits each cleaned chunk to the host stream. It closes the stream when done.
 // An emit failure (client disconnected → host closed the stream) aborts the
@@ -92,7 +306,12 @@ func streamHeaders() http.Header {
 // the outbound call and host transport policy applies. The host bridge emits
 // arbitrary 32KB chunks, so we adapt to io.Reader and keep the bufio.Scanner
 // SSE line framing unchanged.
-func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID, cooldownModel string) {
+//
+// v0.12.85 gate: when handleExecStream enabled the head gate it passes a
+// non-nil gate and blocks in awaitHandoff until the pump reports. Until then
+// this function reads without emitting (see release below). gate == nil — the
+// default, stream_head_timeout 0 — keeps the historical behavior byte for byte.
+func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID, cooldownModel string, gate *streamHeadGate) {
 	// Always close the host stream exactly once on every exit path.
 	closed := false
 	closeOnce := func() {
@@ -110,13 +329,59 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 	stream, statusCode, _, err := hostHTTPDoStream(httpReq)
 	if err != nil {
 		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
-		streamEmitError(streamID, fmt.Sprintf("http_error: %v", err))
+		// Deliberately not gated: no status came back and a client-side context
+		// cancellation reads exactly like an upstream outage, so the hand-off
+		// must not cool a credential on it. Release keeps the waiting
+		// hand-off from burning the whole window on a dead stream.
+		gate.release()
+		streamErrorSink(streamID, fmt.Sprintf("http_error: %v", err))
 		return
 	}
 	defer stream.Close()
+
+	// head buffers the chunks read before the gate resolved; always empty when
+	// the gate is off. release ends the head phase exactly once: the hand-off is
+	// told no failure envelope is possible any more, then the buffered frames go
+	// out, so the client sees the same bytes in the same order as the ungated
+	// pump. It returns the first emit failure, which every caller reports as
+	// "stream_emit: ..." and aborts on (client disconnected).
+	var head [][]byte
+	released := gate == nil
+	release := func() error {
+		if released {
+			return nil
+		}
+		released = true
+		gate.release()
+		var errEmit error
+		for _, payload := range head {
+			if errEmit = streamEmitSink(streamID, payload); errEmit != nil {
+				break
+			}
+		}
+		head = nil
+		return errEmit
+	}
+	// fail reports an upstream failure that surfaced after the response opened.
+	// It returns true when the hand-off took the failure back as an envelope —
+	// nothing was delivered, so the pump must not emit for this call any more.
+	// Otherwise the buffered head frames go out first and the terminal error
+	// stays in-band, exactly as it has been since v0.8.17.
+	fail := func(status int, cause error) bool {
+		if !released && gate.abort(headGateStatus(status), cause) {
+			return true
+		}
+		// An emit failure here means the client is already gone; the in-band
+		// terminal error below fails the same way it always has.
+		_ = release()
+		streamErrorSink(streamID, cause.Error())
+		return false
+	}
+
 	if statusCode >= 400 {
 		// Drain the error body via the same bridge so the message is complete.
 		errPayload, _ := io.ReadAll(newHostStreamReader(stream))
+		upstreamErr := chatUpstreamError(statusCode, string(errPayload))
 		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(errPayload))
 		if authID != "" {
 			recordUpstreamFailure(authID, cooldownModel, statusCode, string(errPayload))
@@ -124,7 +389,9 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		if authUID != "" {
 			go reconcileByUID(authUID, statusCode, string(errPayload))
 		}
-		streamEmitError(streamID, chatUpstreamError(statusCode, string(errPayload)).Error())
+		// Nothing was delivered, so with the gate open the host gets the real
+		// upstream status here instead of an in-band text error behind a 200.
+		fail(statusCode, upstreamErr)
 		return
 	}
 	collector := &sseUsageCollector{}
@@ -137,11 +404,18 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, frameErr.Error())
 			// v0.12.76: envelope errors also feed the cooldown table — every
 			// other failure site does; without this a streaming-path 429
-			// envelope never cools the (auth, model) pair.
+			// envelope never cools the (auth, model) pair. The literal 0 is
+			// unchanged on purpose even though the frame may carry a status:
+			// the cooldown classifier keys on the message body, and starting to
+			// pass a status through would change how long existing deployments
+			// cool the pair on the paths that have always had this guard.
 			if authID != "" {
 				recordUpstreamFailure(authID, cooldownModel, 0, frameErr.Error())
 			}
-			streamEmitError(streamID, frameErr.Error())
+			// A frame-carried failure before the first answer is exactly what
+			// the gate exists for: statusCodeValue>=400 envelopes report their
+			// own number, the rest fall back to 502 (see headGateStatus).
+			fail(frameGateStatus(frameErr), frameErr)
 			return
 		}
 		seenPayload = seenPayload || meaningful
@@ -153,14 +427,35 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		if cleaned == "" {
 			continue
 		}
+		outgoing := []byte(cleaned)
 		if sseFramed {
-			cleaned = "data: " + cleaned
+			outgoing = []byte("data: " + cleaned)
 		}
-		if err := streamEmit(streamID, []byte(cleaned)); err != nil {
+		if !released {
+			head = append(head, outgoing)
+			// Hold the head open until a frame really starts answering: a
+			// role-only opener must keep a later failure reportable.
+			if !streamChunkAnswers(cleaned) {
+				continue
+			}
+			if err := release(); err != nil {
+				publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
+				return
+			}
+			continue
+		}
+		if err := streamEmitSink(streamID, outgoing); err != nil {
 			// Client disconnected / host closed stream — abort; do not report success.
 			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
 			return
 		}
+	}
+	// Flush whatever the head phase buffered before judging the outcome: a
+	// stream that ended after a role-only opener still owes the client that
+	// opener, exactly as the ungated pump delivered it.
+	if err := release(); err != nil {
+		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
+		return
 	}
 	// A mid-stream read failure means the client received a truncated stream:
 	// surface it as an error frame and record the attempt as failed.
@@ -169,20 +464,26 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		if authID != "" {
 			recordUpstreamFailure(authID, cooldownModel, 0, err.Error())
 		}
-		streamEmitError(streamID, fmt.Sprintf("upstream stream read error: %v", err))
+		// Deliberately not gated: empty-stream and read failures stay in-band
+		// even when the gate is open. The headGateStatus table would turn a
+		// guessed 502 into a hard failure, and policy.go keeps this "unexpected
+		// EOF" wording status-less on purpose so CPA treats a dropped stream as
+		// transport lifecycle instead of cooling the credential.
+		streamErrorSink(streamID, fmt.Sprintf("upstream stream read error: %v", err))
 		return
 	}
 	// v0.8.18: the async pump finally gets the same empty-stream guard the
 	// synchronous collector has had since v0.8.17 — a 200 envelope stream
 	// with zero payload is an upstream failure, not a silent success. (The
-	// seenPayload tracking used to be dead code here.)
+	// seenPayload tracking used to be dead code here.) Same lifecycle reasoning
+	// as above: no hand-off abort, the message stays in-band.
 	if !seenPayload {
 		errEmpty := emptyStreamError()
 		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, errEmpty.Error())
 		if authID != "" {
 			recordUpstreamFailure(authID, cooldownModel, 0, errEmpty.Error())
 		}
-		streamEmitError(streamID, errEmpty.Error())
+		streamErrorSink(streamID, errEmpty.Error())
 		return
 	}
 	publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), false, 0, "")
@@ -545,13 +846,15 @@ func stripDataPrefix(s string) string {
 // envelope was silently swallowed and the stream ended looking successful.
 // Returns (bodyStr, meaningful, err):
 //   - err != nil: upstream error frame — abort the stream, record failure.
+//     The error is a *qoderFrameError so the head gate can recover the frame's
+//     numeric status; the message text is unchanged.
 //   - meaningful: the line carried a real completion payload (empty-stream
 //     guard input).
 //   - bodyStr: the unwrapped inner body ("" for control/non-data lines).
 func qoderUnwrapFrame(line string) (string, bool, error) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "event:error" || trimmed == "event: error" {
-		return "", false, fmt.Errorf("qoder upstream error event")
+		return "", false, &qoderFrameError{msg: "qoder upstream error event"}
 	}
 	if !strings.HasPrefix(trimmed, "data:") {
 		return "", false, nil
@@ -579,7 +882,10 @@ func qoderUnwrapFrame(line string) (string, bool, error) {
 	}
 	_ = json.Unmarshal([]byte(body), &chunk)
 	if outer.Status >= 400 || (len(chunk.Error) > 0 && string(chunk.Error) != "null") {
-		return "", false, fmt.Errorf("qoder upstream error: %s", truncateRedacted(body, 200))
+		return "", false, &qoderFrameError{
+			msg:    fmt.Sprintf("qoder upstream error: %s", truncateRedacted(body, 200)),
+			status: outer.Status,
+		}
 	}
 	return body, true, nil
 }

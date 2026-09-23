@@ -352,7 +352,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.8.22"
+var version = "0.8.23"
 
 func wbRegistration() registration {
 	return registration{
@@ -888,7 +888,24 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		streamClose(req.StreamID)
 		return okEnvelope(streamResponse{Headers: headers})
 	}
-	go pumpUpstreamStream(httpReq, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, cooldownModel)
+	// v0.12.85 opt-in stream head gate (config `stream_head_timeout`, seconds).
+	// The pump reads the opening frames while the hand-off waits for its
+	// verdict, so a failure that lands before the model starts answering still
+	// travels back as an ordinary failed request carrying the upstream's own
+	// status. Without the gate (the default) this is the historical blind
+	// hand-off: the pump owns the verdict channel and never blocks on us.
+	headTimeout := streamHeadTimeout()
+	gate := newStreamHeadGate(headTimeout)
+	go pumpUpstreamStream(httpReq, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, cooldownModel, gate)
+	if verdict, decided := gate.awaitHandoff(headTimeout); decided && verdict.err != nil {
+		// Nothing was delivered, so the host can rotate/cool on a real status
+		// instead of accepting a successful-looking empty answer. The status is
+		// attached verbatim (headGateStatus already kept anything it could not
+		// evidence at 502), which is why this bypasses upstreamStatusError's
+		// 401/402/429 filter: the filter exists to stop *inferred* statuses
+		// cooling credentials, and there is no inference here.
+		return nil, &statusError{status: verdict.status, err: verdict.err}
+	}
 	return okEnvelope(streamResponse{Headers: headers})
 }
 
