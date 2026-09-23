@@ -175,3 +175,10 @@ Electron 41.7.2 + Chromium 146.0.7680.216，取自主 exe 版本资源）安装�
   Cookie 收养按 #1 两种布局探测（`adopt.go`：`Network\Cookies` 优先、旧布局兜底），Windows 解密与
   桌面同链（DPAPI + `Local State`，`cookies_windows.go` + `cookies.go userDataRootFor`），macOS
   cookie lane 维持明示不支持。
+
+§6 补充（真机盘点）：`mimocode` 数据目录里除上述凭据外的一切都**不含登录态**——
+`mimocode.db` 是引擎 SQLite 会话/轨迹库（storage/db.ts:33，drizzle+bun-sqlite，聊天历史与运行索引，
+隐私敏感但非凭据）；`storage/` 是旧版 JSON 会话存储迁移遗留；`log/`、`workflow/`、`memory/`、
+`orchestrator/`、`worktree/` 均为运行数据。sk lane 登录态只认 `auth.json` 的 `xiaomi` 条目
+（`mimo-key-name` 仅密钥名、`mimo-login-pending.json` 仅登录中临时态、`mcp-auth.json` 仅 MCP OAuth，
+皆非账号登录态）；桌面 SSO 登录态不在此目录，只在 §6 #1 的分区 Cookies 库。
