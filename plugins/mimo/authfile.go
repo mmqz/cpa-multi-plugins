@@ -184,19 +184,22 @@ type storedAuth struct {
 // field (the CLI stores it as metadata.base_url and never calls api
 // .xiaomimimo.com unless the platform issued it).
 //
-// cookie lane: Cookies is the adopted desktop partition jar (only
-// *.xiaomimimo.com hosts — the desktop's own session jar attaches per-host
-// and so do we). Region pins the lane's base until the me-probe adopts
-// another cluster.
+// cookie lane: Cookies is the adopted jar — the partition's account-domain
+// bootstrap rows (passToken/userId/cUserId/uLocale) plus the M2-minted
+// service rows (serviceToken, <sid>_ph, <sid>_slh) and, on legacy builds,
+// any *.xiaomimimo.com session rows. Region/SID pin the lane's base and the
+// passport sid the service ticket is bound to.
 type mimoTokens struct {
-	Lane      string       `json:"lane"`                // key | cookie
-	SK        string       `json:"sk,omitempty"`        // key lane chat credential
-	BaseURL   string       `json:"baseURL,omitempty"`   // key lane OAuth-issued base ("" → api.xiaomimimo.com/v1)
-	UID       string       `json:"uid,omitempty"`       // platform uid (both lanes when known)
-	Region    string       `json:"region,omitempty"`    // cookie lane region (cn/sgp/ru/in; "" → config)
-	Cookies   []mimoCookie `json:"cookies,omitempty"`   // cookie lane jar
-	Source    string       `json:"source,omitempty"`    // cookie lane: adopt provenance (for diagnostics)
-	AdoptedAt int64        `json:"adoptedAt,omitempty"` // cookie lane: unix seconds
+	Lane        string       `json:"lane"`                  // key | cookie
+	SK          string       `json:"sk,omitempty"`          // key lane chat credential
+	BaseURL     string       `json:"baseURL,omitempty"`     // key lane OAuth-issued base ("" → api.xiaomimimo.com/v1)
+	UID         string       `json:"uid,omitempty"`         // platform uid (both lanes when known)
+	Region      string       `json:"region,omitempty"`      // cookie lane region (cn/sgp/ru/in; "" → config)
+	SID         string       `json:"sid,omitempty"`         // cookie lane: passport sid the minted ticket is bound to (mimosgp/mimopc)
+	Cookies     []mimoCookie `json:"cookies,omitempty"`     // cookie lane jar (bootstrap + minted)
+	Source      string       `json:"source,omitempty"`      // cookie lane: adopt provenance (for diagnostics)
+	AdoptedAt   int64        `json:"adoptedAt,omitempty"`   // cookie lane: unix seconds
+	ExchangedAt int64        `json:"exchangedAt,omitempty"` // cookie lane: last successful serviceLogin→STS mint (unix seconds)
 }
 
 // mimoCookie is one adopted Chromium cookie row (persisted in the host auth
@@ -234,23 +237,26 @@ func parseStored(raw []byte) (*storedAuth, error) {
 		}
 	} else {
 		var flat struct {
-			Lane      string       `json:"lane"`
-			SK        string       `json:"sk"`
-			BaseURL   string       `json:"baseURL"`
-			UID       string       `json:"uid"`
-			Region    string       `json:"region"`
-			Cookies   []mimoCookie `json:"cookies"`
-			Source    string       `json:"source"`
-			AdoptedAt int64        `json:"adoptedAt"`
-			UID2      string       `json:"accountUid"`
-			Display   string       `json:"displayName"`
+			Lane        string       `json:"lane"`
+			SK          string       `json:"sk"`
+			BaseURL     string       `json:"baseURL"`
+			UID         string       `json:"uid"`
+			Region      string       `json:"region"`
+			SID         string       `json:"sid"`
+			Cookies     []mimoCookie `json:"cookies"`
+			Source      string       `json:"source"`
+			AdoptedAt   int64        `json:"adoptedAt"`
+			ExchangedAt int64        `json:"exchangedAt"`
+			UID2        string       `json:"accountUid"`
+			Display     string       `json:"displayName"`
 		}
 		if err := json.Unmarshal(raw, &flat); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
 		}
 		sa.Auth = mimoTokens{
 			Lane: flat.Lane, SK: flat.SK, BaseURL: flat.BaseURL, UID: flat.UID,
-			Region: flat.Region, Cookies: flat.Cookies, Source: flat.Source, AdoptedAt: flat.AdoptedAt,
+			Region: flat.Region, SID: flat.SID, Cookies: flat.Cookies, Source: flat.Source,
+			AdoptedAt: flat.AdoptedAt, ExchangedAt: flat.ExchangedAt,
 		}
 		sa.Account = mimoAccount{UID: firstNonEmpty(flat.UID, flat.UID2), DisplayName: flat.Display}
 	}

@@ -1,6 +1,8 @@
 // adopt.go adopts the Xiaomi MiMo desktop app's SSO session as a cookie-lane
 // credential: locate the Chromium Cookies store of the persist:xiaomi-account
-// partition, decrypt the *.xiaomimimo.com rows, and persist one
+// partition, collect the upstream rows (legacy builds) plus the account-domain
+// bootstrap rows (current builds), mint the service ticket right away via the
+// serviceLogin→STS exchange (exchange.go), and persist one
 // mimo-cookie-<uid>.json per discovered account. Read-only on the desktop's
 // files (temp copy), credentials live only in the host auth store.
 //
@@ -90,7 +92,8 @@ func desktopOS() string {
 }
 
 // adoptDesktopCookies scans candidates and persists one credential per new
-// account. Existing cookie files are refreshed in place (re-adoption
+// account, minting a fresh service ticket when the passport accepts the
+// bootstrap cookies. Existing cookie files are refreshed in place (re-adoption
 // overwrites the stored jar so expiry tracking stays honest).
 func adoptDesktopCookies() {
 	candidates := desktopCookieCandidates()
@@ -114,7 +117,7 @@ func adoptDesktopCookies() {
 		if !fileExists(dbPath) {
 			continue
 		}
-		cookies, _, err := readCookiesFromDB(dbPath)
+		upstream, bootstrap, _, err := readCookiesFromDB(dbPath)
 		if err != nil {
 			// Expected on macOS (keychain) or when the desktop never logged
 			// in; stay quiet unless it's an unexpected shape.
@@ -123,20 +126,31 @@ func adoptDesktopCookies() {
 			}
 			continue
 		}
-		uid := userIdFromCookies(cookies)
+		// One jar: upstream rows (legacy builds) plus the account-domain
+		// bootstrap rows the M2 exchange consumes (current builds persist
+		// only those — docs/MIMO_AUTH.md §6.2).
+		jar := make([]mimoCookie, 0, len(upstream)+len(bootstrap))
+		jar = append(jar, upstream...)
+		jar = append(jar, bootstrap...)
+		uid := userIdFromCookies(jar)
 		if uid == "" {
-			uid = "adopted-" + sha256Sum(cookieFingerprint(cookies))
+			uid = "adopted-" + sha256Sum(cookieFingerprint(jar))
 		}
 		sa := &storedAuth{
 			Auth: mimoTokens{
 				Lane:      laneCookie,
 				UID:       uid,
-				Cookies:   cookies,
+				Cookies:   jar,
 				Source:    "desktop-adopt",
 				AdoptedAt: time.Now().Unix(),
 			},
 			Account: mimoAccount{UID: uid},
 		}
+		// M2: mint the service ticket immediately so the credential is
+		// usable without a first failing request. Failure is non-fatal —
+		// the credential persists bootstrap-only and the request ladder
+		// re-mints on 401/302 (session.go renewCookieSession).
+		exchangeForCredential(sa)
 		name, _ := resolveAuthFileTarget(sa, nil)
 		if prev, ok := existing[uid]; ok && prev != "" {
 			name = prev // keep the canonical name already registered with the host

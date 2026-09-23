@@ -5,10 +5,12 @@
 // cookies_linux.go / cookies_darwin.go.
 //
 // The adopted lane reproduces the desktop's own cookie lane (the Electron
-// session.fromPartition("persist:xiaomi-account") jar): only *.xiaomimimo.com
-// cookies are collected — .xiaomi.com rows (passToken/userId on the account
-// domain) are login-side state the upstream hosts never see and must NOT be
-// replayed to xiaomimimo.com (docs/MIMO_AUTH.md §3.3).
+// session.fromPartition("persist:xiaomi-account") jar): *.xiaomimimo.com rows
+// form the upstream jar (legacy builds only), while .xiaomi.com login rows
+// (passToken/userId/cUserId) are collected ONLY as exchange bootstrap
+// material — they are never replayed to upstream hosts themselves
+// (docs/MIMO_AUTH.md §3.3 + §6.2): the upstream wants the sid-bound
+// serviceToken the exchange mints, and raw account cookies get a 302.
 package main
 
 import (
@@ -42,19 +44,29 @@ func userDataRootFor(dbPath string) string {
 }
 
 // readCookiesFromDB copies the Chromium Cookies store (plus its WAL/journal
-// sidecars) to a temp file and returns every decryptable *.xiaomimimo.com
-// cookie row. The copy sidesteps the running desktop's exclusive lock and
-// hot-journal replay.
-func readCookiesFromDB(dbPath string) ([]mimoCookie, string, error) {
-	userDataDir := userDataRootFor(dbPath)
+// sidecars) to a temp file and returns the adoptable rows in two classes:
+//
+//   - upstream: every decryptable *.xiaomimimo.com row (legacy M1 adoption —
+//     only older desktop builds persist service rows on disk)
+//   - bootstrap: the account-domain login rows (passToken/userId/cUserId/
+//     uLocale on .xiaomi.com/.account.xiaomi.com) that feed the M2
+//     serviceLogin→STS exchange (exchange.go). Measured on the real machine:
+//     these are the ONLY rows a current build persists, and they are written
+//     plaintext (encrypted_value empty), but decryption stays best-effort
+//     here so future encrypting builds keep working through the same path.
+//
+// The copy sidesteps the running desktop's exclusive lock and hot-journal
+// replay. An error is returned only when NEITHER class yields a row.
+func readCookiesFromDB(dbPath string) (upstream, bootstrap []mimoCookie, userDataDir string, err error) {
+	userDataDir = userDataRootFor(dbPath)
 	tmp, err := os.MkdirTemp("", "mimo-adopt-")
 	if err != nil {
-		return nil, "", fmt.Errorf("temp dir: %w", err)
+		return nil, nil, "", fmt.Errorf("temp dir: %w", err)
 	}
 	defer os.RemoveAll(tmp)
 	tmpDB := filepath.Join(tmp, "Cookies")
 	if err := copyFile(dbPath, tmpDB); err != nil {
-		return nil, "", fmt.Errorf("copy cookies db: %w", err)
+		return nil, nil, "", fmt.Errorf("copy cookies db: %w", err)
 	}
 	for _, side := range []string{"Cookies-wal", "Cookies-journal"} {
 		if _, err := os.Stat(dbPath + side[len("Cookies"):]); err == nil {
@@ -63,12 +75,15 @@ func readCookiesFromDB(dbPath string) ([]mimoCookie, string, error) {
 	}
 	rows, err := queryCookieRows(tmpDB)
 	if err != nil {
-		return nil, "", fmt.Errorf("read cookies: %w", err)
+		return nil, nil, "", fmt.Errorf("read cookies: %w", err)
 	}
 	out := make([]mimoCookie, 0, len(rows))
+	boot := make([]mimoCookie, 0, 4)
 	seen := map[string]struct{}{}
 	for _, r := range rows {
-		if !isMimoUpstreamHost(r.HostKey) {
+		isUpstream := isMimoUpstreamHost(r.HostKey)
+		isBootstrap := !isUpstream && isAccountBootstrapRow(r.Name, r.HostKey)
+		if !isUpstream && !isBootstrap {
 			continue
 		}
 		value := r.Value
@@ -89,7 +104,7 @@ func readCookiesFromDB(dbPath string) ([]mimoCookie, string, error) {
 			continue
 		}
 		seen[key] = struct{}{}
-		out = append(out, mimoCookie{
+		row := mimoCookie{
 			Name:     r.Name,
 			Value:    value,
 			Domain:   r.HostKey,
@@ -97,12 +112,29 @@ func readCookiesFromDB(dbPath string) ([]mimoCookie, string, error) {
 			Secure:   r.Secure,
 			HTTPOnly: r.HTTPOnly,
 			Expires:  webkitToUnix(r.ExpiresUTC),
-		})
+		}
+		if isUpstream {
+			out = append(out, row)
+		} else {
+			boot = append(boot, row)
+		}
 	}
-	if len(out) == 0 {
-		return nil, userDataDir, fmt.Errorf("no usable *.xiaomimimo.com cookies in %s", filepath.Base(dbPath))
+	if len(out) == 0 && len(boot) == 0 {
+		return nil, nil, userDataDir, fmt.Errorf("no adoptable cookies in %s (neither *.xiaomimimo.com rows nor account bootstrap rows)", filepath.Base(dbPath))
 	}
-	return out, userDataDir, nil
+	return out, boot, userDataDir, nil
+}
+
+// isAccountBootstrapRow reports whether a row is one of the account-domain
+// login cookies the M2 exchange consumes. Host scope: the xiaomi.com family
+// only (the account domain and its parent mirror) — never xiaomimimo.com
+// (those are upstream rows) and never foreign hosts.
+func isAccountBootstrapRow(name, hostKey string) bool {
+	if !bootstrapNames[name] {
+		return false
+	}
+	h := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(hostKey), "."))
+	return h == "xiaomi.com" || strings.HasSuffix(h, ".xiaomi.com")
 }
 
 func copyFile(src, dst string) error {

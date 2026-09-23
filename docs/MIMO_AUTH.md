@@ -221,3 +221,46 @@ Chromium 146）Windows 11 真机、桌面运行中且已登录状态下的**实�
   上是明文，无需 DPAPI）作为引导材料，插件进程内复刻 `serviceLogin → /api/sts` 换票链，
   自行铸造 serviceToken 后再出网。M1 的 cookie lane 验收口径按此降级为"引导材料收养 +
   链路构件真机可用"，不承诺端到端调用。
+
+### §6.2 换票链实测规格（M2 依据，2026-09-23 真机端到端验证）
+
+§6.1 判定"可用服务票据不落盘"成立，但**补上后半句：它随时可以用账号域 cookie
+现换出来**。测试者用真机活凭证实跑通了完整换票链并拿到真实模型回复
+（`mimo-pro` 与 `mimo-flash` 均 HTTP 200，响应含 `mimo-v2.6-pro`/`mimo-v2.6-flash`
+真实内容与 usage）。插件 M2 的 `exchange.go` 按此实现。
+
+**换票两阶段**（静态证据 §3.3 + 实跑双确认）：
+
+- **P1** `GET https://account.xiaomi.com/pass/serviceLogin?_locale=zh_CN&_snsNone=true&sid=<sid>&_json=true`
+  Cookie 发分区库的明文账号域行 `passToken`/`userId`/`cUserId`（`uLocale` 在场，带上无害）。
+  响应为 `&&&START&&&{json}&&&END&&&` 包裹，取 `code=0`、`ssecurity`、`nonce`、`location`。
+- **P2** `GET <location>&clientSign=<urlencode(base64(sha1("nonce="+nonce+"&"+ssecurity)))>`
+  **不发 Cookie**。HTTP 200，从 `Set-Cookie` 收 `serviceToken`(364B)、`userId`、
+  `<sid>_ph`、`<sid>_slh`（全部保存）。
+
+**三处只有实跑才暴露的坑**（均已写进插件实现与测试）：
+
+1. **上游鉴权不是裸 `Cookie: serviceToken=`**。必须按 bundle `buildCookieHeader`
+   的顺序拼 `userId` → `serviceToken` → `cUserId` → `<sid>_ph`。只发 serviceToken
+   全是 302。`/user/xiaomi/me` 同样 302——**me 不能当探针**（对有效 cookie lane
+   请求也返回 302），插件的 me 探针已退役，会话健康由 chat 调用本身判定
+   （401/302/被跟随的登录页 HTML → 重换票 → 重试一次）。
+2. **每个上游请求必须注入 `X-Mimo-Source: mimocode-cli-free`**（bundle `lq()` 同时
+   主动删除 `Authorization`）——插件 M1 即已按 §2 实现，实测确认正确。
+3. **`mimo-auto` 必须在客户端改写成 `mimo-pro`**，否则上游
+   `chat_model_not_public`/biz_code 41105（`region=SGP, country=CL` 字样说明
+   集群按账号国籍放行）。插件 `resolveAutoModel`（EE/k6 对齐）已实现，实测确认。
+
+**区域与 sid 映射**：`sgp→mimosgp`、`cn→mimopc` 实测；`ru/in` 的 sid 从未观测到，
+插件拒绝臆测（显式报错）。auto 模式按 sgp→cn 顺序尝试（sgp 为实测可用集群），
+已在凭据上绑定的 sid 失败后自动跳过；`region` 配置可钉死。
+
+**UA 备注**：实测请求 UA 为 `MiClaw/1.0`（测试者自选值）——passport 端点大概率不校验
+UA，但这是单样本证据。插件默认不发伪装 UA（与 §4 拒绝 `mimocode/0.1.0` 臆造 UA
+同一立场），留 `exchange_user_agent` 配置位；若某天 passport 边缘开始拦 UA，把实测
+值填进去即可。
+
+**落盘语义修订（最终版）**：分区库 = 引导材料（passToken/userId/cUserId，本机构建
+明文）；serviceToken = 运行时现换、桌面自身不落盘；插件将其缓存在宿主 auth store
+（随 jar 持久、0600），401/302 时自动重换——与桌面"每次运行现换"同生命周期，
+多一层缓存。

@@ -27,6 +27,14 @@ var (
 	// cookiePaths are extra Chromium Cookies file paths for adoption.
 	cookiePaths   []string
 	cookiePathsMu sync.RWMutex
+
+	// exchangeUserAgent overrides the serviceLogin/STS exchange UA. Default ""
+	// keeps Go's stdlib UA '' no fabricated identity (the project rejected
+	// impersonating mimocode's UA for the same reason); the measured working
+	// value on the real machine was "MiClaw/1.0" '' set it here if a passport
+	// edge ever starts gating user agents.
+	exchangeUserAgent   string
+	exchangeUserAgentMu sync.RWMutex
 )
 
 func loadedRegionMode() string {
@@ -50,6 +58,12 @@ func loadedPlatformURL() string {
 	return platformBase
 }
 
+func loadedExchangeUserAgent() string {
+	exchangeUserAgentMu.RLock()
+	defer exchangeUserAgentMu.RUnlock()
+	return exchangeUserAgent
+}
+
 func loadedCookiePaths() []string {
 	cookiePathsMu.RLock()
 	defer cookiePathsMu.RUnlock()
@@ -71,10 +85,11 @@ func configure(raw []byte) {
 		cfgRaw = probe.Config
 	}
 	var cfg struct {
-		Region         string `json:"region"`
-		XClientVersion string `json:"x_client_version"`
-		PlatformURL    string `json:"platform_url"`
-		CookiePaths    string `json:"cookie_paths"`
+		Region            string `json:"region"`
+		XClientVersion    string `json:"x_client_version"`
+		PlatformURL       string `json:"platform_url"`
+		CookiePaths       string `json:"cookie_paths"`
+		ExchangeUserAgent string `json:"exchange_user_agent"`
 	}
 	if err := json.Unmarshal(cfgRaw, &cfg); err != nil {
 		return
@@ -96,6 +111,11 @@ func configure(raw []byte) {
 		platformURLMu.Lock()
 		platformURL = v
 		platformURLMu.Unlock()
+	}
+	if v := strings.TrimSpace(cfg.ExchangeUserAgent); v != "" {
+		exchangeUserAgentMu.Lock()
+		exchangeUserAgent = v
+		exchangeUserAgentMu.Unlock()
 	}
 	if v := strings.TrimSpace(cfg.CookiePaths); v != "" {
 		var paths []string

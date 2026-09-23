@@ -6,10 +6,15 @@
 //     desktop rewrites models only on its own proxy lane — S() 2003-2005).
 //   - cookie lane: POST {region base}/route/chat/completions, NO
 //     Authorization, X-Mimo-Source: mimocode-cli-free, X-Client-Version,
-//     adopted jar; model alias mimo-auto resolves to mimo-pro (EE/k6
-//     1884-1892). 401 → renew (me probe) → retry ONCE, except when the 401
+//     assembled ticket cookie (exchange.go buildCookieHeader order);
+//     model alias mimo-auto resolves to mimo-pro (EE/k6 1884-1892).
+//     Session faults (401, or 302 to serviceLogin, or a redirect-followed
+//     login page) → re-mint the service ticket (serviceLogin→STS exchange)
+//     → retry ONCE with the freshly routed endpoint — except when the 401
 //     body is the upstream's model-allowlist complaint (the desktop's cq()
-//     exemption, 1962-1974).
+//     exemption, 1962-1974). /user/xiaomi/me is NOT a probe on this lane:
+//     it 302s even for traffic the chat endpoint accepts (measured,
+//     docs/MIMO_AUTH.md §6.2).
 //
 // Privacy (docs/MIMO_PRIVACY.md §7): identity/tracking fields (user,
 // metadata, service_tier) and the logprob family are stripped from outbound
@@ -113,45 +118,56 @@ func sendChat(buildReq func() (*http.Request, error)) (*hostHTTPStream, int, htt
 	return hostHTTPDoStream(req)
 }
 
-// sendChatWithCookieRetry wraps sendChat with the desktop's 401 ladder for
-// the cookie lane: 401 (not model-range) → renew session → retry once →
-// give up with the final response. Other statuses and the sk lane pass
-// through untouched (the sk is permanent; a 401 means re-login).
-func sendChatWithCookieRetry(sa *storedAuth, route chatRoute, body string) (*hostHTTPStream, int, http.Header, error) {
-	buildReq := func() (*http.Request, error) {
-		return http.NewRequest(http.MethodPost, route.endpoint, strings.NewReader(body))
+// cookieLaneSessionFault reports whether a chat status means the service
+// ticket is stale and worth one re-mint: a straight 401, the 302 the
+// upstream answers when the ticket is missing/expired, or — when some
+// transport followed that redirect for us — a 200 that is actually the
+// passport login page (HTML on a JSON endpoint).
+func cookieLaneSessionFault(sc int, hdrs http.Header) bool {
+	if sc == http.StatusUnauthorized || sc == http.StatusFound {
+		return true
 	}
-	stream, sc, hdrs, err := sendChat(func() (*http.Request, error) {
-		req, berr := buildReq()
-		if berr != nil {
-			return nil, berr
+	if sc == http.StatusOK && hdrs != nil {
+		if ct := hdrs.Get("Content-Type"); strings.Contains(strings.ToLower(ct), "text/html") {
+			return true
 		}
-		route.applyHeaders(req, sa, body)
+	}
+	return false
+}
+
+// sendChatWithCookieRetry wraps sendChat with the cookie lane's renew ladder:
+// session fault (not model-range) → re-mint the service ticket → retry once
+// with a FRESHLY routed endpoint (a mint can move the region, so the route
+// is rebuilt from the mutated credential, not the cached one). Other
+// statuses and the sk lane pass through untouched (the sk is permanent; a
+// 401 means re-login).
+func sendChatWithCookieRetry(sa *storedAuth, route chatRoute, body string) (*hostHTTPStream, int, http.Header, error) {
+	attempt := func() (*http.Request, error) {
+		r := routeFor(sa) // re-resolve per attempt — region may have moved
+		req, err := http.NewRequest(http.MethodPost, r.endpoint, strings.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		r.applyHeaders(req, sa, body)
 		return req, nil
-	})
+	}
+	stream, sc, hdrs, err := sendChat(attempt)
 	if err != nil {
 		return stream, sc, hdrs, err
 	}
-	if sc != http.StatusUnauthorized || route.lane != laneCookie {
+	if route.lane != laneCookie || !cookieLaneSessionFault(sc, hdrs) {
 		return stream, sc, hdrs, err
 	}
-	// Drain the 401 body before deciding — the model-range complaint is a
+	// Drain the fault body before deciding — the model-range complaint is a
 	// terminal answer, not a session fault.
 	errBody, _ := readAllHost(stream)
-	if isModelAllowlistError(errBody) {
+	if sc == http.StatusUnauthorized && isModelAllowlistError(errBody) {
 		return nil, sc, hdrs, fmt.Errorf("mimo upstream 401 (model not allowed for this account): %s", truncateRedacted(string(errBody), 200))
 	}
 	if !renewCookieSessionFn(sa) {
-		return nil, sc, hdrs, fmt.Errorf("mimo session expired (401, renew failed): please re-adopt the desktop session or use the sk lane")
+		return nil, sc, hdrs, fmt.Errorf("mimo session expired (status %d, re-mint failed): the desktop's login rows may be stale — re-login the desktop (refreshes passToken) or use the sk lane", sc)
 	}
-	return sendChat(func() (*http.Request, error) {
-		req, berr := buildReq()
-		if berr != nil {
-			return nil, berr
-		}
-		route.applyHeaders(req, sa, body)
-		return req, nil
-	})
+	return sendChat(attempt)
 }
 
 // -----------------------------------------------------------------------------

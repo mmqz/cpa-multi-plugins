@@ -10,6 +10,7 @@ import (
 	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -163,22 +164,119 @@ func TestBuildChatBodyPrivacyStrip(t *testing.T) {
 	}
 }
 
-func TestParseMeResponse(t *testing.T) {
-	ok := parseMeResponse(200, []byte(`{"code":0,"data":{"userId":"2026001","region":"cn","country":"CN","userMark":"m1"}}`))
-	if !ok.LoggedIn || ok.UserID != "2026001" || ok.Region != "cn" {
-		t.Fatalf("me parse ok: %+v", ok)
+func TestClientSignVector(t *testing.T) {
+	// Known-answer vector: sha1("nonce=1234567890&abcdefgh") → base64 →
+	// url-escape. Independent of the implementation's own primitives.
+	if got := clientSign("1234567890", "abcdefgh"); got != "02i8YjagkChj1jgJHHyz0OSzPJs%3D" {
+		t.Fatalf("clientSign = %q", got)
 	}
-	numeric := parseMeResponse(200, []byte(`{"code":0,"data":{"userId":2026001}}`))
-	if !numeric.LoggedIn || numeric.UserID != "2026001" {
-		t.Fatalf("me parse numeric id: %+v", numeric)
+}
+
+func TestRegionSIDAndCandidates(t *testing.T) {
+	if regionSID("SGP") != "mimosgp" || regionSID("cn") != "mimopc" {
+		t.Fatalf("measured sids wrong")
 	}
-	rejected := parseMeResponse(401, []byte(`{"code":401,"message":"expired"}`))
-	if rejected.LoggedIn || !rejected.Rejected {
-		t.Fatalf("me parse rejected: %+v", rejected)
+	if regionSID("ru") != "" || regionSID("in") != "" || regionSID("") != "" {
+		t.Fatalf("unmeasured regions must not guess a sid")
 	}
-	other := parseMeResponse(403, []byte(`{"code":100,"message":"x"}`))
-	if other.LoggedIn || other.Rejected {
-		t.Fatalf("non-rejection code must stay inconclusive: %+v", other)
+	if got := regionCandidates("sgp", ""); len(got) != 1 || got[0] != "sgp" {
+		t.Fatalf("pinned candidates = %v", got)
+	}
+	auto := regionCandidates("auto", "")
+	if len(auto) != 2 || auto[0] != "sgp" || auto[1] != "cn" {
+		t.Fatalf("auto candidates = %v (sgp first: measured working cluster)", auto)
+	}
+	skip := regionCandidates("auto", "sgp")
+	if len(skip) != 1 || skip[0] != "cn" {
+		t.Fatalf("auto must skip the already-bound region: %v", skip)
+	}
+}
+
+func TestParseServiceLogin(t *testing.T) {
+	body := "&&&START&&&" + `{"code":0,"ssecurity":"sECret==","nonce":"3862976506","location":"https://sts.example/api/sts?sign=abc"}` + "&&&END&&&"
+	res, err := parseServiceLogin([]byte(body))
+	if err != nil || res.Security != "sECret==" || res.Nonce != "3862976506" || !strings.HasPrefix(res.Location, "https://sts.example") {
+		t.Fatalf("parse: %+v err=%v", res, err)
+	}
+	if _, err := parseServiceLogin([]byte(`{"code":1010,"message":"expired"}`)); err == nil {
+		t.Fatalf("code!=0 must fail")
+	}
+	if _, err := parseServiceLogin([]byte(`{"code":0}`)); err == nil {
+		t.Fatalf("missing ssecurity/nonce/location must fail")
+	}
+	if _, err := parseServiceLogin([]byte("&&&START&&&not json&&&END&&&")); err == nil {
+		t.Fatalf("garbage must fail")
+	}
+}
+
+func TestBuildCookieHeaderOrder(t *testing.T) {
+	cookies := []mimoCookie{
+		{Name: "passToken", Value: "pt", Domain: ".account.xiaomi.com"},
+		{Name: "userId", Value: "acct", Domain: ".account.xiaomi.com"},
+		{Name: "cUserId", Value: "cu", Domain: ".account.xiaomi.com"},
+		{Name: "uLocale", Value: "zh", Domain: ".xiaomi.com"},
+		{Name: "serviceToken", Value: "st", Domain: ".xiaomimimo.com"},
+		{Name: "userId", Value: "minted", Domain: ".xiaomimimo.com"},
+		{Name: "mimosgp_ph", Value: "ph", Domain: ".xiaomimimo.com"},
+		{Name: "mimosgp_slh", Value: "slh", Domain: ".xiaomimimo.com"},
+		{Name: "mimopc_ph", Value: "wrongsid", Domain: ".xiaomimimo.com"},
+	}
+	got := buildCookieHeader(cookies, "mimosgp")
+	want := "userId=minted; serviceToken=st; cUserId=cu; mimosgp_ph=ph"
+	if got != want {
+		t.Fatalf("buildCookieHeader = %q, want %q", got, want)
+	}
+	// Login-side rows and other-sid rows must never ride the header.
+	for _, banned := range []string{"passToken=pt", "uLocale=zh", "slh", "mimopc_ph"} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("leaked %q in %q", banned, got)
+		}
+	}
+	// Missing rows drop silently; unknown sid skips the _ph slot.
+	if got := buildCookieHeader(cookies[:1], ""); got != "" {
+		t.Fatalf("bootstrap-only header must be empty, got %q", got)
+	}
+	if got := buildCookieHeader(cookies, ""); strings.Contains(got, "_ph") {
+		t.Fatalf("no sid → no _ph slot: %q", got)
+	}
+}
+
+func TestPickBootstrapPrefersAccountHost(t *testing.T) {
+	cookies := []mimoCookie{
+		{Name: "cUserId", Value: "mirror", Domain: ".xiaomi.com"},
+		{Name: "cUserId", Value: "account", Domain: ".account.xiaomi.com"},
+		{Name: "serviceToken", Value: "st", Domain: ".xiaomimimo.com"},
+		{Name: "foreign", Value: "x", Domain: ".example.com"},
+	}
+	boot := pickBootstrap(cookies)
+	if len(boot) != 1 || boot[0].Name != "cUserId" || boot[0].Value != "account" {
+		t.Fatalf("pickBootstrap = %+v", boot)
+	}
+}
+
+func TestRenderCookieHeaderShapes(t *testing.T) {
+	// Minted jar → assembled M2 header.
+	minted := &storedAuth{Auth: mimoTokens{Lane: laneCookie, Region: "sgp", Cookies: []mimoCookie{
+		{Name: "passToken", Value: "pt", Domain: ".account.xiaomi.com"},
+		{Name: "userId", Value: "u9", Domain: ".account.xiaomi.com"},
+		{Name: "serviceToken", Value: "st", Domain: ".xiaomimimo.com"},
+		{Name: "mimosgp_ph", Value: "ph", Domain: ".xiaomimimo.com"},
+	}}}
+	if got := renderCookieHeader(minted, "https://mimo-server-sgp.xiaomimimo.com/api/route/chat/completions"); got != "userId=u9; serviceToken=st; mimosgp_ph=ph" {
+		t.Fatalf("minted render = %q", got)
+	}
+	// Legacy jar (no mint, upstream rows exist) → M1 whole-jar render.
+	legacy := &storedAuth{Auth: mimoTokens{Lane: laneCookie, Cookies: []mimoCookie{
+		{Name: "legacy", Value: "l", Domain: ".xiaomimimo.com", Path: "/"},
+	}}}
+	if got := renderCookieHeader(legacy, "https://mimo-server-sgp.xiaomimimo.com/api/route/chat/completions"); got != "legacy=l" {
+		t.Fatalf("legacy render = %q", got)
+	}
+	// Bootstrap-only → empty (the ladder re-mints; never leak account rows).
+	boot := &storedAuth{Auth: mimoTokens{Lane: laneCookie, Cookies: legacy.Auth.Cookies[:0]}}
+	boot.Auth.Cookies = []mimoCookie{{Name: "passToken", Value: "pt", Domain: ".account.xiaomi.com"}}
+	if got := renderCookieHeader(boot, "https://mimo-server-sgp.xiaomimimo.com/api/route/chat/completions"); got != "" {
+		t.Fatalf("bootstrap-only render must be empty, got %q", got)
 	}
 }
 
@@ -356,7 +454,14 @@ func TestRegionBaseFor(t *testing.T) {
 func cookieCred(t *testing.T) *storedAuth {
 	t.Helper()
 	return &storedAuth{
-		Auth:    mimoTokens{Lane: laneCookie, Cookies: []mimoCookie{{Name: "serviceToken", Value: "tok", Domain: ".127.0.0.1", Path: "/"}}, Region: ""},
+		Auth: mimoTokens{Lane: laneCookie, Cookies: []mimoCookie{
+			// Minted ticket (rendered by buildCookieHeader).
+			{Name: "serviceToken", Value: "tok", Domain: ".127.0.0.1", Path: "/"},
+			// Account-domain bootstrap rows (consumed by the exchange only).
+			{Name: "passToken", Value: "pt-1", Domain: ".account.xiaomi.com", Path: "/"},
+			{Name: "userId", Value: "u-test", Domain: ".account.xiaomi.com", Path: "/"},
+			{Name: "cUserId", Value: "cu-1", Domain: ".account.xiaomi.com", Path: "/"},
+		}, Region: ""},
 		Account: mimoAccount{UID: "u-test"},
 	}
 }
@@ -413,8 +518,9 @@ func TestHandleExecExecuteCookieLaneRenewRetry(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("expected 401 → renew → retry (2 calls), got %d", calls)
 	}
-	if sawRenewHeader.Get("Cookie") != "serviceToken=tok" {
-		t.Fatalf("retry lost the jar: %q", sawRenewHeader.Get("Cookie"))
+	// M2 assembled order: userId → serviceToken → cUserId (Region "" → no _ph).
+	if got := sawRenewHeader.Get("Cookie"); got != "userId=u-test; serviceToken=tok; cUserId=cu-1" {
+		t.Fatalf("retry lost the assembled ticket: %q", got)
 	}
 }
 
@@ -607,5 +713,236 @@ func TestUserDataRootFor(t *testing.T) {
 		if got := userDataRootFor(c.dbPath); got != c.want {
 			t.Fatalf("userDataRootFor(%q)=%q want %q", c.dbPath, got, c.want)
 		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// M2 exchange end-to-end (httptest passport + STS)
+// -----------------------------------------------------------------------------
+
+// startPassportStub spins one httptest server playing both the P1
+// serviceLogin endpoint and the P2 STS ticket mint, wired so P1's location
+// points at its own /api/sts. It asserts the measured wire shape: P1 query
+// (sid/_json), P1 cookie = bootstrap rows, P2 cookieless with a clientSign
+// that verifies against the same formula the client used.
+func startPassportStub(t *testing.T) *httptest.Server {
+	t.Helper()
+	// P2 first (no self-reference): the STS ticket mint.
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The wire param is url-escaped; r.URL.Query() already decoded it.
+		// Recompute the expectation from primitives, not from clientSign().
+		sum := sha1.Sum([]byte("nonce=3862976506&sECret=="))
+		if got := r.URL.Query().Get("clientSign"); got != base64.StdEncoding.EncodeToString(sum[:]) {
+			t.Errorf("P2 clientSign mismatch: %q", got)
+		}
+		if ck := r.Header.Get("Cookie"); ck != "" {
+			t.Errorf("P2 must be cookieless, got %q", ck)
+		}
+		http.SetCookie(w, &http.Cookie{Name: "serviceToken", Value: "st-new", Domain: "xiaomimimo.com", Path: "/"})
+		http.SetCookie(w, &http.Cookie{Name: "userId", Value: "u9", Domain: "xiaomimimo.com", Path: "/"})
+		http.SetCookie(w, &http.Cookie{Name: "mimosgp_ph", Value: "ph9", Domain: "xiaomimimo.com", Path: "/"})
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(func() { sts.Close() })
+	// P1: serviceLogin(_json), location pointing at the P2 server.
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("sid") != "mimosgp" || r.URL.Query().Get("_json") != "true" {
+			t.Errorf("P1 query wrong: %q", r.URL.RawQuery)
+		}
+		ck := r.Header.Get("Cookie")
+		for _, want := range []string{"passToken=pt", "userId=", "cUserId=cu"} {
+			if !strings.Contains(ck, want) {
+				t.Errorf("P1 missing bootstrap row %q in %q", want, ck)
+			}
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintf(w, "&&&START&&&%s&&&END&&&", `{"code":0,"ssecurity":"sECret==","nonce":"3862976506","location":"`+sts.URL+`/api/sts?sign=abc&followup=x"}`)
+	}))
+}
+
+// withPasspointStub points serviceLoginBase at a stub for the test's lifetime.
+func withPassportStub(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := startPassportStub(t)
+	t.Cleanup(func() { srv.Close() })
+	return srv
+}
+
+// swapServiceLoginBase redirects the exchange at the stub and restores it.
+func swapServiceLoginBase(t *testing.T, url string) {
+	t.Helper()
+	orig := serviceLoginBase
+	serviceLoginBase = url
+	t.Cleanup(func() { serviceLoginBase = orig })
+}
+
+func TestExchangeServiceTokenRoundTrip(t *testing.T) {
+	srv := withPassportStub(t)
+	swapServiceLoginBase(t, srv.URL)
+	bootstrap := []mimoCookie{
+		{Name: "passToken", Value: "pt", Domain: ".account.xiaomi.com"},
+		{Name: "userId", Value: "u9", Domain: ".account.xiaomi.com"},
+		{Name: "cUserId", Value: "cu", Domain: ".account.xiaomi.com"},
+	}
+	res, err := exchangeServiceToken(bootstrap, "mimosgp")
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if res.SID != "mimosgp" || cookieValue(res.Cookies, "serviceToken") != "st-new" {
+		t.Fatalf("mint wrong: %+v", res)
+	}
+	for _, name := range []string{"serviceToken", "userId", "mimosgp_ph"} {
+		if cookieValue(res.Cookies, name) == "" {
+			t.Fatalf("minted row %s missing", name)
+		}
+	}
+	// Minted rows must be scoped to the upstream domain.
+	for _, c := range res.Cookies {
+		if !isMimoUpstreamHost(c.Domain) {
+			t.Fatalf("minted row %s has non-upstream domain %q", c.Name, c.Domain)
+		}
+	}
+}
+
+func TestExchangeForCredentialMergesAndStamps(t *testing.T) {
+	srv := withPassportStub(t)
+	swapServiceLoginBase(t, srv.URL)
+	sa := &storedAuth{
+		Auth: mimoTokens{Lane: laneCookie, Cookies: []mimoCookie{
+			{Name: "passToken", Value: "pt", Domain: ".account.xiaomi.com"},
+			{Name: "userId", Value: "stale-acct", Domain: ".account.xiaomi.com"},
+			{Name: "cUserId", Value: "cu", Domain: ".account.xiaomi.com"},
+			{Name: "serviceToken", Value: "st-old", Domain: ".xiaomimimo.com"},
+			{Name: "mimosgp_ph", Value: "ph-old", Domain: ".xiaomimimo.com"},
+		}},
+		Account: mimoAccount{UID: "u9"},
+	}
+	if !exchangeForCredential(sa) {
+		t.Fatalf("exchange must succeed")
+	}
+	if sa.Auth.Region != "sgp" || sa.Auth.SID != "mimosgp" || sa.Auth.ExchangedAt == 0 {
+		t.Fatalf("stamping wrong: region=%q sid=%q at=%d", sa.Auth.Region, sa.Auth.SID, sa.Auth.ExchangedAt)
+	}
+	if got := buildCookieHeader(sa.Auth.Cookies, sa.Auth.SID); got != "userId=u9; serviceToken=st-new; cUserId=cu; mimosgp_ph=ph9" {
+		t.Fatalf("merged header = %q", got)
+	}
+	if strings.Contains(buildCookieHeader(sa.Auth.Cookies, sa.Auth.SID), "st-old") {
+		t.Fatalf("stale service rows must be replaced")
+	}
+	// Bootstrap rows survive the merge.
+	if cookieValue(sa.Auth.Cookies, "passToken") != "pt" {
+		t.Fatalf("bootstrap rows must survive the merge")
+	}
+}
+
+func TestRenewCookieSessionExchangePersists(t *testing.T) {
+	srv := withPassportStub(t)
+	swapServiceLoginBase(t, srv.URL)
+	var persistedName string
+	origPersist := hostAuthPersistFn
+	hostAuthPersistFn = func(name string, raw []byte) error { persistedName = name; return nil }
+	defer func() { hostAuthPersistFn = origPersist }()
+
+	sa := &storedAuth{
+		Auth: mimoTokens{Lane: laneCookie, Cookies: []mimoCookie{
+			{Name: "passToken", Value: "pt", Domain: ".account.xiaomi.com"},
+			{Name: "userId", Value: "u9", Domain: ".account.xiaomi.com"},
+			{Name: "cUserId", Value: "cu", Domain: ".account.xiaomi.com"},
+		}},
+		Account: mimoAccount{UID: "u9"},
+	}
+	if !renewCookieSession(sa) {
+		t.Fatalf("renew must mint successfully")
+	}
+	if persistedName != authFileNameFor(sa) {
+		t.Fatalf("renew must persist under the canonical name, got %q", persistedName)
+	}
+	if cookieValue(sa.Auth.Cookies, "serviceToken") == "" {
+		t.Fatalf("renew must leave a usable ticket")
+	}
+}
+
+func TestHandleExecExecuteCookieLane302RetryWithMint(t *testing.T) {
+	// Full ladder over real HTTP: chat 302 (stale ticket) → real
+	// serviceLogin→STS mint against the passport stub → retry on the freshly
+	// routed sgp endpoint with the assembled ticket header.
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		if upstreamCalls == 1 {
+			w.Header().Set("Location", "https://account.xiaomi.com/pass/serviceLogin?sid=mimosgp")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		if got := r.Header.Get("Cookie"); !strings.Contains(got, "serviceToken=st-new") {
+			t.Errorf("retry must carry the freshly minted ticket, got %q", got)
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("retry must not carry Authorization")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"2","choices":[{"message":{"role":"assistant","content":"pong"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+
+	passport := withPassportStub(t)
+	swapServiceLoginBase(t, passport.URL)
+	origSgp, origCn := regionBases["sgp"], regionBases["cn"]
+	regionBases["sgp"] = upstream.URL + "/api"
+	regionBases["cn"] = upstream.URL + "/api" // first attempt (pinned cn) hits the stub too
+	defer func() { regionBases["sgp"], regionBases["cn"] = origSgp, origCn }()
+	origPersist := hostAuthPersistFn
+	hostAuthPersistFn = func(name string, raw []byte) error { return nil }
+	defer func() { hostAuthPersistFn = origPersist }()
+
+	// Stale ticket + fresh bootstrap rows, region pinned cn so the first
+	// attempt misses the (sgp-routed) test upstream.
+	sa := &storedAuth{
+		Auth: mimoTokens{Lane: laneCookie, Region: "cn", Cookies: []mimoCookie{
+			{Name: "serviceToken", Value: "st-old", Domain: ".xiaomimimo.com", Path: "/"},
+			{Name: "passToken", Value: "pt", Domain: ".account.xiaomi.com", Path: "/"},
+			{Name: "userId", Value: "u9", Domain: ".account.xiaomi.com", Path: "/"},
+			{Name: "cUserId", Value: "cu", Domain: ".account.xiaomi.com", Path: "/"},
+		}},
+		Account: mimoAccount{UID: "u9"},
+	}
+	storage, _ := json.Marshal(sa)
+	req, _ := json.Marshal(pluginapi.ExecutorRequest{
+		AuthID:      "a1",
+		Model:       "mimo/mimo-pro",
+		Payload:     []byte(`{"model":"mimo-pro","messages":[{"role":"user","content":"ping"}]}`),
+		StorageJSON: storage,
+	})
+	resp, err := handleExecExecute(req)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	var env envelope
+	if err := json.Unmarshal(resp, &env); err != nil || !env.OK {
+		t.Fatalf("envelope: %s", string(resp))
+	}
+	if upstreamCalls != 2 {
+		t.Fatalf("expected 302 → mint → retry (2 upstream calls), got %d", upstreamCalls)
+	}
+}
+
+func TestExchangePassTokenExpiredShortCircuits(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "&&&START&&&"+`{"code":1010,"message":"session expired"}`+"&&&END&&&")
+	}))
+	defer srv.Close()
+	swapServiceLoginBase(t, srv.URL)
+	sa := &storedAuth{
+		Auth: mimoTokens{Lane: laneCookie, Cookies: []mimoCookie{
+			{Name: "passToken", Value: "pt", Domain: ".account.xiaomi.com"},
+			{Name: "userId", Value: "u9", Domain: ".account.xiaomi.com"},
+		}},
+		Account: mimoAccount{UID: "u9"},
+	}
+	if exchangeForCredential(sa) {
+		t.Fatalf("dead passToken must fail the exchange")
+	}
+	if sa.Auth.SID != "" || sa.Auth.ExchangedAt != 0 {
+		t.Fatalf("failed exchange must not stamp the credential")
 	}
 }

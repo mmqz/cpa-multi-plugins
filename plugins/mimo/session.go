@@ -1,13 +1,14 @@
 // session.go owns the cookie lane's session state: the region table (the
-// desktop's `op` map, index.beauty.mjs:1731-1733), the /user/xiaomi/me probe
-// (the desktop's login/keepalive/renew endpoint — qc() parser parity,
-// 3825-3858), region adoption, and the 401-renew ladder's plumbing.
+// desktop's `op` map, index.beauty.mjs:1731-1733), the M2 service-ticket
+// renewal (the serviceLogin→STS exchange, exchange.go), and the request
+// ladder's plumbing. The former /user/xiaomi/me probe is RETIRED: measured
+// on the real machine (2026-09-23), me 302s to serviceLogin even for
+// requests the chat endpoint accepts, so it cannot judge session health
+// (docs/MIMO_AUTH.md §6.2) — renewal is now a fresh mint.
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -136,109 +137,20 @@ func cookieMatchesPath(cookiePath, reqPath string) bool {
 	return reqPath[len(cp)] == '/'
 }
 
-// -----------------------------------------------------------------------------
-// me probe (renew / region adopt)
-// -----------------------------------------------------------------------------
-
-// meProbeResult is the qc()-shaped outcome of a /user/xiaomi/me probe.
-type meProbeResult struct {
-	LoggedIn   bool
-	UserID     string
-	Region     string
-	Rejected   bool
-	ServerCode any
-}
-
-// meURL returns {base}/user/xiaomi/me (the desktop's Ll() builder,
-// index.beauty.mjs:3784-3785).
-func meURL(base string) string {
-	return strings.TrimRight(base, "/") + "/user/xiaomi/me"
-}
-
-// probeMe performs one cookie-lane me probe for the credential: 200 with
-// code=0+userId means the session is alive; anything else means renew
-// failed (the desktop's "renewLogin → expire ladder").
-func probeMe(sa *storedAuth) (meProbeResult, error) {
-	base := regionBaseFor(sa)
-	target := meURL(base)
-	req, err := http.NewRequest(http.MethodGet, target, nil)
-	if err != nil {
-		return meProbeResult{}, err
-	}
-	applyCookieLaneHeaders(req, sa, "")
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return meProbeResult{}, fmt.Errorf("me probe: %w", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	return parseMeResponse(resp.StatusCode, raw), nil
-}
-
-// parseMeResponse mirrors the desktop qc(): a numeric code inside the server
-// rejection set marks the session rejected; code=0 with a data.userId marks
-// it logged in and carries region/country.
-func parseMeResponse(status int, body []byte) meProbeResult {
-	var obj struct {
-		Code any             `json:"code"`
-		Data json.RawMessage `json:"data"`
-	}
-	_ = json.Unmarshal(body, &obj)
-	if obj.Code != nil {
-		if code, ok := obj.Code.(float64); ok && serverRejectedCode(code) {
-			return meProbeResult{Rejected: true, ServerCode: code}
-		}
-	}
-	if status != 200 {
-		return meProbeResult{}
-	}
-	var data struct {
-		UserID any    `json:"userId"`
-		Region string `json:"region"`
-	}
-	if err := json.Unmarshal(obj.Data, &data); err != nil {
-		return meProbeResult{}
-	}
-	userID := ""
-	if s, ok := data.UserID.(string); ok {
-		userID = s
-	} else if f, ok := data.UserID.(float64); ok {
-		userID = fmt.Sprintf("%d", int64(f))
-	}
-	if userID == "" {
-		return meProbeResult{}
-	}
-	return meProbeResult{LoggedIn: true, UserID: userID, Region: strings.ToLower(strings.TrimSpace(data.Region))}
-}
-
-// serverRejectedCode mirrors the desktop's PE set (3815-3823): a small band
-// of business codes the me endpoint uses to signal "this session is dead"
-// (401 class). Anything else is inconclusive → fail-open like the desktop.
-func serverRejectedCode(code float64) bool {
-	switch int(code) {
-	case 401, 403:
-		return true
-	}
-	return false
-}
-
-// renewCookieSession is the 401-driven renew: one me probe; on success the
-// credential's region may be adopted (auto mode only) and persisted. Returns
-// whether the session renewed.
+// renewCookieSession is the ladder's renew: one fresh serviceLogin→STS mint
+// from the jar's bootstrap rows (exchange.go — the desktop re-mints per run;
+// we do the same on demand). On success the minted rows and the region/sid
+// they were bound to are persisted so subsequent requests start warm.
+// Returns whether the session renewed.
 func renewCookieSession(sa *storedAuth) bool {
-	res, err := probeMe(sa)
-	if err != nil || !res.LoggedIn {
+	if !exchangeForCredential(sa) {
 		return false
 	}
-	// Region adoption (desktop w()/nq() parity): only in auto mode, only to
-	// a region in the official table, only persisted when it actually moves.
-	if r := res.Region; r != "" && strings.ToLower(loadedRegionMode()) == "auto" {
-		if _, ok := regionBases[r]; ok && r != strings.ToLower(strings.TrimSpace(sa.Auth.Region)) {
-			sa.Auth.Region = r
-			if raw, err := buildAuthFileJSON(sa, false, "", nil); err == nil {
-				_ = hostAuthPersistFn(authFileNameFor(sa), raw)
-			}
+	if raw, err := buildAuthFileJSON(sa, false, "", nil); err == nil {
+		if perr := hostAuthPersistFn(authFileNameFor(sa), raw); perr != nil {
+			// The in-memory mutation still serves the in-flight retry;
+			// persistence failure just means the next request re-mints.
+			log.Printf("renew: persist failed: %v", perr)
 		}
 	}
 	return true
@@ -271,10 +183,34 @@ func applyCookieLaneHeaders(req *http.Request, sa *storedAuth, _ string) {
 		req.Header.Set("X-Client-Version", ver)
 	}
 	if sa != nil && len(sa.Auth.Cookies) > 0 {
-		if cookie := buildCookieJarHeader(sa.Auth.Cookies, req.URL.String()); cookie != "" {
+		if cookie := renderCookieHeader(sa, req.URL.String()); cookie != "" {
 			req.Header.Set("Cookie", cookie)
 		}
 	}
+}
+
+// renderCookieHeader picks the right Cookie shape for one upstream request:
+//
+//   - jar holds a minted serviceToken → the M2 assembled header
+//     (buildCookieHeader order userId→serviceToken→cUserId→<sid>_ph,
+//     measured on the real machine; a bare serviceToken cookie 302s).
+//   - jar holds only legacy *.xiaomimimo.com rows (old desktop builds that
+//     did persist service rows) → the M1 whole-jar render (desktop jar
+//     semantics, buildCookieJarHeader).
+//   - bootstrap rows only (no mint yet) → nothing: the request will bounce,
+//     and the ladder's re-mint is the correct response. Sending account
+//     rows upstream is the one shape that must never happen (§3.3).
+func renderCookieHeader(sa *storedAuth, target string) string {
+	cookies := sa.Auth.Cookies
+	if cookieValue(cookies, "serviceToken") != "" {
+		return buildCookieHeader(cookies, regionSID(sa.Auth.Region))
+	}
+	for _, c := range cookies {
+		if isMimoUpstreamHost(c.Domain) {
+			return buildCookieJarHeader(cookies, target)
+		}
+	}
+	return ""
 }
 
 // applyKeyLaneHeaders applies the official CLI fingerprint

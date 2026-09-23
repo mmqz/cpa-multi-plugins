@@ -33,6 +33,15 @@ func sharedHTTPClient() *http.Client {
 		// a jar.
 		sharedClient = &http.Client{
 			Timeout: 120 * time.Second,
+			// Redirects are judged raw, never followed: an expired cookie-lane
+			// session answers 302 → account.xiaomi.com/pass/serviceLogin
+			// (measured, docs/MIMO_AUTH.md §6.2) and that status is the ladder's
+			// renew trigger. Following would trade the signal for a login page
+			// and point our request at a foreign host (Go strips Cookie on
+			// cross-domain redirects, but there is nothing worth fetching there).
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 			Transport: &http.Transport{
 				MaxIdleConns:        20,
 				IdleConnTimeout:     90 * time.Second,
