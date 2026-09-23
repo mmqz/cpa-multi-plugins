@@ -182,3 +182,42 @@ Electron 41.7.2 + Chromium 146.0.7680.216，取自主 exe 版本资源）安装�
 `orchestrator/`、`worktree/` 均为运行数据。sk lane 登录态只认 `auth.json` 的 `xiaomi` 条目
 （`mimo-key-name` 仅密钥名、`mimo-login-pending.json` 仅登录中临时态、`mcp-auth.json` 仅 MCP OAuth，
 皆非账号登录态）；桌面 SSO 登录态不在此目录，只在 §6 #1 的分区 Cookies 库。
+
+### §6.1 真机实测勘误（第二轮，Windows 11 实测，2026-09-23）
+
+上表是**反混淆静态取证**的推断口径；本节是桌面 **26.922.222056**（Electron 41 /
+Chromium 146）Windows 11 真机、桌面运行中且已登录状态下的**实测勘误**（插件仓 tip
+277606b，`cmd/probe` 同链路验证）。测试经本机 Clash TUN（fake-IP 段，出站走
+127.0.0.1:10573 代理）；所引 HTTP 状态码为服务端响应，代理不影响结论（同环境下
+`platform.xiaomimimo.com` 返回 200，网络链路正常）。
+
+| # | 静态推断 | 真机实测 |
+|---|---|---|
+| 1 | 分区库含 serviceToken 与 `*.xiaomimimo.com` 会话；`encrypted_value` = os_crypt v10 | 库在（`Network\Cookies`）✅ 但仅 **7 条账号域 cookie**（`.xiaomi.com`：`_ga`/`_ga_XWN774PE8J`/`cUserId`/`uLocale`；`.account.xiaomi.com`：`cUserId`/`passToken`/`userId`），**零 serviceToken、零 `*.xiaomimimo.com` 行**；且 **7 条 `encrypted_value` 全空、明文 `value` 列**——os_crypt 链路在本机/本构建上根本没有输入。整库 20480 字节原始扫描 `xiaomimimo`/`mimo-server` 零命中（含已删除页残留） |
+| 2 | `mimocode/auth.json` 持久 sk 凭据 | **不存在**。目录存在（`builtin_skills/ compose/ log/ memory/ snapshot/ storage/ tool-output/ mimocode.db`），伴生文件 `mimo-key-name`、`mimo-login-pending.json`、`mcp-auth.json` 亦全部缺席；全盘扫 `auth.json` 仅命中无关应用。`mimocode.db`（202MB）全文扫 `auth.json`/`serviceToken`/`passToken`/`mimo_sk`/`xiaomimimo`/`sk-` 零命中。**auth.json 只在用户跑过一次 CLI/引擎 sk 登录后才生成；纯桌面安装不产生它** |
+| 3 | `plugin-secrets.json` / `profile-credentials.json` | 两者均**不存在**（按需生成，非安装即有——自动化/浏览器桥功能从未使用） |
+| 4 | 账号对象缓存仅内存 | 与实测一致，且这是全表唯一与真机吻合的行；服务票据的完整形态见下 |
+
+**上游拒绝实验**：把 7 条 cookie 原样组装 header 打 `me` 端点（`cmd/probe` 同链路）——
+`mimo-server-sgp`/`mimo-server-cn` 双双 **302** →
+`account.xiaomi.com/pass/serviceLogin?callback=…mimo-server-sgp…/api/sts?sign=…&sid=mimosgp`
+（cn 区 `sid=mimopc`）。即：上游要的是**绑定 `sid=mimosgp`/`sid=mimopc` 的 serviceToken**，
+账号域 passToken/userId 不构成对 mimo-server 的鉴权。
+
+**修订结论（推翻本节原"持久凭据只有两处"）**：桌面运行期的可用服务票据
+（serviceToken）**不落盘**——桌面拿 passToken 走 `/sts` 换 serviceToken，结果只活在
+进程内存（或为会话期 cookie，不持久化进 Cookies 库）。实测 passToken 过期时间在桌面
+运行期间从 02:10:42Z 滚动刷新为 06:03:06Z，说明续期链路活跃但只回写 passToken 本身。
+因此纯桌面安装的持久账号材料**只有一处**：分区库的账号域 cookie 集（本机上还是明文），
+它足以**引导**（刷新登录态）但**不足以直接调用** mimo-server API。
+
+**对插件的影响**：
+- DPAPI + `Local State` 解密链在真机验证通过（`CryptUnprotectData` 成功解出 32 字节
+  AES-256-GCM 密钥）——机制本身成立，保留以覆盖未来会加密 cookie 的构建/机器。
+- `cookies.go` 的 `*.xiaomimimo.com` 过滤在真机上收养结果为空集（报
+  "no usable *.xiaomimimo.com cookies"）——这是**正确行为**（账号域 cookie 重放会被 302 拒，
+  过滤器挡住了无意义重放）。
+- cookie lane 在当前桌面包上的可用路径重定义为 **M2**：收养 passToken/userId（本机构建
+  上是明文，无需 DPAPI）作为引导材料，插件进程内复刻 `serviceLogin → /api/sts` 换票链，
+  自行铸造 serviceToken 后再出网。M1 的 cookie lane 验收口径按此降级为"引导材料收养 +
+  链路构件真机可用"，不承诺端到端调用。

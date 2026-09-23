@@ -11,6 +11,11 @@ from official sources and documented in
 | **sk lane**（主） | platform OAuth 永久 `sk` | `{issued url}/chat/completions`（OpenAI 兼容） | `Authorization: Bearer` + `X-Mimo-Source: mimocode-cli`（官方 CLI `plugin/mimo.ts`） |
 | **cookie lane**（副） | 收养桌面端 SSO 会话 | `{region}/route/chat/completions` | 无 Authorization、`X-Mimo-Source: mimocode-cli-free`、`X-Client-Version`、桌面 Cookie jar（桌面引擎 lane，`index.mjs`） |
 
+> **真机状态（26.922.222056 实测，2026-09-23）**：sk lane 可用（跑一次 sk 登录即可）；
+> cookie lane 当前桌面包上**不产出可用凭据**——分区库只含账号域 cookie（无
+> serviceToken/无 `*.xiaomimimo.com` 行），重放被上游 302 拒。换票收养在 M2 落地，
+> 详见 [`docs/MIMO_AUTH.md` §6.1](../../docs/MIMO_AUTH.md)。
+
 > 本插件为独立再实现（clean-room），未复制任何官方/社区代码；协议形状以官方
 > CLI 与桌面包静态取证为准，社区代理（LIGHTNINGWHALE）的声明仅在官方包中得到
 > 印证后才被采纳（两处臆造——`mimocode/0.1.0` UA 与 `mimo-x-*` 模型名——未采纳）。
@@ -33,9 +38,9 @@ AuthRefresh 仅回显元数据。
 
 插件注册后自动扫描桌面端 Chromium Cookie 库（`persist:xiaomi-account` 分区）：
 
-- Windows `%APPDATA%\Xiaomi MiMo AI\Partitions\xiaomi-account\Cookies`（含 "Xiaomi MiMo" 变体）
-- macOS `~/Library/Application Support/Xiaomi MiMo AI\Partitions\...`（**解密需 Keychain，M1 不支持** → 请用 sk lane）
-- Linux `~/.config/Xiaomi MiMo AI\Partitions\...`
+- Windows `%APPDATA%\Xiaomi MiMo AI\Partitions\xiaomi-account\Network\Cookies`（Electron 41 新布局优先，旧布局 `…\xiaomi-account\Cookies` 兜底；含 "Xiaomi MiMo" 变体）
+- macOS `~/Library/Application Support/Xiaomi MiMo AI/Partitions/...`（**解密需 Keychain，M1 不支持** → 请用 sk lane）
+- Linux `~/.config/Xiaomi MiMo AI/Partitions/...`
 
 只收集 `*.xiaomimimo.com` 行（登录侧 `.xiaomi.com` 凭据不会被错误重放）；临时副本
 打开，绝不写桌面文件。Windows v10 = AES-256-GCM + DPAPI(Local State)；
@@ -43,6 +48,22 @@ Linux v10/v11 = AES-128-CBC（PBKDF2 peanuts/saltysalt）。
 
 Cookie lane 行为与桌面引擎 lane 对齐：401 → 重探 `/user/xiaomi/me` 续期 → 重试一次
 （"模型不在可用范围"豁免续期）；区域表 cn/sgp/ru/in，auto 模式按 me 响应收养。
+
+### 真机实测边界（勿跳过）
+
+在实测过的官方构建（26.922.222056，Windows 11）上，分区库只有 7 条**账号域**
+cookie（`passToken`/`userId`/`cUserId` 等的 `.xiaomi.com`/`.account.xiaomi.com` 行），
+`encrypted_value` 全空（明文落盘）、零 `*.xiaomimimo.com` 行——因此上面的过滤器
+必然收养出空集（报 "no usable *.xiaomimimo.com cookies"），这是**预期行为**：
+实测把账号域 cookie 原样重放，上游 `me` 端点返回 302 →
+`serviceLogin?sid=mimosgp/mimopc&callback=…/api/sts`，即上游只认 sid 绑定的
+serviceToken，而它在当前桌面包里不落盘（桌面运行时 passToken→/sts 换票后仅存活于
+进程内存）。DPAPI + Local State 解密链真机验证通过，保留以覆盖未来加密构建。
+
+**M1 验收口径**：cookie lane = 引导材料收养 + 链路构件真机可用（布局探测/SQLite 读取/
+DPAPI 解密/me 探测），不承诺端到端调用；端到端换票（passToken →
+`serviceLogin → /api/sts` → serviceToken）在 **M2** 实现。sk lane 不受影响：跑一次
+sk 登录即有 `auth.json`（纯桌面安装不会预生成它）。
 
 ## 隐私边界（硬约束，docs/MIMO_PRIVACY.md §7）
 

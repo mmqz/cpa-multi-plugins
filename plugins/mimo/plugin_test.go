@@ -601,7 +601,7 @@ func TestUserDataRootFor(t *testing.T) {
 		{filepath.FromSlash(winBase) + string(filepath.Separator) + filepath.Join("Partitions", "xiaomi-account", "Network", "Cookies"), winBase},
 		// Custom cookie_paths outside a Partitions tree: fallback keeps the
 		// old two-level-parent behavior (Local State lookup fails loudly).
-		{filepath.Join("/opt", "custom", "Cookies"), "/opt"},
+		{filepath.Join("/opt", "custom", "Cookies"), filepath.FromSlash("/opt")},
 	}
 	for _, c := range cases {
 		if got := userDataRootFor(c.dbPath); got != c.want {
