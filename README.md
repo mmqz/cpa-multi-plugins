@@ -1,13 +1,13 @@
 # cpa-multi-plugins
 
-> CPA (CLIProxyAPI) 动态库插件集合：CodeBuddy / WorkBuddy / Trae / Qoder 的 CN + Intl 版本
+> CPA (CLIProxyAPI) 动态库插件集合：CodeBuddy / WorkBuddy / Trae / Qoder 的 CN + Intl 版本，以及 ZCode（智谱 GLM 编码套餐，Z.AI + BigModel）
 >
-> 主分支 7 个插件覆盖 4 个平台 × 2 个版本（CodeBuddy CN 与 WorkBuddy 已合并），让 CPA 一个 `/v1/chat/completions` 接口调用所有模型。`zcode` 分支新增 ZCode 插件（智谱 GLM 编码套餐，Z.AI + BigModel）。
+> 主分支 4 个插件（workbuddy / trae / qoder / zcode）覆盖 4 个平台 × 2 个版本（CodeBuddy CN 与 WorkBuddy 已合并）+ 智谱 GLM 编码套餐（Z.AI + BigModel），让 CPA 一个 `/v1/chat/completions` 接口调用所有模型。ZCode 已于 v0.12.84 并入主分支。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey)]()
-[![Release](https://img.shields.io/badge/release-v0.2.0-blue)](../../releases)
+[![Release](https://img.shields.io/badge/release-v0.12.85-blue)](../../releases)
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)](../../actions)
 
 ## 项目目标
@@ -21,7 +21,7 @@
 | `workbuddy` | CodeBuddy / WorkBuddy 三区合并（CN + Global + Intl） | OpenAI 兼容 | ✅ 每日 | ✅ credits | ✅ functional |
 | `trae` | Trae 三变体合并（Code CN + SOLO CN + Intl） | llm_utils_chat / Web SOLO | ✅ 每日 | ✅ v2 pack 优先级 | ✅ functional |
 | `qoder` | Qoder 双区合并（CN + Intl） | COSY 签名 | ✅ 每日 | ✅ quota | ✅ functional |
-| `zcode`（zcode 分支） | 智谱 GLM 编码套餐双 provider 合并（Z.AI + BigModel） | OpenAI 兼容 + anthropic 翻译 + 签名 V4 + off-peak 票务 | —（claim 需验证码侧车） | ✅ billing/balance | ✅ M1–M3（zcode 分支） |
+| `zcode` | 智谱 GLM 编码套餐双 provider 合并（Z.AI + BigModel） | OpenAI 兼容 + anthropic 翻译 + 签名 V4 + off-peak 票务 | —（claim 需验证码侧车） | ✅ billing/balance | ✅ functional |
 
 
 ## 功能对标
@@ -74,9 +74,9 @@
 - 非流式：上游 SSE 聚合 → 单个 `chat.completion` 对象
 - 流式：实时转发 OpenAI SSE chunks（`plan_item` → `delta.content`，`token_usage` → `usage`）
 
-## 为什么是 8 个独立插件而不是合并？
+## 为什么是 4 个独立插件而不是合并？
 
-CPA 的插件架构基于 `auth.identifier` + `executor.identifier`——**每个 `.so` 只能注册一个 provider name**。CPA 的 `HasAuthProvider(provider)` 按 identifier 精确匹配，所以合并家族后统一使用单一 provider key（`workbuddy` / `qoder` / `trae`），区域内差异（CN/Intl/SOLO 等）通过账号文件内的字段路由，旧插件名的账号文件启动时自动收养。
+CPA 的插件架构基于 `auth.identifier` + `executor.identifier`——**每个 `.so` 只能注册一个 provider name**。CPA 的 `HasAuthProvider(provider)` 按 identifier 精确匹配，所以合并家族后统一使用单一 provider key（`workbuddy` / `qoder` / `trae` / `zcode`），区域内差异（CN/Intl/SOLO 等）通过账号文件内的字段路由，旧插件名的账号文件启动时自动收养。
 
 ### 如果你想减少插件数量
 
@@ -99,7 +99,7 @@ openai-compatibility:
 
 **方案 2：只装你需要的插件**
 
-3 个插件互相独立，不需要全装。每个插件内部支持区域/变体选择（配置或自动收养）：
+4 个插件互相独立，不需要全装。每个插件内部支持区域/变体选择（配置或自动收养）：
 
 | 你的需求 | 装哪些插件 |
 |---|---|
@@ -110,7 +110,8 @@ openai-compatibility:
 | CodeBuddy Intl | `workbuddy`（login_region: "intl"；自动收养 codebuddy-intl 账号文件） |
 | QoderWork CN | `qoder`（login_region: "cn"，默认） |
 | Qoder Intl | `qoder`（login_region: "intl"，自动收养 qoder-intl 账号文件） |
-| 全都要 | 全部 3 个 |
+| ZCode（智谱 GLM 编码套餐） | `zcode`（login_provider: "zai" 或 "bigmodel"） |
+| 全都要 | 全部 4 个 |
 
 **方案 3：等 CPA 上游支持多 provider 插件**
 
@@ -144,6 +145,7 @@ plugins:
     workbuddy: { enabled: true, login_platform: "CLI", login_region: "cn" }  # CLI/ide；region: cn|intl（v0.11.0 起三区合一）
     trae: { enabled: true, login_variant: "cn" }  # cn|solo|intl（v0.12.0 起三合一）
     qoder: { enabled: true, login_region: "cn" }  # cn|intl（v0.10.0 起二合一）
+    zcode: { enabled: true, login_provider: "zai" }  # zai|bigmodel（v0.12.84 起随主分支提供）
 ```
 
 ### 4. 重启 CPA，登录账号
@@ -187,7 +189,7 @@ cd plugins/trae && CGO_ENABLED=1 go build -buildmode=c-shared -o trae.so .
 | **[Ttungx/trae-solo-local-api](https://github.com/Ttungx/trae-solo-local-api)** | TypeScript | Trae 上游无原生 thinking 参数 / agent 字段 4023 实测（Body 白名单依据）<br>image_url 多模态透传实测 | trae |
 | **[TriDefender/zcode-api](https://github.com/TriDefender/zcode-api)** | TypeScript | ZCode 智谱 GLM 编码套餐反代——OAuth 中转登录 / 签名 V4 / 身份头（g6n/TV）/ 账务平面 / 模型目录 | zcode |
 | **[zai-org/ZCode](https://github.com/zai-org/ZCode)** | TypeScript | ZCode 官方开源客户端（仅取账户级线路协议形状）：start-plan anthropic 翻译层 + 官方 system 块 + 业务错误码全表（M2）<br>off-peak 错峰票务五端点 wire 契约 + 排队/废票决策（M3） | zcode |
-| **[router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** | Go | CPA 插件 SDK（examples/plugin/{executor,auth}/go/）<br>pluginapi / pluginabi 类型定义 | 全部 8 个插件 |
+| **[router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** | Go | CPA 插件 SDK（examples/plugin/{executor,auth}/go/）<br>pluginapi / pluginabi 类型定义 | 全部 4 个插件 |
 
 ### 各插件的具体借鉴文件
 
@@ -247,7 +249,7 @@ cd plugins/trae && CGO_ENABLED=1 go build -buildmode=c-shared -o trae.so .
 - **redirect_uri**：`qoder://aicoding.aicoding-agent/login-success`（vs CN 的 `qoder-work-cn://`）
 - **无签到**（Intl 平台无签到机制）
 
-#### `plugins/zcode`（zcode 分支，clean-room from TriDefender/zcode-api + zai-org/ZCode）
+#### `plugins/zcode`（clean-room from TriDefender/zcode-api + zai-org/ZCode）
 - **行为基线（闭源仿冒）**：`TriDefender/zcode-api/src/{auth/oauth.ts, proxy/identity.ts, proxy/client-signing.ts, proxy/upstream.ts, server/routes-quota.ts}`（OAuth 中转登录 / g6n+TV 身份头 / 签名 V4 全套 / 账务平面）
 - **KeyResolver 凭证链（M1.1）**：`TriDefender/zcode-api/src/auth/resolver.ts` + 官方开源 `apps/zcode-cli/.../coding-plan-api-key.ts`（两实现逐行同构 = 账户级 API）：`z/login → getCustomerInfo → api_keys → copy` 终态 `{apiKeyId}.{apiKeySecret}`
 - **start-plan anthropic 翻译层（M2）**：官方开源 `translator/openai-to-anthropic.ts` + `translator/sse-translator.ts` + `proxy/system-prompt.ts` + `zcode_system.json`（3 官方块逐字）+ `proxy/body-transformer.ts`（system 前置/context_prefix/metadata/cache_control 规范化）+ `failure-provider-business-codes.ts`（业务码全表）
@@ -289,9 +291,9 @@ Trae / CodeBuddy / Qoder 平台会不定期更新协议。本项目通过以下�
 
 ## Status
 
-✅ **8/8 plugins fully functional** — v0.2.0 released
-- 5 functional plugins forked from Sliverkiss/cpa-plugin (workbuddy, codebuddy-cn, codebuddy-intl, qoder-cn, qoder-intl)
-- 3 Trae plugins fully implemented (trae-cn, trae-solo-cn, trae-intl)
+✅ **4/4 plugins fully functional** — v0.12.85 released
+- `workbuddy` / `trae` / `qoder`：家族合并后的主线插件（原 8 个单平台插件已按家族并入）
+- `zcode`：智谱 GLM 编码套餐，v0.12.84 起并入主分支（M1–M3 完整）
 - All plugins compile to .so/.dll/.dylib on 5 platforms (linux amd64/arm64, darwin amd64/arm64, windows amd64)
 - GitHub Actions release workflow: multi-platform build + auto release on tag push
 
