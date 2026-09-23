@@ -342,7 +342,12 @@ func normalizeExpiresAt(v int64) int64 {
 // 非 2xx 时 rc 为 nil、body 为上游响应体（供调用方 Classify）、err 为 nil；
 // 只有传输层失败才返回 err。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
-	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpChat, bytes.NewReader(PrepareBody(body, a.Variant)))
+	// issue #13 诊断：出站前的指纹行（TRAE_DEBUG_PAYLOAD=1 时输出），记录
+	// 上游真正收到的白名单产物——与执行器入口的 raw 行按指纹对齐即可判断
+	// 两条执行链的出站请求是否逐字节一致。
+	prepared := PrepareBody(body, a.Variant)
+	LogPreparedHead(a.UID, a.Variant, body, prepared)
+	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpChat, bytes.NewReader(prepared))
 	if err != nil {
 		return nil, 0, nil, err
 	}

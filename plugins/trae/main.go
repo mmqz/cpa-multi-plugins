@@ -1898,6 +1898,9 @@ func handleExecExecute(request []byte) ([]byte, error) {
 	}
 
 	// Call ChatStream (always stream upstream; aggregate for non-stream).
+	// issue #13 诊断：入口指纹行（TRAE_DEBUG_PAYLOAD=1 时输出），与 ChatStream
+	// 的 prepared 行对齐后可实测非流式/流式两条链的出站请求是否一致。
+	upstream.LogChatHead("execute", req.Model, req.Payload)
 	rc, status, body, err := upstreamClient.ChatStream(a, req.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("execute: chat stream: %w", err)
@@ -2096,6 +2099,8 @@ func handleExecStream(request []byte) ([]byte, error) {
 		persistRefreshedAuth(req.ExecutorRequest, a)
 	}
 
+	// issue #13 诊断：同 handleExecExecute，两入口指纹行使两条执行链可对比。
+	upstream.LogChatHead("stream", req.Model, req.Payload)
 	rc, status, body, err := upstreamClient.ChatStream(a, req.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("stream: chat stream: %w", err)
