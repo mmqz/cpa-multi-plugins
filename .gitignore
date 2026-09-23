@@ -49,3 +49,6 @@ plugins/workbuddy/workbuddy
 # Local probe tools (kept out of the repo by convention — dev-only helpers)
 plugins/trae/modelsprobe
 plugins/trae/tools/
+plugins/mimo/mimo
+plugins/mimo/mimo.so
+plugins/mimo/mimo.h
