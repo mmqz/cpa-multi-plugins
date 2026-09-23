@@ -1,9 +1,7 @@
 //go:build windows
 
-// cookies_windows.go — Windows os_crypt: v10 cookies are AES-256-GCM under
-// the 32-byte key stored DPAPI-wrapped in Local State
-// (os_crypt.encrypted_key). The plugin runs as the same OS user as the
-// desktop, so CryptUnprotectData resolves without prompting.
+// dpapi_windows.go — 探针的 DPAPI 环节，与插件 cookies_windows.go 同源
+// （crypt32 CryptUnprotectData，无附加熵 —— Chromium 包装 os_crypt 密钥不用熵）。
 package main
 
 import (
@@ -13,16 +11,6 @@ import (
         "golang.org/x/sys/windows"
 )
 
-func decryptPlatformV10(payload []byte, userDataDir, version string) ([]byte, error) {
-        key, err := localStateCryptKey(userDataDir, dpapiUnprotect)
-        if err != nil {
-                return nil, err
-        }
-        return aesGCMDecrypt(key, payload)
-}
-
-// dpapiUnprotect unwraps one DPAPI blob (crypt32 CryptUnprotectData, no
-// extra entropy — Chromium wraps os_crypt keys without it).
 func dpapiUnprotect(blob []byte) ([]byte, error) {
         if len(blob) == 0 {
                 return nil, fmt.Errorf("empty dpapi blob")
