@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,14 @@ var (
 	// plus per-IP token-bucket rate limiting on mutating endpoints.
 	managementAPIKey   = ""
 	managementAPIKeyMu sync.RWMutex
+
+	// streamHeadTimeoutSecs: config_yaml stream_head_timeout, integer seconds,
+	// default 0 = disabled. When > 0 the async streaming hand-off waits up to
+	// that long for the first decisive upstream frame, so a failure that lands
+	// before the model starts answering can still be reported to the host as a
+	// plain failed request carrying a real HTTP status (see streamHeadGate).
+	streamHeadTimeoutSecs int
+	streamHeadTimeoutMu   sync.RWMutex
 )
 
 // Default URL tries localhost first (works for both bare-metal and Docker
@@ -67,6 +76,7 @@ func configure(raw []byte) {
 	nextKeepaliveAuto := true
 	nextLoginRegion := regionCN // reset to default on reconfigure (like scheduler_mode)
 	nextMgmtKey := ""
+	nextStreamHeadTimeout := 0
 
 	cfgURL, cfgKey := "", ""
 	if len(raw) > 0 {
@@ -114,6 +124,15 @@ func configure(raw []byte) {
 					v = strings.Trim(v, "\"'")
 					nextLoginRegion = normalizeRegion(v)
 				}
+				if strings.HasPrefix(line, "stream_head_timeout:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "stream_head_timeout:"))
+					v = strings.TrimSpace(strings.Trim(v, "\"'"))
+					// A non-integer value leaves the default (0 = off): the gate
+					// must never turn a typo in config.yaml into a stall.
+					if secs, errParse := strconv.Atoi(v); errParse == nil {
+						nextStreamHeadTimeout = secs
+					}
+				}
 			}
 		}
 	}
@@ -139,6 +158,8 @@ func configure(raw []byte) {
 	loginRegion = nextLoginRegion
 	loginRegionMu.Unlock()
 
+	setStreamHeadTimeout(nextStreamHeadTimeout)
+
 	// management key: config_yaml > env > keep existing. Empty stays empty
 	// (plugin-layer auth disabled, host middleware still guards).
 	if nextMgmtKey == "" {
@@ -150,6 +171,30 @@ func configure(raw []byte) {
 
 	resolveUsageReport(cfgURL, cfgKey)
 	ensureScheduler()
+}
+
+// setStreamHeadTimeout stores the head-gate window in seconds. Negative values
+// clamp to 0 (= disabled): the gate is opt-in, and "off" must be reachable from
+// config.yaml alone (stream_head_timeout: -1 is a plausible way to ask for it).
+func setStreamHeadTimeout(secs int) {
+	if secs < 0 {
+		secs = 0
+	}
+	streamHeadTimeoutMu.Lock()
+	streamHeadTimeoutSecs = secs
+	streamHeadTimeoutMu.Unlock()
+}
+
+// streamHeadTimeout returns the configured head-gate window. Zero disables the
+// gate, which keeps the async streaming hand-off byte-identical to v0.12.84.
+func streamHeadTimeout() time.Duration {
+	streamHeadTimeoutMu.RLock()
+	secs := streamHeadTimeoutSecs
+	streamHeadTimeoutMu.RUnlock()
+	if secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // resolveUsageReport fills usageReportURL/key from config → env → secret files.

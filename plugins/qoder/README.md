@@ -16,6 +16,7 @@
 | **动态模型** | COSY 拉取 `/algo/api/v2/model/list`（chat scene），10 静态模型兜底 |
 | **大上下文** | 客户端自带 system 时自动模板瘦身（省 ~10K token/请求）+ 消息逐字透传（tool_calls/多模态 content 保真）+ 客户端 tools 直通；上游判输入过大（413/过长文案）时给出明确指引，与账号积分问题严格区分 |
 | **每日签到** | 面板手动签到（单账号/批量）+ 09:00/21:00 定时自动签到，签到后返回最新积分快照。v0.8.21：CN/Intl 统一走 campaigns 领取系统——上游已全局禁用 legacy CN daily-check-in（claim 恒 409 且不发积分，2026-09-21 实测）；legacy status 仅作 CN 只读统计补充。v0.8.22：billing 面全量携带桌面端 Cosy 身份头（User-Agent: Qoder / Cosy-ClientType: 10 / Cosy-Version: 0.3.4）——上游按该头门控 campaigns 响应，裸请求可能返回 showCampaign:false 导致当日权益静默漏签（bfSan 实测 2026-09-21）|
+| **流式首包门** | 可选（v0.8.23，默认关）：`stream_head_timeout: <秒>` 开启后，异步流式在移交前先等首包判决——上游把账号级错误发成 HTTP 200 + 帧内 `statusCodeValue>=400`/`body.error` 时，移交前失败直接按普通失败返回并带上帧里的真实状态（缺失/越界落 502，不编造 401/403 之类会误导冷却的码），宿主得以换号/冷却而不是收到"成功的空回答"；真正开始吐内容后保持原样（含 in-band 错误），静默/超时等价于关闭态。0 = 逐字节沿用旧行为 |
 | **积分面板** | 账号卡片：昵称/积分/计划/签到状态/操作（签到/刷新/选用） |
 | **token 保活** | 22:00 定时刷新；按 token 前缀路由（drt- → deviceToken/refresh，jrt- → jobToken/refresh），PAT 永不劫持 OAuth 刷新 |
 | **auth 隔离** | 文件名前缀 `qoder-` 过滤（含收养的 `qoder-cn-`/`qoder-intl-` 旧文件），与 workbuddy 等其他插件互不干扰 |
