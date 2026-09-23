@@ -73,7 +73,13 @@ func desktopCookieCandidates() []string {
 	}
 	var out []string
 	for _, base := range bases {
-		out = append(out, filepath.Join(base, "Partitions", "xiaomi-account", "Cookies"))
+		// Chromium 96+ / Electron 15+ moved the cookie store under a
+		// Network subdir — the shipped desktop builds on Electron 41
+		// (Chromium 146), so try that layout first, then the legacy
+		// pre-96 location.
+		out = append(out,
+			filepath.Join(base, "Partitions", "xiaomi-account", "Network", "Cookies"),
+			filepath.Join(base, "Partitions", "xiaomi-account", "Cookies"))
 	}
 	out = append(out, loadedCookiePaths()...)
 	return out

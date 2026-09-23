@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -578,5 +579,33 @@ func TestHostOnlyCookieMatching(t *testing.T) {
 	}
 	if _, err := url.Parse("https://x.example"); err != nil {
 		t.Fatalf("sanity url parse: %v", err)
+	}
+}
+
+func TestUserDataRootFor(t *testing.T) {
+	// Expectations go through FromSlash so the table is separator-agnostic.
+	winBase := filepath.FromSlash("C:/Users/u/AppData/Roaming/Xiaomi MiMo AI")
+	uxBase := filepath.FromSlash("/home/u/.config/Xiaomi MiMo AI")
+	cases := []struct {
+		dbPath string
+		want   string
+	}{
+		// Chromium 96+ / Electron 15+ layout (this desktop: Electron 41).
+		{winBase + "/Partitions/xiaomi-account/Network/Cookies", winBase},
+		// Legacy pre-96 layout still probed for old installs.
+		{winBase + "/Partitions/xiaomi-account/Cookies", winBase},
+		// POSIX variants.
+		{uxBase + "/Partitions/xiaomi-account/Network/Cookies", uxBase},
+		{uxBase + "/Partitions/xiaomi-account/Cookies", uxBase},
+		// Windows separator style must resolve identically.
+		{filepath.FromSlash(winBase) + string(filepath.Separator) + filepath.Join("Partitions", "xiaomi-account", "Network", "Cookies"), winBase},
+		// Custom cookie_paths outside a Partitions tree: fallback keeps the
+		// old two-level-parent behavior (Local State lookup fails loudly).
+		{filepath.Join("/opt", "custom", "Cookies"), "/opt"},
+	}
+	for _, c := range cases {
+		if got := userDataRootFor(c.dbPath); got != c.want {
+			t.Fatalf("userDataRootFor(%q)=%q want %q", c.dbPath, got, c.want)
+		}
 	}
 }

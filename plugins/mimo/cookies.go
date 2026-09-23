@@ -21,14 +21,32 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+// userDataRootFor walks a Cookies-store path back to the Electron user-data
+// dir (the Local State lookup root). Chromium 96+ / Electron 15+ lay the
+// store out as <user-data>/Partitions/<name>/Network/Cookies; older builds
+// used <user-data>/Partitions/<name>/Cookies. Paths outside a Partitions
+// tree (custom cookie_paths config) fall back to the two-level parent, where
+// a wrong guess only surfaces as a loud Local State error.
+func userDataRootFor(dbPath string) string {
+	norm := strings.ReplaceAll(filepath.ToSlash(dbPath), "\\", "/")
+	parts := strings.Split(norm, "/")
+	for i, p := range parts {
+		if i > 0 && p == "Partitions" {
+			return filepath.FromSlash(strings.Join(parts[:i], "/"))
+		}
+	}
+	return filepath.Dir(filepath.Dir(dbPath))
+}
 
 // readCookiesFromDB copies the Chromium Cookies store (plus its WAL/journal
 // sidecars) to a temp file and returns every decryptable *.xiaomimimo.com
 // cookie row. The copy sidesteps the running desktop's exclusive lock and
 // hot-journal replay.
 func readCookiesFromDB(dbPath string) ([]mimoCookie, string, error) {
-	userDataDir := filepath.Dir(filepath.Dir(dbPath)) // <user-data>/Partitions/xiaomi-account/Cookies
+	userDataDir := userDataRootFor(dbPath)
 	tmp, err := os.MkdirTemp("", "mimo-adopt-")
 	if err != nil {
 		return nil, "", fmt.Errorf("temp dir: %w", err)

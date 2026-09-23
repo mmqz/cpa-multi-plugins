@@ -77,8 +77,10 @@ URL 重写为 `{cp()}/chat/completions`（或 `/responses`），body 归一化�
 
 ### 3.3 SSO 凭据体系与两阶段 serviceToken
 
-- 账号缓存（5129-5190）：`{passToken, userId, cUserId, serviceTokens:{sid→{value,expiresAt}}}` 存
-  Electron safeStorage（Windows=DPAPI），账号整体 7 天过期（`MAX_AGE_MS`）。
+- 账号对象缓存（`lG` 5124-5214）：`{passToken, userId, cUserId, serviceTokens:{sid→{…}}, nickName, allInfo}`，
+  账号整体 7 天过期（`MAX_AGE_MS`=10080min）。注意：本构建唯一装配点 `new lG(NG())`（6716）接入的是
+  **内存 Map**（`NG` 6690）——该缓存不落盘，持久面是分区 Cookie（§6 #1）；类内 "Account saved to
+  secure storage" 日志措辞与实际注入的存储后端不符，属实现漂移，勿据此断言 DPAPI 落盘。
 - **ServiceTokenManager（5215-5415）是小米原生 SSO SDK 的忠实 JS 移植**（日志注释直接引用原厂
   `SSO_curl.cpp` 行号）：
   1. Phase 1：`GET https://account.xiaomi.com/pass/serviceLogin`（Cookie：`userId`+`passToken`+`cUserId`，
@@ -126,7 +128,7 @@ URL 重写为 `{cp()}/chat/completions`（或 `/responses`），body 归一化�
 | 10 | 静态四模型 `mimo-x-pro-preview`/`mimo-x-flash-preview`/`mimo-pro`/`mimo-flash` | **两个 `mimo-x-*` 官方包零命中**；官方核心表 = `mimo-auto`/`mimo-flash`/`mimo-pro`（1876-1878、2045-2080），另有 `mimo-v2.5-pro` 兜底默认（2079）与 sk lane 动态 `/user/available_models`（fw 2081-2103，Bearer sk，`{code:0,data:{groups:[{models:[…]}]}}`） | ❌ **半误**：`mimo-pro`/`mimo-flash` 正确，`mimo-x-*` 疑为旧版残留，且漏了 `mimo-auto` |
 | 11 | 纯 Cookie 会话、无 token | Cookie lane 全程无 Authorization（1987 删除 + Dl proxy 分支无 Bearer） | ✅ 官方同源 |
 | 12 | 401 → 重保温 → 重试一次 | `lq()` 1996 逐行对应（含"模型范围错误不算 401"豁免 `cq()` 1963-1974 + 正则 1962） | ✅ 逐字节属实 |
-| 13 | 只读桌面 Chromium Cookie 库 | Cookie lane 宿主就是 `persist:xiaomi-account` 分区（4791-4793；Task 62 §4.4） | ✅ 同源；Windows 落 `%APPDATA%/<productName>/Partitions/xiaomi-account/Cookies` |
+| 13 | 只读桌面 Chromium Cookie 库 | Cookie lane 宿主就是 `persist:xiaomi-account` 分区（4791-4793；Task 62 §4.4） | ✅ 同源；Windows 落 `%APPDATA%\Xiaomi MiMo AI\Partitions\xiaomi-account\Network\Cookies`（Electron 41/Chromium 146 布局；旧布局无 `Network` 段，插件两处都探测，详见 §6 #1） |
 
 **代理没有做到、桌面有而我们应知道的**：§2 的 sk-lane 劫持（`eH`）、区域收养、模型范围错误豁免重试、
 `X-Client-Version` 头、me 端点三道服务端门（invite/账号区域/区域支持）。
@@ -148,3 +150,28 @@ URL 重写为 `{cp()}/chat/completions`（或 `/responses`），body 归一化�
 4. **隐私硬边界**（docs/MIMO_PRIVACY §7 全部继续有效）：零遥测、零审计调用、零邀请/区域门探测、
    剥离 `user/metadata/service_tier/logprobs 族`、日志零内容、凭据 0600 不进环境变量。
 5. `# Memory system` 不硬插（Q1 定案：客户端块，非必需；上游若校验会在实测暴露，届时再对齐）。
+
+## 6. 本地凭据存储路径（安装后落盘位置）
+
+桌面包（`package.json`: name `xiaomi-mimo-desktop-ai` / productName **"Xiaomi MiMo AI"** /
+Electron 41.7.2 + Chromium 146.0.7680.216，取自主 exe 版本资源）安装后的凭据落盘全景，
+全部经反混淆源码逐点定位：
+
+| # | 凭据内容 | Windows 路径 | macOS / Linux 路径 | 形态与加密 | 证据 |
+|---|---|---|---|---|---|
+| 1 | **Cookie lane 全部会话 Cookie**（passToken / userId / serviceToken / *.xiaomimimo.com 会话） | `%APPDATA%\Xiaomi MiMo AI\Partitions\xiaomi-account\Network\Cookies`（旧布局 `…\xiaomi-account\Cookies` 仍在探测之列） | `~/Library/Application Support/Xiaomi MiMo AI/Partitions/xiaomi-account/Network/Cookies`；`~/.config/Xiaomi MiMo AI/…` | Chromium `Cookies` SQLite 库；`encrypted_value` = os_crypt v10（Windows：DPAPI 包裹的 AES-256-GCM，包密钥在 userData 根 `Local State` 的 `os_crypt.encrypted_key`；Linux：PBKDF2 硬编码） | 分区常量 3778/6006/6548；`session.fromPartition` 出网 4791-4793 |
+| 2 | **sk lane 凭据**（OAuth 下发 `{sk, uid, base_url}`） | `%USERPROFILE%\.local\share\mimocode\auth.json` | `~/.local/share/mimocode/auth.json`（设了 `XDG_DATA_HOME` 则在其下；`MIMOCODE_HOME` 整体改根） | **明文 JSON，0600**；provider 键 `xiaomi`（sk 态）；SSO 态桌面在引擎视图中注入哨兵 `mimo-desktop`（key=xiaomi-sso-session，base_url=sso.invalid，仅内存不落盘）。同目录伴生：`mimo-key-name`、`mimo-login-pending.json`、`mcp-auth.json` | `ks()` 585-589（XDG_DATA_HOME→`~/.local/share/mimocode`）、auth.json 读取 65817、fF 文件组 594-603、引擎侧 `resolveMimocodeHome`（MiMo-Code `packages/shared/src/global.ts`，`auth.json` 落 `Global.Path.data` 0600） |
+| 3 | 自动化/插件凭据（浏览器桥、飞书等 automation secrets） | `%APPDATA%\Xiaomi MiMo AI\plugin-secrets.json` 与 `profile-credentials.json` | 同目录同名 | JSON 容器；每条值为 `base64(safeStorage.encryptString)`：Windows=DPAPI、macOS=Keychain（Electron Safe Storage）、Linux=libsecret | `bR()` 77330 及 T/I 两个实例装配 |
+| 4 | 小米账号对象缓存（passToken/userId/serviceTokens/nickName，7 天 TTL） | —— 仅内存，不落盘 —— | 同左 | 本构建唯一装配 `new lG(NG())`（6716）接的是内存 Map（`NG` 6690）；类日志 "saved to secure storage" 与实际后端不符（§3.3 已勘误） | lG 5124-5214、装配 89511 |
+
+要点：
+
+- **持久凭据只有两处**：分区 Cookies 库（#1，os_crypt 加密，随桌面包生命周期自动滚动）与
+  `mimocode/auth.json`（#2，明文 0600）。其余均为内存缓存或非账号类凭据。
+- #2 与官方 CLI 的凭据文件完全同位同形——桌面把引擎 in-process 跑起来后共享这一个 `auth.json`，
+  因此 CLI 登录一次、桌面与 CLI 同时受益；反之桌面 sk lane 登录后 CLI 也能读到。
+- #3 的 safeStorage 是 OS 级加密，但威胁模型与 DPAPI 一致：同用户任意进程可解，不是跨用户隔离。
+- 我们插件的对应落地：自有凭据写宿主 auth-dir 的 `mimo-<lane>-<uid>.json`（0600、不进环境变量）；
+  Cookie 收养按 #1 两种布局探测（`adopt.go`：`Network\Cookies` 优先、旧布局兜底），Windows 解密与
+  桌面同链（DPAPI + `Local State`，`cookies_windows.go` + `cookies.go userDataRootFor`），macOS
+  cookie lane 维持明示不支持。
