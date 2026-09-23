@@ -136,22 +136,16 @@ func cookieLaneSessionFault(sc int, hdrs http.Header) bool {
 }
 
 // sendChatWithCookieRetry wraps sendChat with the cookie lane's renew ladder:
-// session fault (not model-range) → re-mint the service ticket → retry once
-// with a FRESHLY routed endpoint (a mint can move the region, so the route
-// is rebuilt from the mutated credential, not the cached one). Other
-// statuses and the sk lane pass through untouched (the sk is permanent; a
-// 401 means re-login).
-func sendChatWithCookieRetry(sa *storedAuth, route chatRoute, body string) (*hostHTTPStream, int, http.Header, error) {
-	attempt := func() (*http.Request, error) {
-		r := routeFor(sa) // re-resolve per attempt — region may have moved
-		req, err := http.NewRequest(http.MethodPost, r.endpoint, strings.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		r.applyHeaders(req, sa, body)
-		return req, nil
-	}
-	stream, sc, hdrs, err := sendChat(attempt)
+// session fault (not model-range) → re-mint the service ticket → retry once.
+// buildReq is invoked FRESH for every attempt — a mint can move the region,
+// so the endpoint and headers must be rebuilt from the mutated credential
+// (routeFor(sa)), never cached from the first try. Other statuses and the
+// sk lane pass through untouched (the sk is permanent; a 401 means re-login).
+// When the retry itself lands on another session fault, the raw response is
+// returned: callers check cookieLaneSessionFault once more and surface the
+// self-heal guidance instead of feeding a login page to the body parser.
+func sendChatWithCookieRetry(sa *storedAuth, route chatRoute, buildReq func() (*http.Request, error)) (*hostHTTPStream, int, http.Header, error) {
+	stream, sc, hdrs, err := sendChat(buildReq)
 	if err != nil {
 		return stream, sc, hdrs, err
 	}
@@ -167,7 +161,7 @@ func sendChatWithCookieRetry(sa *storedAuth, route chatRoute, body string) (*hos
 	if !renewCookieSessionFn(sa) {
 		return nil, sc, hdrs, fmt.Errorf("mimo session expired (status %d, re-mint failed): the desktop's login rows may be stale — re-login the desktop (refreshes passToken) or use the sk lane", sc)
 	}
-	return sendChat(attempt)
+	return sendChat(buildReq)
 }
 
 // -----------------------------------------------------------------------------
@@ -197,7 +191,16 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	if berr != nil {
 		return nil, fmt.Errorf("body build: %w", berr)
 	}
-	stream, sc, _, serr := sendChatWithCookieRetry(sa, route, body)
+	buildReq := func() (*http.Request, error) {
+		r := routeFor(sa) // re-resolve per attempt — region may have moved
+		req, err := http.NewRequest(http.MethodPost, r.endpoint, strings.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		r.applyHeaders(req, sa, body)
+		return req, nil
+	}
+	stream, sc, _, serr := sendChatWithCookieRetry(sa, route, buildReq)
 	if serr != nil {
 		return nil, fmt.Errorf("http_error: %w", serr)
 	}

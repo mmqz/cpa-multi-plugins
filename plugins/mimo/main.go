@@ -378,8 +378,12 @@ func mimoRegistration() registration {
 	}
 }
 
-// version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.1.0"
+// version self-reports the plugin build. CI releases build WITHOUT any
+// -ldflags -X injection (release.yml runs plain `go build`), so this default
+// must stay in lockstep with the VERSION file — the same drift class that
+// shipped trae v0.12.86 self-reporting 0.12.56 (repo lesson 2026-09-23).
+// `make build` may still override it via -X (git describe).
+var version = "0.2.1"
 
 // -----------------------------------------------------------------------------
 // Envelope helpers

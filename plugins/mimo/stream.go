@@ -92,11 +92,12 @@ func streamHeaders() http.Header {
 // the underlying http request context is released promptly.
 func pumpUpstreamStream(ctx context.Context, sa *storedAuth, route chatRoute, body string, cancel context.CancelFunc, streamID string, sseFramed bool) {
 	buildReq := func() (*http.Request, error) {
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, route.endpoint, strings.NewReader(body))
+		r := routeFor(sa) // re-resolve per attempt — region may have moved
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, r.endpoint, strings.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
-		route.applyHeaders(httpReq, sa, body)
+		r.applyHeaders(httpReq, sa, body)
 		return httpReq, nil
 	}
 	// Always close the host stream exactly once on every exit path.
@@ -113,12 +114,25 @@ func pumpUpstreamStream(ctx context.Context, sa *storedAuth, route chatRoute, bo
 		defer cancel()
 	}
 
-	stream, statusCode, _, err := sendChat(buildReq)
+	// Same renew ladder as the non-stream path: a stale service ticket must
+	// self-heal here too (the async pump is the PRIMARY chat path for most
+	// clients — emitting 302/401 as a terminal error instead of re-minting
+	// was a deep-audit find, 2026-09-23).
+	stream, statusCode, hdrs, err := sendChatWithCookieRetry(sa, route, buildReq)
 	if err != nil {
 		streamEmitError(streamID, fmt.Sprintf("http_error: %v", err))
 		return
 	}
 	defer stream.Close()
+	// The ladder already spent its one retry: a fault that survives is a real
+	// session expiry — surface the self-heal guidance instead of feeding the
+	// login page to the SSE parser (which would fold into "empty stream").
+	if cookieLaneSessionFault(statusCode, hdrs) {
+		errPayload, _ := readAllHost(stream)
+		streamEmitError(streamID, fmt.Sprintf("mimo session expired (status %d, re-mint attempted): %s",
+			statusCode, chatUpstreamError(statusCode, string(errPayload)).Error()))
+		return
+	}
 	if statusCode >= 400 {
 		// Drain the error body via the same bridge so the message is complete.
 		errPayload, _ := readAllHost(stream)
@@ -168,18 +182,28 @@ func pumpUpstreamStream(ctx context.Context, sa *storedAuth, route chatRoute, bo
 // drain the upstream SSE, return the cleaned chunks as a slice.
 func collectUpstreamStream(sa *storedAuth, route chatRoute, body string, sseFramed bool) ([]pluginapi.ExecutorStreamChunk, int, error) {
 	buildReq := func() (*http.Request, error) {
-		httpReq, err := http.NewRequest(http.MethodPost, route.endpoint, strings.NewReader(body))
+		r := routeFor(sa) // re-resolve per attempt — region may have moved
+		httpReq, err := http.NewRequest(http.MethodPost, r.endpoint, strings.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
-		route.applyHeaders(httpReq, sa, body)
+		r.applyHeaders(httpReq, sa, body)
 		return httpReq, nil
 	}
-	stream, statusCode, _, err := sendChat(buildReq)
+	// Same renew ladder as the non-stream path (deep-audit 2026-09-23: the
+	// collect path previously sent stale tickets straight to the client).
+	stream, statusCode, hdrs, err := sendChatWithCookieRetry(sa, route, buildReq)
 	if err != nil {
 		return nil, 0, fmt.Errorf("http_error: %w", err)
 	}
 	defer stream.Close()
+	// Fault that survived the re-mint retry: surface guidance, not a login
+	// page folded into "empty stream" / non-JSON body errors.
+	if cookieLaneSessionFault(statusCode, hdrs) {
+		payload, _ := readAllHost(stream)
+		return nil, statusCode, fmt.Errorf("mimo session expired (status %d, re-mint attempted): %s",
+			statusCode, chatUpstreamError(statusCode, string(payload)).Error())
+	}
 	if statusCode >= 400 {
 		payload, _ := readAllHost(stream)
 		return nil, statusCode, upstreamStatusError(statusCode, chatUpstreamError(statusCode, string(payload)))

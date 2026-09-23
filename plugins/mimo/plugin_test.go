@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -944,5 +945,103 @@ func TestExchangePassTokenExpiredShortCircuits(t *testing.T) {
 	}
 	if sa.Auth.SID != "" || sa.Auth.ExchangedAt != 0 {
 		t.Fatalf("failed exchange must not stamp the credential")
+	}
+}
+
+// TestVersionMatchesVERSIONFile locks the version surfaces together: CI
+// releases build WITHOUT -X injection, so main.go's var must track the
+// VERSION file (trae v0.12.86 shipped self-reporting 0.12.56 — same drift
+// class, repo lesson 2026-09-23).
+func TestVersionMatchesVERSIONFile(t *testing.T) {
+	raw, err := os.ReadFile("VERSION")
+	if err != nil {
+		t.Skipf("VERSION file unavailable: %v", err)
+	}
+	if v := strings.TrimSpace(string(raw)); v != version {
+		t.Fatalf("main.go var version %q drifts from the VERSION file %q — keep them in lockstep", version, v)
+	}
+}
+
+// The stream paths must ride the same renew ladder as execute: a stale
+// service ticket answers 302 → re-mint → retry (deep-audit 2026-09-23: the
+// stream paths previously bypassed sendChatWithCookieRetry entirely).
+func TestHandleExecStreamCookie302RetryWithMint(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Location", "https://account.xiaomi.com/pass/serviceLogin")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"ok"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: [DONE]`+"\n\n")
+	}))
+	defer upstream.Close()
+	origBase := regionBases[regionCN]
+	regionBases[regionCN] = upstream.URL + "/api"
+	defer func() { regionBases[regionCN] = origBase }()
+	origRenew := renewCookieSessionFn
+	renewCookieSessionFn = func(*storedAuth) bool { return true }
+	defer func() { renewCookieSessionFn = origRenew }()
+
+	sa := cookieCred(t)
+	storage, _ := json.Marshal(sa)
+	req, _ := json.Marshal(executorStreamRequest{
+		ExecutorRequest: pluginapi.ExecutorRequest{
+			AuthID:      "a1",
+			Model:       "mimo/mimo-flash",
+			Payload:     []byte(`{"model":"mimo-flash","messages":[],"stream":true}`),
+			StorageJSON: storage,
+			Metadata:    map[string]any{"request_path": "/v1/chat/completions"},
+		},
+		StreamID: "", // synchronous collect path
+	})
+	resp, err := handleExecStream(req)
+	if err != nil {
+		t.Fatalf("stream after 302 re-mint: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 302 → renew → retry (2 calls), got %d", calls)
+	}
+	var env envelope
+	if err := json.Unmarshal(resp, &env); err != nil || !env.OK {
+		t.Fatalf("envelope: %s", string(resp))
+	}
+	var sr streamResponse
+	if err := json.Unmarshal(env.Result, &sr); err != nil {
+		t.Fatalf("stream response: %v", err)
+	}
+	if len(sr.Chunks) != 1 || !strings.Contains(string(sr.Chunks[0].Payload), "ok") {
+		t.Fatalf("retry chunks wrong: %s", string(env.Result))
+	}
+}
+
+// A fault that survives the ladder's one retry must surface the self-heal
+// guidance instead of an "empty stream" riddle (the 302 body is an empty
+// login redirect the SSE parser cannot make sense of).
+func TestCollectUpstreamStreamFaultAfterRetrySurfacesGuidance(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Location", "https://account.xiaomi.com/pass/serviceLogin")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer upstream.Close()
+	origBase := regionBases[regionCN]
+	regionBases[regionCN] = upstream.URL + "/api"
+	defer func() { regionBases[regionCN] = origBase }()
+	origRenew := renewCookieSessionFn
+	renewCookieSessionFn = func(*storedAuth) bool { return true }
+	defer func() { renewCookieSessionFn = origRenew }()
+
+	sa := cookieCred(t)
+	_, _, err := collectUpstreamStream(sa, routeFor(sa), `{"model":"mimo-flash","messages":[]}`, false)
+	if err == nil || !strings.Contains(err.Error(), "re-mint attempted") {
+		t.Fatalf("want self-heal guidance error, got %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected exactly one retry (2 calls), got %d", calls)
 	}
 }
