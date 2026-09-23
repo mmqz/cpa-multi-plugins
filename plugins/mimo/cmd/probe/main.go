@@ -3,18 +3,24 @@
 // 用途：在已安装官方桌面的 Windows 机器上（与桌面同一 OS 用户）一次性验证：
 //  1. %APPDATA%\Xiaomi MiMo AI\Local State 的 os_crypt 密钥能被 DPAPI 解开
 //  2. 分区 Cookies 库（Partitions\xiaomi-account\Network\Cookies，旧布局兜底）
-//     里存在 *.xiaomimimo.com 会话 Cookie 且 v10 AES-256-GCM 解密成功
-//  3. 官方 me 端点（{区域基址}/user/xiaomi/me）是否认可该会话（桌面同款探针）
+//     里可收养哪些行：*.xiaomimimo.com 会话行（仅老构建有）+ 账号域引导行
+//     passToken/userId/cUserId/uLocale（当前构建只落这些，且明文，§6.1 #1）
+//  3. M2 换票链（serviceLogin → STS）能否用引导行换出 serviceToken —— 与
+//     插件 0.2.0 cookie lane 同判据。/user/xiaomi/me 已退役：me 对有效请求
+//     也 302，不能判健康（docs/MIMO_AUTH.md §6.2 坑 1）
 //
 // 隐私边界（与插件 policy 对齐，见 docs/MIMO_AUTH.md §6）：
-//   - Cookie 明文只进内存：绝不打印、不落盘、不发往 *.xiaomimimo.com 之外的主机
-//   - 输出仅结构信息（host/name/过期时间/HTTP 状态码/code/区域），无凭据值
+//   - Cookie/票据明文只进内存：绝不打印、不落盘；账号域行只发给 passport
+//     （它们的原生域），P2 刻意无 Cookie
+//   - 输出仅结构信息（host/name/过期/加密前缀/HTTP 状态/Set-Cookie 名单），
+//     无任何凭据值；换票 URL 含 nonce/clientSign，只报状态码
 //
-// 本目录是诊断工具；插件主包 cookies*.go 才是权威实现，算法刻意同源。
+// 本目录是诊断工具；插件主包 cookies*.go / exchange.go 才是权威实现，算法刻意同源。
 // 用法：
 //
 //	mimo-cookie-probe.exe                 # 全流程（需在桌面同用户的 Windows 上）
 //	mimo-cookie-probe.exe --inspect-only  # 只盘点 Cookie 结构，不解密不出网
+//	mimo-cookie-probe.exe --region sgp    # 换票钉死区域（默认 auto：sgp→cn）
 //	mimo-cookie-probe.exe --cookies <路径> --local-state <路径>
 package main
 
@@ -24,11 +30,9 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,16 +42,6 @@ import (
 )
 
 const webkitEpochDiff = 11644473600 // 1601-01-01 → 1970-01-01 秒差
-
-var regions = []struct {
-	name string
-	base string
-}{
-	{"cn", "https://mimo-server-cn.xiaomimimo.com/api"},
-	{"sgp", "https://mimo-server-sgp.xiaomimimo.com/api"},
-	{"ru", "https://mimo-server-ru.xiaomimimo.com/api"},
-	{"in", "https://mimo-server-in.xiaomimimo.com/api"},
-}
 
 type cookieRow struct {
 	Name       string
@@ -96,8 +90,14 @@ func main() {
 	lsFlag := flag.String("local-state", "", "Local State 路径（默认自动定位）")
 	dbFlag := flag.String("cookies", "", "Cookies 库路径（默认自动定位，新旧布局都试）")
 	inspect := flag.Bool("inspect-only", false, "只盘点结构，不 DPAPI 解密、不出网")
-	timeout := flag.Duration("timeout", 15*time.Second, "me 探测超时")
+	timeout := flag.Duration("timeout", 15*time.Second, "换票诊断超时")
+	regionFlag := flag.String("region", "auto", "换票区域：auto（sgp→cn 序，与插件一致）/ sgp / cn")
 	flag.Parse()
+	switch *regionFlag {
+	case "auto", "sgp", "cn":
+	default:
+		fail("--region 只接受 auto/sgp/cn（ru/in 的 sid 从未实测，拒绝臆测）")
+	}
 
 	localState := *lsFlag
 	if localState == "" {
@@ -162,12 +162,12 @@ func main() {
 		}
 	}
 	dump("Cookie lane 载荷（回放对象）", lane)
-	dump("登录侧（仅计数，绝不回放）", loginSide)
+	dump("登录侧引导行（换票材料，值绝不打印）", loginSide)
 
 	if len(lane) == 0 {
-		fmt.Println("\n结论: 分区里没有任何 xiaomimimo.com Cookie —— 桌面未登录、登录前复制的副本，或分区被重建。")
-		fmt.Println("      请先在桌面完成登录 → 完全退出桌面（托盘退出）→ 重新复制 Network\\Cookies 再测。")
-		os.Exit(1)
+		// 当前桌面包的正常形态（docs/MIMO_AUTH.md §6.1）：可用服务票据不落盘，
+		// 分区内只有账号域引导行 —— 健康与否由换票链诊断回答，不在这里判。
+		fmt.Println("    （无 xiaomimimo.com 行 —— 当前桌面包的正常形态：可用服务票据不落盘，判据走换票链诊断）")
 	}
 	if *inspect {
 		fmt.Println("\n--inspect-only: 到此为止（未解密、未出网）。")
@@ -183,51 +183,78 @@ func main() {
 		fail("Local State 密钥不可用: %v", err)
 	}
 
+	// lane 行（老构建的回放对象）与登录侧行（换票材料）都可能加密；当前构建
+	// 的账号域行是明文（§6.1 #1），无需解密。
 	usable := 0
 	decFail := 0
-	for i := range lane {
-		r := &lane[i]
-		if len(r.Encrypted) < 3 || string(r.Encrypted[:3]) != "v10" {
-			decFail++
+	for i := range rows {
+		r := &rows[i]
+		if !isHostFamily(r.HostKey, "xiaomimimo.com") && !isHostFamily(r.HostKey, "xiaomi.com") {
 			continue
 		}
-		plain, err := aesGCMDecrypt(key, r.Encrypted[3:])
-		if err != nil {
-			decFail++
+		if len(r.Encrypted) >= 3 && string(r.Encrypted[:3]) == "v10" {
+			plain, err := aesGCMDecrypt(key, r.Encrypted[3:])
+			if err != nil {
+				decFail++
+				continue
+			}
+			r.Value = string(plain)
+			usable++
 			continue
 		}
-		r.Value = string(plain)
-		usable++
+		if r.Value == "" {
+			decFail++ // 加密行但既非 v10 也非明文可读
+		}
 	}
-	fmt.Printf("[4] v10 解密: 成功 %d / 失败 %d（明文绝不打印）\n", usable, decFail)
-	if usable == 0 {
-		fmt.Println("\n结论: 有 Cookie 行但全部解密失败 —— 多半是不同 OS 用户/不同机器拷来的（DPAPI 绑定）。")
+	fmt.Printf("[4] v10 解密: 成功 %d / 失败 %d（明文绝不打印；当前构建的账号域行本就是明文）\n", usable, decFail)
+
+	bootstrap := pickBootstrapRows(loginSide)
+	if len(bootstrap) == 0 {
+		if usable == 0 && decFail > 0 {
+			fmt.Println("\n结论: 有 Cookie 行但全部解密失败 —— 多半是不同 OS 用户/不同机器拷来的（DPAPI 绑定）。")
+		} else {
+			fmt.Println("\n结论: 分区里既无 xiaomimimo.com 行、也无 passToken/userId 引导行 —— 桌面未登录或分区被重建。")
+			fmt.Println("      请先在桌面完成登录 → 完全退出桌面（托盘退出）→ 再测。")
+		}
 		os.Exit(1)
 	}
+	bootNames := make([]string, 0, len(bootstrap))
+	for _, r := range bootstrap {
+		bootNames = append(bootNames, r.Name)
+	}
+	fmt.Printf("[5] 换票材料: %d 条（%s；值绝不打印）\n", len(bootstrap), strings.Join(bootNames, " "))
 
-	fmt.Println("[5] 官方 me 端点探测（桌面同款会话探针，仅带 Cookie，无遥测）…")
-	ok := false
-	for _, rg := range regions {
-		code, regionName, status, redirHost, err := probeMe(rg.base, lane, *timeout)
-		switch {
-		case err != nil:
-			fmt.Printf("    %-4s %s: 网络错误 %v\n", rg.name, rg.base, err)
-		case redirHost != "":
-			fmt.Printf("    %-4s HTTP %d → 302 跳转 %s（该区域认为未登录）\n", rg.name, status, redirHost)
-		default:
-			verdict := "未认可"
-			if code == 0 {
-				verdict = "✅ 登录态有效"
-				ok = true
+	fmt.Println("[6] M2 换票链诊断（serviceLogin → STS；sgp→cn 序与插件 auto 同序）…")
+	var winner *probeExchangeResult
+	passTokenDead := false
+	for _, tgt := range exchangeTargets {
+		if *regionFlag != "auto" && *regionFlag != tgt.region {
+			continue
+		}
+		res, err := probeExchange(bootstrap, tgt.sid, *timeout)
+		if err == nil {
+			fmt.Printf("    %-4s sid=%-8s HTTP 200 换票成功（Set-Cookie: %s；serviceToken %d 字节）\n",
+				tgt.region, tgt.sid, strings.Join(res.SetCookie, "/"), res.TokenLength)
+			if winner == nil {
+				winner = res
 			}
-			fmt.Printf("    %-4s HTTP %d code=%d region=%s %s\n", rg.name, status, code, regionName, verdict)
+			continue
+		}
+		fmt.Printf("    %-4s sid=%-8s %v\n", tgt.region, tgt.sid, err)
+		if errors.Is(err, errProbePassTokenExpired) {
+			passTokenDead = true
 		}
 	}
-	if ok {
-		fmt.Println("\n总结论: Cookie lane 凭据可用 —— 插件 adopt 流程在此机器可收养该会话。")
+	if winner != nil {
+		fmt.Printf("\n总结论: cookie lane 可用（区域 %s）—— 引导材料可随时换出服务票据，\n", winner.Region)
+		fmt.Println("        插件 adopt 后走同一链路即可出可用凭据，无需桌面在线。")
 		os.Exit(0)
 	}
-	fmt.Println("\n总结论: Cookie 已解密但 me 端点未认可 —— 会话可能已过期/被服务端拒绝，重启桌面刷新后再试。")
+	if passTokenDead {
+		fmt.Println("\n总结论: 引导材料已被 passport 拒绝（passToken 已失效）—— 请在桌面重新登录后重试。")
+		os.Exit(1)
+	}
+	fmt.Println("\n总结论: 换票未成功（网络/边缘原因）—— 稍后重试，或用 --region 钉死另一区域。")
 	os.Exit(1)
 }
 
@@ -345,105 +372,4 @@ func loadOsCryptKey(localState string) ([]byte, error) {
 		return nil, fmt.Errorf("os_crypt key length %d (want 32)", len(key))
 	}
 	return key, nil
-}
-
-// probeMe 用收养的 Cookie 打官方 me 端点；不跟随重定向（未登录时服务端
-// 302 去 account.xiaomi.com SSO 页 —— 只报告跳转主机，不打印含 nonce 的 URL）。
-// 返回 (code, data.region, httpStatus, redirectHost, err)。
-func probeMe(base string, cookies []cookieRow, timeout time.Duration) (int, string, int, string, error) {
-	u, err := url.Parse(base + "/user/xiaomi/me")
-	if err != nil {
-		return 0, "", 0, "", err
-	}
-	header := buildCookieHeader(cookies, u)
-	if header == "" {
-		return 0, "", 0, "", fmt.Errorf("没有可匹配 %s 的 Cookie", u.Host)
-	}
-	client := &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
-	if err != nil {
-		return 0, "", 0, "", err
-	}
-	req.Header.Set("Cookie", header)
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, "", 0, "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		loc := resp.Header.Get("Location")
-		host := ""
-		if lu, perr := url.Parse(loc); perr == nil {
-			host = lu.Host
-		}
-		return 0, "", resp.StatusCode, host, nil
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	var parsed struct {
-		Code int `json:"code"`
-		Data struct {
-			Region string `json:"region"`
-			UserID any    `json:"userId"`
-		} `json:"data"`
-	}
-	_ = json.Unmarshal(body, &parsed)
-	return parsed.Code, parsed.Data.Region, resp.StatusCode, "", nil
-}
-
-// buildCookieHeader 按 RFC6265 域/路径匹配挑 Cookie（与插件 jar 匹配同语义，
-// 长路径优先），返回 "k=v; k2=v2" 或空串。
-func buildCookieHeader(cookies []cookieRow, u *url.URL) string {
-	host := u.Host
-	path := u.EscapedPath()
-	if path == "" {
-		path = "/"
-	}
-	var picked []cookieRow
-	for _, c := range cookies {
-		if c.Value == "" || !hostMatchesCookie(c.HostKey, host) || !pathMatchesCookie(c.Path, path) {
-			continue
-		}
-		picked = append(picked, c)
-	}
-	if len(picked) == 0 {
-		return ""
-	}
-	// 长路径优先（RFC6265 §5.4 排序简化版）
-	for i := 1; i < len(picked); i++ {
-		for j := i; j > 0 && len(picked[j].Path) > len(picked[j-1].Path); j-- {
-			picked[j], picked[j-1] = picked[j-1], picked[j]
-		}
-	}
-	parts := make([]string, len(picked))
-	for i, c := range picked {
-		parts[i] = c.Name + "=" + c.Value
-	}
-	return strings.Join(parts, "; ")
-}
-
-func hostMatchesCookie(cookieHost, reqHost string) bool {
-	if strings.HasPrefix(cookieHost, ".") {
-		h := strings.TrimPrefix(cookieHost, ".")
-		return reqHost == h || strings.HasSuffix(reqHost, "."+h)
-	}
-	return reqHost == cookieHost
-}
-
-func pathMatchesCookie(cookiePath, reqPath string) bool {
-	cp := cookiePath
-	if cp == "" {
-		cp = "/"
-	}
-	if !strings.HasPrefix(reqPath, cp) {
-		return false
-	}
-	if len(reqPath) > len(cp) && cp[len(cp)-1] != '/' && reqPath[len(cp)] != '/' {
-		return false
-	}
-	return true
 }

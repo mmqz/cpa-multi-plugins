@@ -82,3 +82,31 @@ make lint    # gofmt + go vet
 | `platform_url` | `https://platform.xiaomimimo.com` | sk lane OAuth 基址（CLI MIMO_PLATFORM_URL 等价） |
 | `cookie_paths` | （自动探测） | 额外的 Chromium Cookies 文件路径（逗号分隔） |
 | `exchange_user_agent` | （Go 默认） | 换票链 P1/P2 的 UA；实测可用值 `MiClaw/1.0`，仅在 passport 边缘开始拦 UA 时才需要配置 |
+
+## 诊断探针（cmd/probe）
+
+`mimo-cookie-probe.exe` 是独立于插件主包的孪生诊断工具，在已登录桌面的 Windows
+机器上一键回答"这台机器的 cookie lane 能不能用"：分区库盘点 → DPAPI/v10 解密 →
+收集引导行 → 按 sgp→cn 跑与插件同款的 `serviceLogin → STS` 换票，`Set-Cookie`
+收到 `serviceToken` 即判可用。me 端点判据已随 §6.2 坑 1 退役（me 对有效请求也
+302）。Cookie/票据明文只进内存，输出只有结构信息。构建：
+
+```bash
+GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
+  -o mimo-cookie-probe.exe ./cmd/probe
+```
+
+## 真机回归清单（0.2.0 起的 M2 验收口径）
+
+1. **探针预检**：真机跑 `mimo-cookie-probe.exe`（默认 auto），预期"换票成功
+   （区域 sgp 或 cn）"、总结论为 cookie lane 可用；若报 passToken 被拒，先在
+   桌面重新登录再测。
+2. **插件载入**：宿主载入 mimo 插件（c-shared：linux `.so` / windows `.dll`
+   需 mingw 工具链），`plugins.configs.mimo` 留默认（region=auto）。
+3. **收养即换票**：注册/重启触发收养后，auth store 里 mimo 凭据应同时含引导行
+   与换出的 serviceToken 行（`<sid>_ph`/`<sid>_slh` 在场），region/sid 已盖章。
+4. **端到端调用**：经插件调 `mimo-pro`/`mimo-flash`，预期 200 真实回复
+   （拼装序 Cookie + `X-Mimo-Source: mimocode-cli-free`、无 Authorization）。
+5. **自愈阶梯**：把 auth store 中 serviceToken 行的值改坏 → 再次调用应触发
+   401/302 → 重换票 → 重试成功（"模型不在可用范围"类 401 豁免续期）。
+6. **区域钉死**（可选）：`region=cn` 时全程只试 `mimopc`，不回落 sgp。

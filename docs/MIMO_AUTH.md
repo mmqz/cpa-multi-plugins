@@ -264,3 +264,11 @@ UA，但这是单样本证据。插件默认不发伪装 UA（与 §4 拒绝 `mi
 明文）；serviceToken = 运行时现换、桌面自身不落盘；插件将其缓存在宿主 auth store
 （随 jar 持久、0600），401/302 时自动重换——与桌面"每次运行现换"同生命周期，
 多一层缓存。
+
+**probe 判据对齐（插件 0.2.0 起）**：`cmd/probe` 诊断探针随插件同步换代——M1
+时代的 me 端点判据退役（本节坑 1），健康判定改为与插件同款换票链：分区库盘点 →
+DPAPI/v10 解密 → 收引导行（`pickBootstrap` 同序去重）→ `serviceLogin → STS` 按
+sgp→cn 试换，`Set-Cookie` 收到 `serviceToken` 即判 cookie lane 可用；passport
+拒绝（code 非 0）则判 passToken 已死、需桌面重登。旧版 probe 在"分区内无
+`*.xiaomimimo.com` 行"时直接误判未登录退出——当前构建本来只落账号域行
+（§6.1 #1），新版视为正常形态并在换票诊断里给结论。
