@@ -971,6 +971,15 @@ func startLoginWithVariant(request []byte, lv string) ([]byte, error) {
 			"callback_url":           cbURL,
 			"login_trace_id":         loginTraceID,
 			"fallback_callback_path": resourceCallbackPath,
+			// v0.12.58: cn/intl parity — advertise the plugin's own
+			// paste-to-complete route (intl has carried it since v0.12.16).
+			// The host's generic /v0/management/oauth-callback paste box
+			// cannot serve real Trae redirects: Trae echoes login_trace_id
+			// and authCode/authCodeInfo, never the OAuth-standard state/code
+			// query params that endpoint requires (issue #16, "state is
+			// required"), so any UI introspecting this map should point
+			// users at oauth_submit instead.
+			"fallback_submit_path": resourceSubmitPath,
 		},
 	})
 }

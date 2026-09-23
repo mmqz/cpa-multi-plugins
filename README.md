@@ -154,6 +154,19 @@ plugins:
 
 区域登录产生的凭证落盘到 auth-dir 并被对应插件自动收养；已有账号不受登录区域影响（登录变体不劫持现有账号的分发）。
 
+## 常见问题（FAQ）
+
+### trae OAuth 回调 URL 提交失败：`state is required`（issue #16）
+
+在宿主管理界面或 TUI 的「回调 URL」粘贴框里提交 trae 登录链接会必然报这个错：该粘贴框指向宿主通用端点 `POST /v0/management/oauth-callback`，只解析 OAuth 标准的 `state` / `code` 查询参数；而 Trae 的真实授权重定向**从不携带这两个参数**（回传的是 `login_trace_id` 与 `authCode`/`authCodeInfo`，插件从不向 Trae 发送 state）。加之 Trae 授权页硬性要求回调只能是 `http://127.0.0.1:<端口>/authorize`——浏览器与 CPA 服务不在同一台机器时，重定向必然失败并留下一条宿主端点无法解析的链接。
+
+**正确做法**：把浏览器地址栏的完整链接粘贴到**插件面板的粘贴框**，它走插件自有路由、按 Trae 真实参数形态解析：
+
+- 面板粘贴框：`<CPA 地址>/v0/resource/plugins/trae/panel`
+- 或直接 GET：`<CPA 地址>/v0/resource/plugins/trae/oauth_submit?cb_url=<URL 编码后的完整回调链接>`
+
+前提：该链接来自 15 分钟内开始的登录、且期间 CPA 服务未重启；超时或重启后请回到面板重新点「登录」并用新链接。
+
 ## 构建
 
 ```bash
