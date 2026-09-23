@@ -294,3 +294,11 @@ Trae / CodeBuddy / Qoder 平台会不定期更新协议。本项目通过以下�
 - 3 Trae plugins fully implemented (trae-cn, trae-solo-cn, trae-intl)
 - All plugins compile to .so/.dll/.dylib on 5 platforms (linux amd64/arm64, darwin amd64/arm64, windows amd64)
 - GitHub Actions release workflow: multi-platform build + auto release on tag push
+
+## Telegram 频道
+
+插件更新、协议变更与 release 通知会在 Telegram 频道同步发布，欢迎加入：
+
+**邀请链接**：[https://t.me/+hI7SCfhLF-YwMDUx](https://t.me/+hI7SCfhLF-YwMDUx)
+
+> 私有频道邀请链接（`+` 后缀），点击直达，无需在 TG 内搜索频道名。
