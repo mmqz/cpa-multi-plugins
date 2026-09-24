@@ -40,22 +40,50 @@ func TestParseServiceLoginBody(t *testing.T) {
 		t.Fatalf("string code 0 rejected: %v", err)
 	}
 
-	// 非 0 code = passToken 被拒（重试无益，唯一修复是桌面重登）。
+	// 裸数字 nonce = 真机实测线型（2026-09-24）。known-answer：解组出的数字
+	// 必须正是 probeClientSign 哈希的那串（与 TestProbeClientSignVector 同向量）。
+	bare := []byte(`{"code":0,"ssecurity":"abcdefgh","nonce":1234567890,"location":"https://sts.example/sts?x=1"}`)
+	res2, err := parseServiceLoginBody(bare)
+	if err != nil || res2.Nonce != "1234567890" {
+		t.Fatalf("bare-number nonce: %+v err=%v", res2, err)
+	}
+	if got := probeClientSign(string(res2.Nonce), res2.Security); got != "02i8YjagkChj1jgJHHyz0OSzPJs%3D" {
+		t.Fatalf("probeClientSign from parsed bare nonce = %q", got)
+	}
+
+	// 实测量级（19 位）：float64 解法会因 53 位尾数丢精度，字面量必须逐字保留。
+	huge := []byte(`{"code":0,"ssecurity":"s","nonce":4341996316119746560,"location":"https://sts.example/l"}`)
+	if res3, err := parseServiceLoginBody(huge); err != nil || res3.Nonce != "4341996316119746560" {
+		t.Fatalf("19-digit nonce must survive verbatim: %+v err=%v", res3, err)
+	}
+
+	// 空 / null nonce 同样是形态异常。
+	if _, err := parseServiceLoginBody([]byte(`{"code":0,"ssecurity":"s","nonce":"","location":"l"}`)); err == nil {
+		t.Fatal("empty nonce accepted")
+	}
+	if _, err := parseServiceLoginBody([]byte(`{"code":0,"ssecurity":"s","nonce":null,"location":"l"}`)); err == nil {
+		t.Fatal("null nonce accepted")
+	}
+
+	// 非 0 code = passToken 被拒（重试无益，唯一修复是桌面重登），且不算形态异常。
 	_, err = parseServiceLoginBody([]byte(`{"code":1020,"ssecurity":"","nonce":"","location":""}`))
-	if !errors.Is(err, errProbePassTokenExpired) {
-		t.Fatalf("code 1020 → %v, want errProbePassTokenExpired", err)
+	if !errors.Is(err, errProbePassTokenExpired) || errors.Is(err, errProbeBodyShape) {
+		t.Fatalf("code 1020 → %v, want errProbePassTokenExpired only", err)
 	}
 	_, err = parseServiceLoginBody([]byte(`{"code":"1010","ssecurity":"s","nonce":"n","location":"l"}`))
 	if !errors.Is(err, errProbePassTokenExpired) {
 		t.Fatalf("string code 1010 → %v, want errProbePassTokenExpired", err)
 	}
 
-	// 缺 P2 所需字段 / 非 JSON 都必须报错。
-	if _, err := parseServiceLoginBody([]byte(`{"code":0,"ssecurity":"s","nonce":"n"}`)); err == nil {
-		t.Fatal("missing location accepted")
+	// 缺 P2 所需字段 / 非 JSON 都算形态异常 —— 必须与网络原因区分开
+	// （总结论三分类的判据）。
+	_, err = parseServiceLoginBody([]byte(`{"code":0,"ssecurity":"s","nonce":"n"}`))
+	if !errors.Is(err, errProbeBodyShape) {
+		t.Fatalf("missing location → %v, want errProbeBodyShape", err)
 	}
-	if _, err := parseServiceLoginBody([]byte("not json")); err == nil {
-		t.Fatal("garbage accepted")
+	_, err = parseServiceLoginBody([]byte("not json"))
+	if !errors.Is(err, errProbeBodyShape) {
+		t.Fatalf("garbage → %v, want errProbeBodyShape", err)
 	}
 }
 
@@ -103,7 +131,8 @@ func TestProbeExchangeWire(t *testing.T) {
 			t.Error("P1 must not carry upstream lane headers")
 		}
 		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "&&&START&&&{\"code\":0,\"ssecurity\":\"abcdefgh\",\"nonce\":\"1234567890\","+
+		// nonce 为裸数字 —— 真机实测线型（2026-09-24）。
+		fmt.Fprintf(w, "&&&START&&&{\"code\":0,\"ssecurity\":\"abcdefgh\",\"nonce\":1234567890,"+
 			"\"location\":\"%s/sts?callback=https%%3A%%2F%%2Fmimo-server-sgp.xiaomimimo.com%%2Fapi%%2Fsts\"}&&&END&&&",
 			stsServer.URL)
 	}))

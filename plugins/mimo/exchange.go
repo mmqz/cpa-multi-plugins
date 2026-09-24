@@ -8,7 +8,8 @@
 //	      ?_locale=zh_CN&_snsNone=true&sid=<sid>&_json=true
 //	    Cookie: passToken; userId; cUserId [; uLocale]
 //	    → 200 text/plain "&&&START&&&{...}&&&END&&&" where the JSON carries
-//	      code=0, ssecurity, nonce, location.
+//	      code=0, ssecurity, nonce, location. NOTE: nonce rides the wire as a
+//	      BARE JSON number on the measured machine — see nonceT below.
 //
 //	P2  GET <location>&clientSign=<urlencode(base64(sha1("nonce="+nonce+"&"+ssecurity)))>
 //	    (deliberately cookieless)
@@ -27,6 +28,11 @@
 //     serviceLogin even for traffic the chat endpoint accepts. Session health
 //     is therefore judged by the chat call itself (401/302/html → re-exchange
 //     → retry once).
+//  4. P1's nonce is a BARE JSON number on the measured wire (2026-09-24 real
+//     machine, e.g. 4341996316119746560 — 19 digits, past float64's 53-bit
+//     mantissa). A plain string field cannot unmarshal it at all; an
+//     any/float64 field would silently corrupt it. nonceT keeps the literal
+//     digits verbatim — clientSign hashes exactly those.
 //
 // The ticket is never written to disk by the desktop (it re-mints per run);
 // we persist ours in the host auth store next to the bootstrap rows and
@@ -156,11 +162,38 @@ func rankAccountHost(domain string) int {
 // (the passToken itself is dead — retrying cannot help).
 var errPassTokenExpired = errors.New("passToken rejected by passport (re-login the desktop to refresh it)")
 
+// nonceT absorbs both nonce wire shapes passport has shown: a bare JSON
+// number (the measured real-machine shape, 2026-09-24) and a quoted string
+// (historical fixtures). The literal digits must survive verbatim — P2's
+// clientSign hashes them — so the raw token text is kept as-is: a plain
+// string field cannot unmarshal the number form, and an any/float64 field
+// would round a 19-digit nonce past float64's 53-bit mantissa, silently
+// corrupting the signature. Empty/null values are NOT rejected here: the
+// parse-level field check reports them after the passport code check, so a
+// code=1020 rejection keeps precedence over shape complaints.
+type nonceT string
+
+func (n *nonceT) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "null" {
+		return nil // JSON null → zero value; the parse-level field check reports it.
+	}
+	if len(s) >= 2 && s[0] == '"' {
+		var q string
+		if err := json.Unmarshal(b, &q); err != nil {
+			return err
+		}
+		s = strings.TrimSpace(q)
+	}
+	*n = nonceT(s)
+	return nil
+}
+
 // serviceLoginResult is the parsed P1 payload.
 type serviceLoginResult struct {
 	Code     any    `json:"code"`
 	Security string `json:"ssecurity"`
-	Nonce    string `json:"nonce"`
+	Nonce    nonceT `json:"nonce"`
 	Location string `json:"location"`
 }
 
@@ -248,7 +281,7 @@ func exchangeServiceToken(bootstrap []mimoCookie, sid string) (*exchangeResult, 
 	if !strings.Contains(p2, "?") {
 		p2 += "?"
 	}
-	p2 += "&clientSign=" + clientSign(parsed.Nonce, parsed.Security)
+	p2 += "&clientSign=" + clientSign(string(parsed.Nonce), parsed.Security)
 	req2, err := http.NewRequest(http.MethodGet, p2, nil)
 	if err != nil {
 		return nil, err

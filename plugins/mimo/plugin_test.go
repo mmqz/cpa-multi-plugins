@@ -194,11 +194,42 @@ func TestRegionSIDAndCandidates(t *testing.T) {
 }
 
 func TestParseServiceLogin(t *testing.T) {
+	// Quoted-string nonce (historical fixture shape; the suite used to cover
+	// ONLY this form while the real wire is the bare number below).
 	body := "&&&START&&&" + `{"code":0,"ssecurity":"sECret==","nonce":"3862976506","location":"https://sts.example/api/sts?sign=abc"}` + "&&&END&&&"
 	res, err := parseServiceLogin([]byte(body))
 	if err != nil || res.Security != "sECret==" || res.Nonce != "3862976506" || !strings.HasPrefix(res.Location, "https://sts.example") {
 		t.Fatalf("parse: %+v err=%v", res, err)
 	}
+
+	// Bare-number nonce = the measured real-machine wire shape (2026-09-24).
+	// Known-answer: the parsed digits must be exactly what clientSign hashes —
+	// same vector as TestClientSignVector.
+	bare := "&&&START&&&" + `{"code":0,"ssecurity":"abcdefgh","nonce":1234567890,"location":"https://sts.example/api/sts?sign=abc"}` + "&&&END&&&"
+	res2, err := parseServiceLogin([]byte(bare))
+	if err != nil || res2.Nonce != "1234567890" {
+		t.Fatalf("bare-number nonce: %+v err=%v", res2, err)
+	}
+	if got := clientSign(string(res2.Nonce), res2.Security); got != "02i8YjagkChj1jgJHHyz0OSzPJs%3D" {
+		t.Fatalf("clientSign from parsed bare nonce = %q", got)
+	}
+
+	// Measured magnitude (19 digits): any float64-backed decoding would round
+	// this past the 53-bit mantissa and silently corrupt the signature.
+	huge := "&&&START&&&" + `{"code":0,"ssecurity":"s","nonce":4341996316119746560,"location":"https://sts.example/l"}` + "&&&END&&&"
+	res3, err := parseServiceLogin([]byte(huge))
+	if err != nil || res3.Nonce != "4341996316119746560" {
+		t.Fatalf("19-digit nonce must survive verbatim: %+v err=%v", res3, err)
+	}
+
+	// Empty / null nonce are shape failures too.
+	if _, err := parseServiceLogin([]byte(`{"code":0,"ssecurity":"s","nonce":"","location":"l"}`)); err == nil {
+		t.Fatalf("empty nonce must fail")
+	}
+	if _, err := parseServiceLogin([]byte(`{"code":0,"ssecurity":"s","nonce":null,"location":"l"}`)); err == nil {
+		t.Fatalf("null nonce must fail")
+	}
+
 	if _, err := parseServiceLogin([]byte(`{"code":1010,"message":"expired"}`)); err == nil {
 		t.Fatalf("code!=0 must fail")
 	}
@@ -757,7 +788,8 @@ func startPassportStub(t *testing.T) *httptest.Server {
 			}
 		}
 		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "&&&START&&&%s&&&END&&&", `{"code":0,"ssecurity":"sECret==","nonce":"3862976506","location":"`+sts.URL+`/api/sts?sign=abc&followup=x"}`)
+		// nonce rides as a bare number — the measured wire shape (2026-09-24).
+		fmt.Fprintf(w, "&&&START&&&%s&&&END&&&", `{"code":0,"ssecurity":"sECret==","nonce":3862976506,"location":"`+sts.URL+`/api/sts?sign=abc&followup=x"}`)
 	}))
 }
 

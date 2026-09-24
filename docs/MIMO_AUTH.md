@@ -234,6 +234,10 @@ Chromium 146）Windows 11 真机、桌面运行中且已登录状态下的**实�
 - **P1** `GET https://account.xiaomi.com/pass/serviceLogin?_locale=zh_CN&_snsNone=true&sid=<sid>&_json=true`
   Cookie 发分区库的明文账号域行 `passToken`/`userId`/`cUserId`（`uLocale` 在场，带上无害）。
   响应为 `&&&START&&&{json}&&&END&&&` 包裹，取 `code=0`、`ssecurity`、`nonce`、`location`。
+  **`nonce` 真机线型是裸 JSON 数字**（2026-09-24 真机回归实测，如
+  `4341996316119746560`，19 位超出 float64 尾数精度）——解组必须逐字保留字面量
+  （插件与 probe 的 `nonceT` 自定义 UnmarshalJSON，数字/字符串双形态兼容；
+  `Nonce string` 直接解组失败，`Nonce any` 会静默丢精度毁掉 clientSign 签名）。
 - **P2** `GET <location>&clientSign=<urlencode(base64(sha1("nonce="+nonce+"&"+ssecurity)))>`
   **不发 Cookie**。HTTP 200，从 `Set-Cookie` 收 `serviceToken`(364B)、`userId`、
   `<sid>_ph`、`<sid>_slh`（全部保存）。
@@ -271,4 +275,7 @@ DPAPI/v10 解密 → 收引导行（`pickBootstrap` 同序去重）→ `serviceL
 sgp→cn 试换，`Set-Cookie` 收到 `serviceToken` 即判 cookie lane 可用；passport
 拒绝（code 非 0）则判 passToken 已死、需桌面重登。旧版 probe 在"分区内无
 `*.xiaomimimo.com` 行"时直接误判未登录退出——当前构建本来只落账号域行
-（§6.1 #1），新版视为正常形态并在换票诊断里给结论。
+（§6.1 #1），新版视为正常形态并在换票诊断里给结论。总结论三分类：**可用** /
+**passToken 已死（需桌面重登）** / **响应形态异常（非网络问题，重试/重登无益）**
+——2026-09-24 真机回归的教训：nonce 裸数字解组失败曾被误报成"网络/边缘原因，
+稍后重试"，把排查引向错误方向（解组失败必须单列）。

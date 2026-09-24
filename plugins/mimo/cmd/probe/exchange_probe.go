@@ -7,6 +7,7 @@
 //	      ?_locale=zh_CN&_snsNone=true&sid=<sid>&_json=true
 //	    Cookie: passToken; userId; cUserId [; uLocale]（分区库明文账号域行）
 //	    → 200 "&&&START&&&{code,ssecurity,nonce,location}&&&END&&&"
+//	      （nonce 真机线型是裸 JSON 数字，见 nonceT；2026-09-24 真机回归实测）
 //
 //	P2  GET <location>&clientSign=urlencode(base64(sha1("nonce="+nonce+"&"+ssecurity)))
 //	    （刻意不发 Cookie —— 与桌面 /sts 回调同形）
@@ -38,6 +39,12 @@ var probePassportBase = "https://account.xiaomi.com"
 // 已死，唯一的修复是桌面重新登录（与插件 errPassTokenExpired 同语义）。
 var errProbePassTokenExpired = errors.New("passToken 被 passport 拒绝（请在桌面重新登录后重试）")
 
+// errProbeBodyShape 标记"passport 回了 200 但响应无法按已知形态解组"的一类
+// ——不是网络原因、也不是 passToken 失效，重试与重登都无益；多半是线型变了
+// 或 probe 落后于线型。真机教训（2026-09-24）：nonce 裸数字解组失败曾被总结
+// 论误报成"网络/边缘原因，稍后重试"，把排查引向错误方向。
+var errProbeBodyShape = errors.New("serviceLogin 响应形态异常")
+
 // exchangeTargets 是换票诊断的区域序：sgp→cn（与插件 auto 同序，sgp 为实测
 // 可用集群）。ru/in 的 sid 从未观测到，插件 regionSID 显式拒绝臆测，probe
 // 同立场不列（docs/MIMO_AUTH.md §6.2 区域映射）。
@@ -56,11 +63,35 @@ func probeClientSign(nonce, ssecurity string) string {
 	return url.QueryEscape(base64.StdEncoding.EncodeToString(sum[:]))
 }
 
+// nonceT 吸收 nonce 的两种线型：裸 JSON 数字（真机实测形态，2026-09-24，
+// 实测 19 位整数）与带引号字符串（历史 fixture）。数字必须逐字保留 —— P2
+// 的 clientSign 要对它做 sha1 —— 字符串字段解不了数字形态，any/float64 字段
+// 会因 53 位尾数把 19 位 nonce 舍入损坏（与插件 exchange.go nonceT 孪生同源）。
+// 空/null 不在这里拒绝：parse 层的字段校验在 code 判定之后统一报错，
+// passport 的 code 拒绝（1020 等）保持优先级，不被形态报错抢先。
+type nonceT string
+
+func (n *nonceT) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "null" {
+		return nil // JSON null → 零值，由 parse 层字段校验报错。
+	}
+	if len(s) >= 2 && s[0] == '"' {
+		var q string
+		if err := json.Unmarshal(b, &q); err != nil {
+			return err
+		}
+		s = strings.TrimSpace(q)
+	}
+	*n = nonceT(s)
+	return nil
+}
+
 // probeServiceLogin 是 P1 剥壳后的载荷。
 type probeServiceLogin struct {
 	Code     any    `json:"code"`
 	Security string `json:"ssecurity"`
-	Nonce    string `json:"nonce"`
+	Nonce    nonceT `json:"nonce"`
 	Location string `json:"location"`
 }
 
@@ -73,7 +104,7 @@ func parseServiceLoginBody(body []byte) (*probeServiceLogin, error) {
 	s = strings.TrimSpace(s)
 	var res probeServiceLogin
 	if err := json.Unmarshal([]byte(s), &res); err != nil {
-		return nil, fmt.Errorf("serviceLogin json: %w", err)
+		return nil, fmt.Errorf("%w: serviceLogin json: %v", errProbeBodyShape, err)
 	}
 	switch code := res.Code.(type) {
 	case float64:
@@ -86,7 +117,7 @@ func parseServiceLoginBody(body []byte) (*probeServiceLogin, error) {
 		}
 	}
 	if res.Security == "" || res.Nonce == "" || res.Location == "" {
-		return nil, errors.New("serviceLogin 响应缺 ssecurity/nonce/location")
+		return nil, fmt.Errorf("%w: serviceLogin 响应缺 ssecurity/nonce/location", errProbeBodyShape)
 	}
 	return &res, nil
 }
@@ -193,7 +224,7 @@ func probeExchange(bootstrap []cookieRow, sid string, timeout time.Duration) (*p
 	if !strings.Contains(p2, "?") {
 		p2 += "?"
 	}
-	p2 += "&clientSign=" + probeClientSign(parsed.Nonce, parsed.Security)
+	p2 += "&clientSign=" + probeClientSign(string(parsed.Nonce), parsed.Security)
 	req2, err := http.NewRequest(http.MethodGet, p2, nil)
 	if err != nil {
 		return nil, err

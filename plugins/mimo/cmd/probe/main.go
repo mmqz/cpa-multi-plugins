@@ -227,6 +227,7 @@ func main() {
 	fmt.Println("[6] M2 换票链诊断（serviceLogin → STS；sgp→cn 序与插件 auto 同序）…")
 	var winner *probeExchangeResult
 	passTokenDead := false
+	shapeBroken := false
 	for _, tgt := range exchangeTargets {
 		if *regionFlag != "auto" && *regionFlag != tgt.region {
 			continue
@@ -244,6 +245,9 @@ func main() {
 		if errors.Is(err, errProbePassTokenExpired) {
 			passTokenDead = true
 		}
+		if errors.Is(err, errProbeBodyShape) {
+			shapeBroken = true
+		}
 	}
 	if winner != nil {
 		fmt.Printf("\n总结论: cookie lane 可用（区域 %s）—— 引导材料可随时换出服务票据，\n", winner.Region)
@@ -252,6 +256,11 @@ func main() {
 	}
 	if passTokenDead {
 		fmt.Println("\n总结论: 引导材料已被 passport 拒绝（passToken 已失效）—— 请在桌面重新登录后重试。")
+		os.Exit(1)
+	}
+	if shapeBroken {
+		fmt.Println("\n总结论: 换票未成功 —— passport 响应形态异常（不是网络问题，重试/重登都无益）。")
+		fmt.Println("        多半是线型变了或 probe 落后于线型：请更新 probe，或带上方原始报错反馈插件维护者。")
 		os.Exit(1)
 	}
 	fmt.Println("\n总结论: 换票未成功（网络/边缘原因）—— 稍后重试，或用 --region 钉死另一区域。")
