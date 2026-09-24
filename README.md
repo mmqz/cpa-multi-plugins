@@ -198,6 +198,8 @@ cd plugins/trae && CGO_ENABLED=1 go build -buildmode=c-shared -o trae.so .
 | **[9router](https://github.com/decolua/9router)** | JavaScript | Trae 三区域切换（regions: cn/sg/us）<br>Trae Intl chat_sessions/events SSE | trae-intl |
 | **[cockpit-tools](https://github.com/jlcodes99/cockpit-tools)** | Rust | Trae v2 积分制 pack 优先级（apply_usage_response）<br>Trae 4 变体差异（TraePlatformKind）<br>CodeBuddy CN 签到状态机（workbuddy_auto_checkin.rs）<br>CodeBuddy CN 签到字段解析（codebuddy_cn_oauth.rs）<br>Trae 签到 API headers（x-app-type, Origin, Referer） | trae-cn, trae-solo-cn, workbuddy, codebuddy-cn |
 | **[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)** | Go | WorkBuddy `/v3/config` 模型目录双路发现（企业端点排序权威 + v3 补能力/独有条目）<br>nonChatModel 非对话模型过滤 | workbuddy |
+| **[corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect)** | TypeScript | `/v3/config` 按客户端身份切分目录实测确认（CLI 名册 vs App 名册，split is load-bearing） | workbuddy |
+| **[maiphucgiang/codebuddy2api](https://github.com/maiphucgiang/codebuddy2api)** | Python | CodeBuddy intl 双产品身份（intl-cli/intl-work）目录共享推导 + CLI X-IDE-* 身份头 + auto↔default-model intl 别名 | workbuddy |
 | **[ThinkofRain1213/deepseek-harness-codearts](https://github.com/ThinkofRain1213/deepseek-harness-codearts)** | TypeScript | `buddy.ts` isChatModel 过滤 + supportsImages 三态<br>image_url/data URI 图片链路实测 | workbuddy |
 | **[Ttungx/trae-solo-local-api](https://github.com/Ttungx/trae-solo-local-api)** | TypeScript | Trae 上游无原生 thinking 参数 / agent 字段 4023 实测（Body 白名单依据）<br>image_url 多模态透传实测 | trae |
 | **[TriDefender/zcode-api](https://github.com/TriDefender/zcode-api)** | TypeScript | ZCode 智谱 GLM 编码套餐反代——OAuth 中转登录 / 签名 V4 / 身份头（g6n/TV）/ 账务平面 / 模型目录 | zcode |
@@ -213,6 +215,7 @@ cd plugins/trae && CGO_ENABLED=1 go build -buildmode=c-shared -o trae.so .
 - **签到字段解析**：`cockpit-tools/src-tauri/src/modules/codebuddy_cn_oauth.rs` line 1208-1258, 1285-1394, 1423-1587（CheckinStatusResponse 完整字段 + fallback 路径）
 - **模型双路发现**：`linguo2625469/workbuddy2api-panel` nonChatModel + `/v3/config` 探测（v0.12.51 吸收：企业端点管排序、v3 补能力与独有条目、单路失败降级另一路）
 - **isChatModel 过滤 + supportsImages**：`ThinkofRain1213/deepseek-harness-codearts` `buddy.ts`（nes-/completion-/codewise- 前缀、maxOutput<=256、text-to-image tag 不进可选列表；能力透出至模型元数据）
+- **目录身份切分（v0.9.35）**：`corrinehu/dsh-workbuddy-connect` `/v3/config` CLI/App 双名册实测 + `maiphucgiang/codebuddy2api` intl-cli/intl-work 双产品身份与 CLI X-IDE-* 头 + `linguo2625469/workbuddy2api-panel` CLI UA 并集探测与 /v2 企业端点家族（0.9.35 吸收：双身份并集探测，IDE 名册字段权威）
 
 #### `plugins/codebuddy-cn` 已并入 `plugins/workbuddy`（v0.9.0）
 - 两者后端、额度池完全相同（copilot.tencent.com），仅登录 platform（CLI/ide）与 X-IDE-* 请求头不同

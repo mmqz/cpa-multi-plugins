@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.9.35
+
+### The catalog is identity-split — global/intl discovery unions both client rosters
+
+issue #17 field report (2026-09-24): an Intl (codebuddy.ai) credential showed
+only eight models — the seven product-tier aliases plus o4-mini — and host
+model auto-fetch could not surface anything else. The reporter was right:
+that list is one client identity's roster, not the catalog.
+
+The gateway splits `/v3/config` by client identity, and the split is
+load-bearing (dsh-workbuddy-connect upstream.ts: "a CLI-shaped UA yields the
+CLI's roster … an App-shaped UA yields the App's internal roster"). Measured
+on workbuddy.ai (2026-09-22, workbuddy2api-panel client.go): IDE UA → 10
+chat models (o4-mini / enhance-1.0 / auto-chat present, no deepseek series);
+CLI UA → 22 chat models (deepseek-v4.1-flash / deepseek-v4.1-flash-sg /
+gpt-6-astra / kimi-k2.8-preview present, none of those aliases). Our probe
+only ever presented the IDE identity, so every CLI-roster model was
+invisible — on global as well as intl.
+
+- **Dual-identity probe + union (models.go)**: global/intl now probe
+  /v3/config with both identities concurrently and union the rosters
+  (`mergeV3IdentityLists`): the IDE roster stays field-authoritative, the
+  CLI roster only fills ids the IDE roster lacks. The CLI probe adds the
+  CLI X-IDE-* identity headers (codebuddy2api client_profiles
+  .identity_headers). cn stays IDE-UA single-probe (unmeasured split;
+  workbuddy2api-panel does the same).
+- **Enterprise /v2 path family (models.go)**: global/intl try
+  `/v2/enterprises/personal/models` first (workbuddy2api-panel
+  global_models.go measured 200 with the complete model table; `/console`
+  is the same-domain legacy path that may 500) and fall back to `/console`
+  on any failure — status, parse, or empty body. cn keeps `/console`-only.
+- **Tier aliases stay**: default/fast/balanced/primary/deep-model,
+  auto-chat, enhance-1.0 remain advertised and routable (they are the
+  gateway's own product tiers); the learned alias→real map (response echo)
+  keeps annotating display names. codebuddy2api's auto↔default-model intl
+  alias noted as a follow-up, not adopted.
+- **Known unknowns**: the CLI identity's exact roster on codebuddy.ai is
+  unmeasured (workbuddy.ai is measured; codebuddy2api's intl-cli profile
+  and 9router's same-catalog-as-CN static claim both indicate real ids
+  exist there); a stale CLI UA version can at worst shrink the CLI roster
+  toward the IDE set — the union only ever adds.
+
+Tests: v3ProbeUAsFor realm scoping, buildV3ConfigRequest identity headers
+(IDE byte-identical to pre-0.9.35), parseV3ConfigModels envelope/filter,
+mergeV3IdentityLists union authority, enterpriseEndpointCandidates path
+families. VERSION / main.go var lockstep 0.9.35.
+
 ## 0.9.34
 
 ### Opt-in async-stream head gate — `stream_head_timeout` (repo workbuddy 0.9.34)

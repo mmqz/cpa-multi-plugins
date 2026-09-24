@@ -420,19 +420,26 @@ func modelsEndpointFor(realm string) (modelsURL, origin string) {
 }
 
 // callModelsAPI resolves a realm's live model catalog. v0.9.12 dual probe
-// (mirrors workbuddy2api-panel FetchModels):
-//   - enterprise: GET /console/enterprises/personal/models — the account's
-//     registration table; cli agent list gives ordering, data.models the
-//     capabilities. Ordering authority.
-//   - v3/config: the official IDE configuration catalog — UA-sensitive
-//     (CodeBuddyIDE/* required; CLI UAs get a reduced table), returns the
-//     full capability set (maxInputTokens/maxOutputTokens, supportsImages,
-//     reasoning supportedEfforts, tags) and family models the enterprise
-//     table lacks (gpt-5.3-codex etc. on global).
+// (mirrors workbuddy2api-panel FetchModels), extended 0.9.35 to the
+// identity-split reality:
+//   - enterprise: GET the account's registration table (cli agent list gives
+//     ordering, data.models the capabilities). Ordering authority. v0.9.35:
+//     global/intl try the /v2 path family first (measured 200 with the
+//     complete table; /console is the same-domain legacy path that may 500)
+//     and fall back to /console — see enterpriseEndpointCandidates.
+//   - v3/config: the official IDE configuration catalog — UA-sensitive. The
+//     gateway splits it by client identity and each identity carries models
+//     the other lacks (2026-09-22 measurement on workbuddy.ai,
+//     workbuddy2api-panel client.go: IDE UA → 10 chat with o4-mini /
+//     enhance-1.0 / auto-chat and no deepseek series; CLI UA → 22 chat with
+//     deepseek-v4.1-flash / -sg / gpt-6-astra / kimi-k2.8-preview and none
+//     of those aliases). v0.9.35: global/intl probe BOTH identities
+//     concurrently and union the rosters — IDE roster field-authoritative,
+//     CLI roster only fills ids. cn stays IDE-UA single-probe.
 //
-// Both probes run concurrently with independent failure handling: one
-// path's failure degrades to the other (warn logged), only a double
-// failure fails the call with BOTH reasons. Realm semantics unchanged
+// All probes run concurrently with independent failure handling: one
+// path's failure degrades to the rest (warn logged), only a total failure
+// fails the call with all reasons. Realm semantics unchanged
 // (v0.12.18): Global tokens query workbuddy.ai, Intl (codebuddy.ai)
 // tokens query codebuddy.ai, CN tokens query copilot.tencent.com.
 func callModelsAPI(accessToken string, realm ...string) ([]pluginapi.ModelInfo, error) {
@@ -460,19 +467,35 @@ func callModelsAPI(accessToken string, realm ...string) ([]pluginapi.ModelInfo, 
 		v3         []discoveredModel
 		entErr     error
 		v3Err      error
+		v3Errs     []string
 	}
 	res := probe{}
+	uas := v3ProbeUAsFor(r)
+	var mu sync.Mutex
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1 + len(uas))
 	go func() {
 		defer wg.Done()
 		res.enterprise, res.entErr = callEnterpriseModelsAPI(ctx, accessToken, r)
 	}()
-	go func() {
-		defer wg.Done()
-		res.v3, res.v3Err = fetchV3ConfigModels(ctx, accessToken, r, uid)
-	}()
+	for _, ua := range uas {
+		ua := ua
+		go func() {
+			defer wg.Done()
+			list, err := fetchV3ConfigModelsAs(ctx, accessToken, r, uid, ua)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				res.v3Errs = append(res.v3Errs, fmt.Sprintf("ua %q: %v", ua, err))
+				return
+			}
+			res.v3 = mergeV3IdentityLists(res.v3, list)
+		}()
+	}
 	wg.Wait()
+	if len(res.v3Errs) == len(uas) {
+		res.v3Err = fmt.Errorf("%s", strings.Join(res.v3Errs, "; "))
+	}
 	if res.entErr != nil && res.v3Err != nil {
 		return nil, fmt.Errorf("models discovery failed: enterprise: %v; v3/config: %v",
 			res.entErr, res.v3Err)
@@ -482,6 +505,9 @@ func callModelsAPI(accessToken string, realm ...string) ([]pluginapi.ModelInfo, 
 	}
 	if res.v3Err != nil {
 		log.Printf("models: realm=%s v3/config probe failed (enterprise only): %v", r, res.v3Err)
+	} else if len(res.v3Errs) > 0 {
+		log.Printf("models: realm=%s some v3/config identities failed (serving the union of the rest): %s",
+			r, strings.Join(res.v3Errs, "; "))
 	}
 	out := mergeDiscoveryLists(res.enterprise, res.v3)
 	if len(out) == 0 {
@@ -490,10 +516,45 @@ func callModelsAPI(accessToken string, realm ...string) ([]pluginapi.ModelInfo, 
 	return out, nil
 }
 
-// callEnterpriseModelsAPI GETs /console/enterprises/personal/models and
-// builds the ordered list (cli agent base + promoted entries).
+// enterpriseEndpointCandidates returns the enterprise catalog URLs to probe
+// in order, plus the shared Origin/Referer base. global/intl try the /v2
+// path family first — workbuddy2api-panel (global_models.go
+// globalModelsProbePaths) measured /v2/enterprises/personal/models answering
+// 200 with the complete model table while /console is the same-domain legacy
+// path that may 500 — and fall back to /console; cn keeps its measured
+// /console-only sequence.
+func enterpriseEndpointCandidates(realm string) (urls []string, origin string) {
+	url, origin := modelsEndpointFor(realm)
+	if realm == "global" || realm == "intl" {
+		v2 := strings.Replace(url, "/console/enterprises/", "/v2/enterprises/", 1)
+		return []string{v2, url}, origin
+	}
+	return []string{url}, origin
+}
+
+// callEnterpriseModelsAPI GETs the realm's enterprise catalog through its
+// candidate paths (first success wins; a /v2 failure — status, parse, or
+// empty body — falls through to /console) and builds the ordered list
+// (cli agent base + promoted entries).
 func callEnterpriseModelsAPI(ctx context.Context, accessToken, realm string) ([]pluginapi.ModelInfo, error) {
-	modelsURL, origin := modelsEndpointFor(realm)
+	urls, origin := enterpriseEndpointCandidates(realm)
+	var lastErr error
+	for _, modelsURL := range urls {
+		list, err := fetchEnterpriseCatalog(ctx, accessToken, realm, modelsURL, origin)
+		if err == nil {
+			return list, nil
+		}
+		lastErr = err
+		if len(urls) > 1 {
+			log.Printf("models: realm=%s enterprise candidate %s failed, trying next: %v", realm, modelsURL, err)
+		}
+	}
+	return nil, lastErr
+}
+
+// fetchEnterpriseCatalog probes ONE enterprise catalog URL (both path
+// families share the {code, data:{models, agents}} envelope).
+func fetchEnterpriseCatalog(ctx context.Context, accessToken, realm, modelsURL, origin string) ([]pluginapi.ModelInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
 	if err != nil {
 		return nil, err
@@ -566,13 +627,79 @@ func callEnterpriseModelsAPI(ctx context.Context, accessToken, realm string) ([]
 	return out, nil
 }
 
-// v3ConfigUA is the IDE User-Agent the /v3/config catalog requires. The
-// endpoint is UA-sensitive: the CLI three-segment WorkBuddy UA gets a
-// reduced table (flash output capped 128K, no supportedEfforts), while the
-// official IDE shape returns full capabilities (flash: 393216 + low/high/
-// max). The version must track upstream IDE releases; stale versions may
-// also serve the reduced table (workbuddy2api-panel reference detail).
+// v3ConfigUA is the IDE/App identity the /v3/config catalog requires (the
+// UA must parse as a CodeBuddy version or the endpoint 400s with code
+// 12403). The gateway splits the /v3/config catalog by client identity and
+// the split is load-bearing (dsh-workbuddy-connect upstream.ts: a
+// CLI-shaped UA yields the CLI's roster, an App-shaped UA the App's
+// internal roster): the IDE/App-shaped UA returns entries with richer
+// per-model capability fields (flash output 393216 + low/high/max efforts)
+// while the CLI-shaped UA returns a different, larger model SET. Measured
+// on workbuddy.ai (2026-09-22, workbuddy2api-panel client.go
+// codeBuddyCLIUA note): IDE UA → 10 chat models (o4-mini / enhance-1.0 /
+// auto-chat present, no deepseek series) vs CLI UA → 22 chat models
+// (deepseek-v4.1-flash / deepseek-v4.1-flash-sg / gpt-6-astra /
+// kimi-k2.8-preview present, none of those aliases). Each identity carries
+// models the other lacks, so global/intl discovery probes BOTH and unions
+// the rosters (v3ProbeUAsFor). The version must track upstream IDE
+// releases; stale versions may serve a reduced table (workbuddy2api-panel
+// reference detail).
 const v3ConfigUA = "CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0"
+
+// v3ConfigCLIUA is the CLI three-segment identity the /v3/config gateway
+// treats as its own catalog client. Two independent projects ship this
+// exact string (workbuddy2api-panel codeBuddyCLIUA and
+// dsh-workbuddy-connect CLIENT_UA, both live-measured 2026-09);
+// codebuddy2api (client_profiles.py CLI_VERSION) already tracks
+// CLI/2.149.0, so the version needs currency checks — a stale version can
+// at worst shrink the CLI roster toward the IDE set, which the union
+// tolerates (extra probes only ever add ids). The CLI probe additionally
+// carries the CLI X-IDE-* identity headers (codebuddy2api
+// client_profiles.identity_headers).
+const v3ConfigCLIUA = "CLI/2.63.2 CodeBuddy/2.63.2"
+
+// v3ProbeUAsFor returns the /v3/config User-Agents to probe for one realm,
+// in merge order (first = field-authoritative). global/intl probe both
+// identities — each carries exclusive models; cn stays IDE-UA single-probe
+// (the CN catalog already surfaces the real families through the
+// enterprise endpoint, the CN identity split is unmeasured, and
+// workbuddy2api-panel keeps CN single-probe too).
+func v3ProbeUAsFor(realm string) []string {
+	if realm == "global" || realm == "intl" {
+		return []string{v3ConfigUA, v3ConfigCLIUA}
+	}
+	return []string{v3ConfigUA}
+}
+
+// buildV3ConfigRequest assembles the /v3/config request for one identity.
+// The CLI identity adds X-IDE-Type/Name/Version CLI headers on top of the
+// shared shape (codebuddy2api identity_headers); the IDE identity stays
+// header-identical to the pre-0.9.35 probe.
+func buildV3ConfigRequest(ctx context.Context, endpoint, domain, accessToken, uid, ua string) (*http.Request, error) {
+	if ua == "" {
+		ua = v3ConfigUA
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("X-Domain", domain)
+	req.Header.Set("X-Product", "SaaS")
+	req.Header.Set("User-Agent", ua)
+	req.Header.Set("X-CodeBuddy-Request", "1")
+	if uid != "" {
+		req.Header.Set("X-User-Id", uid)
+	}
+	if ua == v3ConfigCLIUA {
+		req.Header.Set("X-IDE-Type", "CLI")
+		req.Header.Set("X-IDE-Name", "CLI")
+		req.Header.Set("X-IDE-Version", "2.63.2")
+	}
+	return req, nil
+}
 
 // v3ConfigEndpointFor returns the /v3/config URL per realm. Same bases as
 // the model endpoints; realm keys: "cn" | "global" | "intl".
@@ -599,25 +726,24 @@ func v3ConfigDomainFor(realm string) string {
 	}
 }
 
-// fetchV3ConfigModels probes GET /v3/config (official IDE config catalog).
-// Response envelope: {code, data:{models:[...]}} — the models array carries
-// the full capability set. Transport/HTTP errors are wrapped with the URL
-// and a body snippet for the discovery-failure diagnostics line.
+// fetchV3ConfigModels probes GET /v3/config with the realm's default (IDE)
+// identity. See fetchV3ConfigModelsAs for the identity-aware entry point.
 func fetchV3ConfigModels(ctx context.Context, accessToken, realm, uid string) ([]discoveredModel, error) {
+	return fetchV3ConfigModelsAs(ctx, accessToken, realm, uid, "")
+}
+
+// fetchV3ConfigModelsAs probes GET /v3/config (official IDE configuration
+// catalog) presenting ONE client identity: ua empty = the IDE identity,
+// v3ConfigCLIUA = the CLI identity (its roster carries models the IDE
+// identity never receives — see v3ConfigUA). Response envelope:
+// {code, data:{models:[...]}} — the models array carries the full
+// capability set. Transport/HTTP errors are wrapped with the URL and a body
+// snippet for the discovery-failure diagnostics line.
+func fetchV3ConfigModelsAs(ctx context.Context, accessToken, realm, uid, ua string) ([]discoveredModel, error) {
 	endpoint := v3ConfigEndpointFor(realm)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := buildV3ConfigRequest(ctx, endpoint, v3ConfigDomainFor(realm), accessToken, uid, ua)
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("X-Domain", v3ConfigDomainFor(realm))
-	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("User-Agent", v3ConfigUA)
-	req.Header.Set("X-CodeBuddy-Request", "1")
-	if uid != "" {
-		req.Header.Set("X-User-Id", uid)
 	}
 	resp, err := hostHTTPDo(req)
 	if err != nil {
@@ -639,13 +765,21 @@ func fetchV3ConfigModels(ctx context.Context, accessToken, realm, uid string) ([
 		}
 		return nil, fmt.Errorf("v3/config status %d from %s: %s", resp.StatusCode, endpoint, snippet)
 	}
+	return parseV3ConfigModels(resp.Body)
+}
+
+// parseV3ConfigModels decodes the /v3/config envelope and keeps selectable
+// chat models only (the non-chat filter mirrors the enterprise path:
+// embedding/completion/code-only prefixes, supportsExtra, tiny outputs,
+// text-to-image tags).
+func parseV3ConfigModels(body []byte) ([]discoveredModel, error) {
 	var env struct {
 		Code int `json:"code"`
 		Data struct {
 			Models []discoveredModel `json:"models"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(resp.Body, &env); err != nil {
+	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, fmt.Errorf("v3/config parse: %w", err)
 	}
 	if env.Code != 0 {
@@ -662,6 +796,27 @@ func fetchV3ConfigModels(ctx context.Context, accessToken, realm, uid string) ([
 		return nil, fmt.Errorf("v3/config returned no selectable chat models")
 	}
 	return out, nil
+}
+
+// mergeV3IdentityLists unions the per-identity /v3/config rosters in probe
+// order: the earlier identity (IDE UA) is field-authoritative — a later
+// identity (CLI UA) only contributes ids the earlier ones lack, and its
+// per-entry fields never overwrite an existing entry (workbuddy2api-panel
+// merges its dual-UA rosters with the same rule: IDE fields win, CLI ids
+// fill the gaps).
+func mergeV3IdentityLists(lists ...[]discoveredModel) []discoveredModel {
+	var out []discoveredModel
+	seen := map[string]bool{}
+	for _, list := range lists {
+		for _, m := range list {
+			if m.ID == "" || seen[strings.ToLower(m.ID)] {
+				continue
+			}
+			seen[strings.ToLower(m.ID)] = true
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // discoveredModel is one entry of the discovery payload's data.models array.

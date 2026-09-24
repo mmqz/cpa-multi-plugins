@@ -161,6 +161,33 @@ account lifecycle. Oversized agent histories are also scrubbed before the
 upstream sees them (developer → system role normalization, orphan tool-result
 pairing cleanup) — see CHANGELOG 0.9.15.
 
+## FAQ
+
+### Why did my Intl (codebuddy.ai) account only show tier aliases (fast-model, auto-chat, …) instead of real model names?
+
+Because the gateway serves a **different catalog per client identity**, and
+plugin versions before 0.9.35 only ever presented the IDE identity. The IDE
+roster is the product-tier aliases (`default-model` / `fast-model` /
+`balanced-model` / `primary-model` / `deep-model` / `auto-chat` /
+`enhance-1.0`) plus genuine ids such as `o4-mini`. The CLI identity gets a
+different, larger roster — measured on workbuddy.ai (2026-09-22): ~22 chat
+models including the deepseek-v4.1 series, gpt-6-astra, kimi-k2.8-preview
+and the glm/gemini families — that the IDE identity never receives. Since
+0.9.35 the plugin probes both identities and advertises the union: the tier
+aliases (still routable, they are the gateway's own product tiers) now sit
+alongside the real model families. Enterprise discovery also tries the
+`/v2` path family first on global/intl (the `/console` path is legacy).
+
+Still true: upstream does not publish which concrete model backs each tier
+alias. Chat through an alias once and the plugin learns it from the
+response's `model` echo — the display name gains `·实测 <real-id>` and the
+plugin panel (`/v0/resource/plugins/workbuddy/panel`) shows the learned
+map (in-memory; re-learned from live traffic after a restart). Need a
+specific list? Pin `models_intl` (comma-separated ids; routability of a
+pinned id is decided upstream). Empty list instead of a short one? Check
+the panel's realm diagnostics first (`source` / `last_error`) — discovery
+only ever advertises what upstream currently serves.
+
 ## Development
 
 Requires Go 1.26+ (matches CPA).
