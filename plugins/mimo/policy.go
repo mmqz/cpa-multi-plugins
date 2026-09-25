@@ -62,17 +62,25 @@ func chatUpstreamError(status int, body string) error {
 // -----------------------------------------------------------------------------
 
 var (
-	redactREBearer  = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._\-+/=]{12,}`)
-	redactREJWT     = regexp.MustCompile(`\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b`)
-	redactRETokenKV = regexp.MustCompile(`(?i)((?:access_token|refresh_token|id_token)["']?\s*[=:]\s*["']?)([A-Za-z0-9._\-+/=]{12,})`)
+	redactREBearer = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._\-+/=]{12,}`)
+	redactREJWT    = regexp.MustCompile(`\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b`)
+	// The kv alternation must cover the bare key=value shapes an upstream
+	// error body may echo, not just cookie-header fragments: the xiaomi
+	// credential set (serviceToken/passToken/cUserId), the sk lane's key, and
+	// the region-scoped ticket rows (<sid>_ph/<sid>_slh, e.g. mimosgp_slh).
+	// \b keeps the short `sk` name from hitting unrelated shapes like
+	// task=123...; the value class gains % so URL-encoded tickets redact whole
+	// (deep-audit P2 #2, 2026-09-25).
+	redactRETokenKV = regexp.MustCompile(`(?i)((?:access_?token|refresh_?token|id_?token|service_?token|pass_?token|c_?user_?id|\bsk|[a-z0-9]+_(?:ph|slh))["']?\s*[=:]\s*["']?)([A-Za-z0-9._\-+/=%]{12,})`)
 	// redactRECookie catches Set-Cookie/Cookie header fragments that may ride
 	// an upstream error body — the cookie lane's credential material.
 	redactRECookie = regexp.MustCompile(`(?i)((?:set-)?cookie\s*[:=]\s*)[^;\r\n]{8,}`)
 )
 
-// redactSecrets strips bearer tokens / JWT-like blobs / cookie fragments from
-// error bodies before they reach logs or clients. Every upstream error string
-// this plugin surfaces must route through redactSecrets (or truncateRedacted).
+// redactSecrets strips bearer tokens / JWT-like blobs / bare credential
+// key-value pairs / cookie fragments from error bodies before they reach logs
+// or clients. Every upstream error string this plugin surfaces must route
+// through redactSecrets (or truncateRedacted).
 func redactSecrets(s string) string {
 	if s == "" {
 		return s

@@ -453,6 +453,45 @@ func TestRedactSecrets(t *testing.T) {
 	}
 }
 
+// TestRedactSecretsCredentialKV pins the deep-audit P2 #2 fix (2026-09-25):
+// an upstream error body echoing bare credential key=value pairs — the xiaomi
+// ticket set (serviceToken/passToken/cUserId), the sk lane's key, the
+// region-scoped cookie rows (<sid>_ph/<sid>_slh), URL-encoded values — must
+// redact, while unrelated kv shapes (task=/mask=/risk=) must survive intact.
+func TestRedactSecretsCredentialKV(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     string
+		secret string // must not survive
+		keep   string // non-secret context that must survive
+	}{
+		{"bare serviceToken kv", `invalid ticket: serviceToken=TQXRlGs1234567890abc in cookie`, "TQXRlGs1234567890abc", `invalid ticket: `},
+		{"json serviceToken kv", `{"msg":"bad credentials","serviceToken":"TQXRlGs1234567890abc"}`, "TQXRlGs1234567890abc", `"msg":"bad credentials",`},
+		{"snake_case service_token", `{"service_token":"srvTkn1234567890ab"}`, "srvTkn1234567890ab", ""},
+		{"passToken kv", `passToken=ptAbCd1234567890efGh expired`, "ptAbCd1234567890efGh", ` expired`},
+		{"cUserId kv", `cUserId=603318735706639872 rejected`, "603318735706639872", ` rejected`},
+		{"sk kv json", `{"sk":"skval1234567890abcd","detail":"bad key"}`, "skval1234567890abcd", `"detail":"bad key"`},
+		{"sk kv bare", `bad key: sk=skval1234567890abcd`, "skval1234567890abcd", `bad key: `},
+		{"region slh row", `mimosgp_slh=YWJjZGVmZ2hpamtsbW5vcA stale`, "YWJjZGVmZ2hpamtsbW5vcA", ` stale`},
+		{"region ph row", `mimocn_ph=Zm9vYmFyYmF6cXV1eA== missing`, "Zm9vYmFyYmF6cXV1eA", ` missing`},
+		{"url-encoded value", `serviceToken=TQXRlGs%2Babc%2Fdef%3D rejected`, "TQXRlGs%2Babc", ` rejected`},
+	}
+	for _, tc := range cases {
+		out := redactSecrets(tc.in)
+		if strings.Contains(out, tc.secret) {
+			t.Errorf("%s: secret survived: %q", tc.name, out)
+		}
+		if tc.keep != "" && !strings.Contains(out, tc.keep) {
+			t.Errorf("%s: lost non-secret context: %q", tc.name, out)
+		}
+	}
+	// The short `sk` name is boundary-guarded: unrelated kv shapes stay intact.
+	in := `task=1234567890123456 mask=abcdefghijklmn risk=9999999999999999`
+	if out := redactSecrets(in); out != in {
+		t.Fatalf("false positive on unrelated kv shapes: %q", out)
+	}
+}
+
 func TestMimoModelsCatalog(t *testing.T) {
 	models := mimoModels()
 	if len(models) != 3 {
@@ -583,6 +622,143 @@ func TestHandleExecExecuteModelAllowlistNoRetry(t *testing.T) {
 	if err == nil || calls != 1 {
 		t.Fatalf("model-range 401 must fail fast without retry (calls=%d err=%v)", calls, err)
 	}
+}
+
+// TestSendChatWithCookieRetryClosesFaultStream pins the deep-audit P2 #1 fix
+// (2026-09-25): past the fault gate every exit must Close the first (drained)
+// stream — Read's EOF does not release the host-side record, Close is the only
+// MethodHostHTTPStreamClose path, and a long-lived host would accumulate one
+// dead stream per faulted call. Direct-mode fixtures make "closed" observable
+// (Close nils the buffered body); the returned retry stream and the non-fault
+// passthrough must stay open — the caller owns those Closes.
+func TestSendChatWithCookieRetryClosesFaultStream(t *testing.T) {
+	origSend, origRenew := sendChatFn, renewCookieSessionFn
+	defer func() { sendChatFn, renewCookieSessionFn = origSend, origRenew }()
+
+	buildReq := func() (*http.Request, error) {
+		return http.NewRequest(http.MethodPost, "http://mimo.test/chat", nil)
+	}
+	route := chatRoute{lane: laneCookie}
+	sa := &storedAuth{}
+	newStream := func(body string) *hostHTTPStream { return &hostHTTPStream{direct: []byte(body)} }
+	pong := `{"id":"1","choices":[{"message":{"role":"assistant","content":"pong"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+
+	t.Run("re-mint success: fault stream closed, retry stream stays open", func(t *testing.T) {
+		attempts := 0
+		fault, retry := newStream(`{"error":{"message":"session invalid"}}`), newStream(pong)
+		sendChatFn = func(func() (*http.Request, error)) (*hostHTTPStream, int, http.Header, error) {
+			attempts++
+			if attempts == 1 {
+				return fault, http.StatusUnauthorized, nil, nil
+			}
+			return retry, http.StatusOK, nil, nil
+		}
+		renewCookieSessionFn = func(*storedAuth) bool { return true }
+		got, _, _, err := sendChatWithCookieRetry(sa, route, buildReq)
+		if err != nil || got != retry {
+			t.Fatalf("retry must return the second stream (err=%v)", err)
+		}
+		if fault.direct != nil {
+			t.Fatalf("first stream leaked on the re-mint path")
+		}
+		if retry.direct == nil {
+			t.Fatalf("returned stream must stay open — the caller owns its Close")
+		}
+	})
+
+	t.Run("re-mint failure: fault stream closed", func(t *testing.T) {
+		fault := newStream(`{"error":{"message":"session invalid"}}`)
+		sendChatFn = func(func() (*http.Request, error)) (*hostHTTPStream, int, http.Header, error) {
+			return fault, http.StatusUnauthorized, nil, nil
+		}
+		renewCookieSessionFn = func(*storedAuth) bool { return false }
+		if _, _, _, err := sendChatWithCookieRetry(sa, route, buildReq); err == nil {
+			t.Fatalf("re-mint failure must surface")
+		}
+		if fault.direct != nil {
+			t.Fatalf("first stream leaked on the re-mint-failed exit")
+		}
+	})
+
+	t.Run("model-range 401: fault stream closed, no renew, no retry", func(t *testing.T) {
+		fault := newStream(`{"error":{"message":"该模型不在当前Key可用模型范围内"}}`)
+		attempts, renewed := 0, false
+		sendChatFn = func(func() (*http.Request, error)) (*hostHTTPStream, int, http.Header, error) {
+			attempts++
+			return fault, http.StatusUnauthorized, nil, nil
+		}
+		renewCookieSessionFn = func(*storedAuth) bool { renewed = true; return true }
+		_, sc, _, err := sendChatWithCookieRetry(sa, route, buildReq)
+		if err == nil || sc != http.StatusUnauthorized || attempts != 1 || renewed {
+			t.Fatalf("model-range 401 must fail fast (sc=%d attempts=%d renewed=%v err=%v)", sc, attempts, renewed, err)
+		}
+		if fault.direct != nil {
+			t.Fatalf("first stream leaked on the allowlist exit")
+		}
+	})
+
+	t.Run("200 login page: fault stream closed", func(t *testing.T) {
+		fault := newStream(`<!DOCTYPE html><html><head><title>小米帐号 - 登录</title></head><body></body></html>`)
+		hdrs := http.Header{"Content-Type": {"text/html; charset=utf-8"}}
+		sendChatFn = func(func() (*http.Request, error)) (*hostHTTPStream, int, http.Header, error) {
+			return fault, http.StatusOK, hdrs, nil
+		}
+		renewCookieSessionFn = func(*storedAuth) bool { return false }
+		_, sc, _, err := sendChatWithCookieRetry(sa, route, buildReq)
+		if err == nil || sc != http.StatusOK {
+			t.Fatalf("login-page 200 must surface as a session fault (sc=%d err=%v)", sc, err)
+		}
+		if fault.direct != nil {
+			t.Fatalf("first stream leaked on the html-200 exit")
+		}
+	})
+
+	t.Run("non-fault passthrough: stream stays open, no renew", func(t *testing.T) {
+		okStream := newStream(pong)
+		renewed := false
+		sendChatFn = func(func() (*http.Request, error)) (*hostHTTPStream, int, http.Header, error) {
+			return okStream, http.StatusOK, nil, nil
+		}
+		renewCookieSessionFn = func(*storedAuth) bool { renewed = true; return true }
+		got, _, _, err := sendChatWithCookieRetry(sa, route, buildReq)
+		if err != nil || got != okStream {
+			t.Fatalf("passthrough must return the same stream (err=%v)", err)
+		}
+		if okStream.direct == nil {
+			t.Fatalf("passthrough stream must stay open — the caller owns its Close")
+		}
+		if renewed {
+			t.Fatalf("non-fault status must not re-mint")
+		}
+	})
+
+	t.Run("sk lane fault: passthrough untouched, stream stays open", func(t *testing.T) {
+		fault := newStream(`{"error":{"message":"invalid api key"}}`)
+		renewed := false
+		sendChatFn = func(func() (*http.Request, error)) (*hostHTTPStream, int, http.Header, error) {
+			return fault, http.StatusUnauthorized, nil, nil
+		}
+		renewCookieSessionFn = func(*storedAuth) bool { renewed = true; return true }
+		got, sc, _, err := sendChatWithCookieRetry(sa, chatRoute{lane: laneKey}, buildReq)
+		if err != nil || got != fault || sc != http.StatusUnauthorized {
+			t.Fatalf("sk lane must pass through untouched (sc=%d err=%v)", sc, err)
+		}
+		if fault.direct == nil {
+			t.Fatalf("sk-lane stream must stay open — the caller owns its Close")
+		}
+		if renewed {
+			t.Fatalf("sk lane must not re-mint the cookie session")
+		}
+	})
+
+	t.Run("transport error: passes through with nil stream", func(t *testing.T) {
+		sendChatFn = func(func() (*http.Request, error)) (*hostHTTPStream, int, http.Header, error) {
+			return nil, 0, nil, fmt.Errorf("dial upstream: refused")
+		}
+		if _, _, _, err := sendChatWithCookieRetry(sa, route, buildReq); err == nil {
+			t.Fatalf("transport error must surface")
+		}
+	})
 }
 
 func TestHandleExecStreamCollect(t *testing.T) {

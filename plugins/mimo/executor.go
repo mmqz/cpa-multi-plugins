@@ -109,6 +109,12 @@ func isModelAllowlistError(body []byte) bool {
 	return modelAllowlistRe.Match(body)
 }
 
+// sendChatFn is an indirection point for tests — same pattern as
+// renewCookieSessionFn — so the retry ladder's stream lifecycle (deep-audit
+// P2 #1: fault exits must Close the first stream) is observable without a
+// host bridge.
+var sendChatFn = sendChat
+
 // sendChat performs one upstream chat call through the host bridge.
 func sendChat(buildReq func() (*http.Request, error)) (*hostHTTPStream, int, http.Header, error) {
 	req, err := buildReq()
@@ -144,14 +150,22 @@ func cookieLaneSessionFault(sc int, hdrs http.Header) bool {
 // When the retry itself lands on another session fault, the raw response is
 // returned: callers check cookieLaneSessionFault once more and surface the
 // self-heal guidance instead of feeding a login page to the body parser.
+// Fault-path exits Close the drained first stream — past the fault gate it
+// never escapes this function.
 func sendChatWithCookieRetry(sa *storedAuth, route chatRoute, buildReq func() (*http.Request, error)) (*hostHTTPStream, int, http.Header, error) {
-	stream, sc, hdrs, err := sendChat(buildReq)
+	stream, sc, hdrs, err := sendChatFn(buildReq)
 	if err != nil {
 		return stream, sc, hdrs, err
 	}
 	if route.lane != laneCookie || !cookieLaneSessionFault(sc, hdrs) {
 		return stream, sc, hdrs, err
 	}
+	// Past this gate the first stream never leaves this function, so every
+	// exit below must Close it: Read's EOF does not release the host-side
+	// record (Close is the only MethodHostHTTPStreamClose path), and a
+	// long-lived host would accumulate one dead stream per faulted call
+	// (deep-audit P2 #1, 2026-09-25).
+	defer stream.Close()
 	// Drain the fault body before deciding — the model-range complaint is a
 	// terminal answer, not a session fault.
 	errBody, _ := readAllHost(stream)
@@ -161,7 +175,7 @@ func sendChatWithCookieRetry(sa *storedAuth, route chatRoute, buildReq func() (*
 	if !renewCookieSessionFn(sa) {
 		return nil, sc, hdrs, fmt.Errorf("mimo session expired (status %d, re-mint failed): the desktop's login rows may be stale — re-login the desktop (refreshes passToken) or use the sk lane", sc)
 	}
-	return sendChat(buildReq)
+	return sendChatFn(buildReq)
 }
 
 // -----------------------------------------------------------------------------
