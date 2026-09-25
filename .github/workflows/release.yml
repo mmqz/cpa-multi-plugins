@@ -105,7 +105,7 @@ jobs:
           which gcc 2>&1 || echo "which gcc failed"
           gcc --version 2>&1 | head -1 || echo "gcc invocation failed"
           mkdir -p dist/${{ matrix.os }}-${{ matrix.arch }}
-          PLUGINS="workbuddy qoder trae zcode"
+          PLUGINS="workbuddy qoder trae zcode mimo"
           for plugin in $PLUGINS; do
             echo "=== Building $plugin ==="
             cd plugins/$plugin
@@ -131,7 +131,7 @@ jobs:
           CC: ${{ matrix.cc }}
         run: |
           mkdir -p dist/${{ matrix.os }}-${{ matrix.arch }}
-          PLUGINS="workbuddy qoder trae zcode"
+          PLUGINS="workbuddy qoder trae zcode mimo"
           for plugin in $PLUGINS; do
             echo "=== Building $plugin ==="
             cd plugins/$plugin
@@ -220,7 +220,7 @@ jobs:
           body: |
             # cpa-multi-plugins ${{ steps.version.outputs.version }}
 
-            3 unified CPA plugins: **CodeBuddy/WorkBuddy**, **Qoder**, **Trae** — each merges the former CN/Intl/solo variants with automatic legacy auth-file adoption.
+            5 unified CPA plugins: **CodeBuddy/WorkBuddy**, **Qoder**, **Trae**, **ZCode (GLM coding plan)**, **MiMo** — the first three merge the former CN/Intl/solo variants with automatic legacy auth-file adoption.
 
             ## Downloads
             - `cpa-multi-plugins-linux-amd64.zip` — Linux x86_64
@@ -241,9 +241,11 @@ jobs:
                    workbuddy: { enabled: true }
                    qoder: { enabled: true }
                    trae: { enabled: true }
+                   zcode: { enabled: true }
+                   mimo: { enabled: true }
                ```
-            4. Restart CPA and check logs for `pluginhost: plugin registered plugin_id=workbuddy/qoder/trae`.
-            5. Login accounts via the management panel or Management API. Legacy `codebuddy-cn-/codebuddy-intl-/qoder-cn-/qoder-intl-/trae-cn-/trae-solo-cn-/trae-intl-` auth files are adopted automatically.
+            4. Restart CPA and check logs for `pluginhost: plugin registered plugin_id=workbuddy/qoder/trae/zcode/mimo`.
+            5. Login accounts via the management panel or Management API. Legacy `codebuddy-cn-/codebuddy-intl-/qoder-cn-/qoder-intl-/trae-cn-/trae-solo-cn-/trae-intl-` auth files are adopted automatically; zcode adopts a legacy single-file `zcode.json`; mimo adopts the desktop's SSO session automatically (Chromium partition cookie jar → service-ticket re-mint).
 
             ## Plugins
             | Plugin | Covers | Realms | Login options |
@@ -251,6 +253,8 @@ jobs:
             | workbuddy | CodeBuddy + WorkBuddy + codebuddy-cn + codebuddy-intl | CN (copilot.tencent.com) / Global (workbuddy.ai) / Intl (codebuddy.ai) | CLI + IDE, per-account region |
             | qoder | Qoder + qoder-cn + qoder-intl | CN (qoder.com.cn) / Intl (qoder.com) | Device flow + PAT, per-account region |
             | trae | Trae CN + Trae SOLO CN + Trae Intl | CN (api.trae.cn) / SOLO / Intl (marscode) | Per-variant device flow |
+            | zcode | GLM coding plan (ZCode desktop parity) | Intl (api.z.ai) / CN (open.bigmodel.cn) | OAuth CLI poll flow + legacy zcode.json adoption, per-account provider |
+            | mimo | Xiaomi MiMo (mimocode CLI + desktop parity) | CN / SGP / RU / IN (mimo-server-<region>.xiaomimimo.com) | sk OAuth (permanent) + desktop SSO cookie adoption, per-account region |
 
             See [README](https://github.com/mmqz/cpa-multi-plugins#readme) for details.
           files: release/*.zip

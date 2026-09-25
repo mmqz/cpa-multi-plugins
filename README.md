@@ -22,7 +22,7 @@
 | `trae` | Trae 三变体合并（Code CN + SOLO CN + Intl） | llm_utils_chat / Web SOLO | ✅ 每日 | ✅ v2 pack 优先级 | ✅ functional |
 | `qoder` | Qoder 双区合并（CN + Intl） | COSY 签名 | ✅ 每日 | ✅ quota | ✅ functional |
 | `zcode` | 智谱 GLM 编码套餐双 provider 合并（Z.AI + BigModel） | OpenAI 兼容 + anthropic 翻译 + 签名 V4 + off-peak 票务 | —（claim 需验证码侧车） | ✅ billing/balance | ✅ functional |
-| `mimo`（mimo 分支） | Xiaomi MiMo 双通道（platform OAuth sk + 桌面 SSO Cookie 收养） | OpenAI 兼容（sk lane 逐字对齐官方 CLI / cookie lane 逐字对齐桌面引擎 lane） | —（协议无签到面） | —（上游无配额端点；M2 评估） | 🚧 in development |
+| `mimo` | Xiaomi MiMo 双通道（platform OAuth sk + 桌面 SSO Cookie 收养） | OpenAI 兼容（sk lane 逐字对齐官方 CLI / cookie lane 逐字对齐桌面引擎 lane） | —（协议无签到面） | —（上游无配额端点） | ✅ functional |
 
 
 ## 功能对标
@@ -314,10 +314,10 @@ Trae / CodeBuddy / Qoder 平台会不定期更新协议。本项目通过以下�
 
 ## Status
 
-✅ **4/4 plugins fully functional** — v0.12.85 released
+✅ **5/5 plugins fully functional** — v0.12.88 released
 - `workbuddy` / `trae` / `qoder`：家族合并后的主线插件（原 8 个单平台插件已按家族并入）
 - `zcode`：智谱 GLM 编码套餐，v0.12.84 起并入主分支（M1–M3 完整）
-- 🚧 `mimo`：Xiaomi MiMo 插件 M1（双通道 + OAuth + 桌面会话收养）开发中，见 mimo 分支与 docs/MIMO_AUTH.md
+- `mimo`：Xiaomi MiMo 双通道插件（platform OAuth sk + 桌面 SSO 会话收养），0.2.4 起并入主分支（M1–M2 完整，深审 2×P2 已关，见 docs/MIMO_AUTH.md）
 - All plugins compile to .so/.dll/.dylib on 5 platforms (linux amd64/arm64, darwin amd64/arm64, windows amd64)
 - GitHub Actions release workflow: multi-platform build + auto release on tag push
 
