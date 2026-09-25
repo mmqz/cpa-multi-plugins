@@ -341,11 +341,14 @@ func normalizeExpiresAt(v int64) int64 {
 // ChatStream 发 llm_utils_chat 请求并返回原始 SSE body 流（调用方负责 Close）。
 // 非 2xx 时 rc 为 nil、body 为上游响应体（供调用方 Classify）、err 为 nil；
 // 只有传输层失败才返回 err。
-func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
+// resolvedModel：宿主在 ExecutorRequest.Model 里解析出的模型 id（issue #18）。
+// 非空时优先生效（那是宿主路由所依据的名字，不含凭据前缀）；空串回落
+// body 内客户端写的 model 字段（0.12.58 前的旧行为）。
+func (c *Client) ChatStream(a *auth.Auth, body []byte, resolvedModel string) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	// issue #13 诊断：出站前的指纹行（TRAE_DEBUG_PAYLOAD=1 时输出），记录
 	// 上游真正收到的白名单产物——与执行器入口的 raw 行按指纹对齐即可判断
 	// 两条执行链的出站请求是否逐字节一致。
-	prepared := PrepareBody(body, a.Variant)
+	prepared := PrepareBodyResolved(body, a.Variant, resolvedModel)
 	LogPreparedHead(a.UID, a.Variant, body, prepared)
 	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpChat, bytes.NewReader(prepared))
 	if err != nil {

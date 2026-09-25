@@ -19,6 +19,22 @@ import (
 //  4. function: 固定 "solo_work_lite"
 //  5. tools/tool_choice: 归一化（"none" 删 tools；auto/required 保留；function 提取 name）
 func PrepareBody(src []byte, variant string) []byte {
+	return PrepareBodyResolved(src, variant, "")
+}
+
+// PrepareBodyResolved is PrepareBody with the host-resolved model id
+// (issue #18). The raw body rides the client-written model name verbatim,
+// and when a host-side credential prefix is configured that name carries
+// the prefix ("tr/kimi-k2.6-solo") — the upstream catalog only knows the
+// bare config name, so the prefixed id failed EVERY SOLO-variant chat
+// call with the in-stream biz_code=4001 documented below. The host
+// already resolves the model before dispatch (ExecutorRequest.Model is
+// its routing key, prefix-free), so when non-empty that id wins; the
+// body's model field stays the fallback for hosts that never populate
+// it. Never split on "/": it is legal inside upstream config names
+// (deepseek-ai/deepseek-v4-pro) — the resolved id is adopted verbatim,
+// only the plugin's own namespace suffix is stripped afterwards.
+func PrepareBodyResolved(src []byte, variant, resolvedModel string) []byte {
 	if len(src) == 0 {
 		return src
 	}
@@ -150,6 +166,12 @@ func PrepareBody(src []byte, variant string) []byte {
 	}
 
 	model, _ := obj["model"].(string)
+	if r := strings.TrimSpace(resolvedModel); r != "" {
+		if SanitizeModelName(model, variant) != SanitizeModelName(r, variant) {
+			NoteHostPrefixMismatch(model, r, variant)
+		}
+		model = r
+	}
 	model = SanitizeModelName(model, variant)
 	if model == "" {
 		model = DefaultConfigName

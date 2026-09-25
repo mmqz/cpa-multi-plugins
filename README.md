@@ -167,6 +167,12 @@ plugins:
 
 前提：该链接来自 15 分钟内开始的登录、且期间 CPA 服务未重启；超时或重启后请回到面板重新点「登录」并用新链接。
 
+### trae 配了宿主模型前缀（凭据 `prefix`）后 SOLO 通道全部 4001（issue #18）
+
+CPA 允许给凭据配 `prefix`（`PATCH /v0/management/auth-files/fields`），用于让多家 provider 的同名底模在 `/v1/models` 里可区分。该前缀只应存在于宿主的记账键里，却会随客户端请求体原样进入插件：**v0.12.58 及之前**出站 `config_name` 取自 body 的 `model` 字段，带前缀的名字上游不认，SOLO 通道每条调用都在流内报 `biz_code=4001`（流式/非流式、全部账号一致，宿主侧看不到任何异常状态，排查成本极高）。
+
+**v0.12.59 起**出站一律使用宿主解析后的模型 id（`ExecutorRequest.Model`，宿主分发所依据的路由键，不含前缀），body 名字仅在宿主未填该字段时回退——前缀场景自动恢复，也不会误伤 `deepseek-ai/deepseek-v4-pro` 这类自带 `/` 的合法 config 名。trae 自带 `-solo`/`-intl` 命名空间后缀，与前缀功能本就互补，**建议 trae 凭据保持 `prefix` 为空**；无法升级宿主插件时，清空前缀同样可解（`PATCH {"name":…,"prefix":""}` 热生效）。插件日志出现 `trae: outbound model uses the host-resolved …` 说明前缀仍在生效，仅作提示，不影响功能。
+
 ## 构建
 
 ```bash

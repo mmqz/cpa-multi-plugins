@@ -29,6 +29,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
+	"sync"
 )
 
 // PayloadDiagEnabled 报告宿主进程环境是否开启请求指纹诊断。
@@ -81,4 +83,28 @@ func LogPreparedHead(uid, variant string, raw, prepared []byte) {
 	log.Printf("trae payload-diag: uid=%s variant=%s prepared %s function=%q config_name=%q model=%q stream=%v max_tokens=%v reasoning_effort=%q raw %s",
 		uid, variant, Fingerprint(prepared), peek.Function, peek.ConfigName, peek.Model,
 		peek.Stream != nil && *peek.Stream, peek.MaxTokens, peek.ReasoningEffort, Fingerprint(raw))
+}
+
+// -----------------------------------------------------------------------------
+// issue #18: host-prefix override diagnostics
+// -----------------------------------------------------------------------------
+
+// hostPrefixWarned keys the once-per-process prefix notes:
+// variant + "|" + the raw body model name.
+var hostPrefixWarned sync.Map
+
+// NoteHostPrefixMismatch records that the outbound model id came from the
+// host-resolved executor Model instead of the body's client-written name
+// (issue #18). With a host-side credential prefix configured the body
+// name carries the prefix, and the failure it used to cause is a silent
+// in-stream biz_code=4001 on EVERY call — one log line per distinct body
+// model name per process is loud enough to diagnose, quiet enough to
+// leave enabled for everyone.
+func NoteHostPrefixMismatch(bodyModel, resolved, variant string) {
+	key := variant + "|" + strings.TrimSpace(bodyModel)
+	if _, loaded := hostPrefixWarned.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	log.Printf("trae: outbound model uses the host-resolved %q; body model %q carries the host credential prefix (issue #18) — the prefix is redundant for trae and can be cleared",
+		resolved, bodyModel)
 }

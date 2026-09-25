@@ -78,6 +78,7 @@ import (
 	"time"
 
 	"github.com/mmqz/cpa-multi-plugins/plugins/trae/intlupstream"
+	cnupstream "github.com/mmqz/cpa-multi-plugins/plugins/trae/upstream"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -299,6 +300,28 @@ func intlstaticModels() []pluginapi.ModelInfo {
 // -----------------------------------------------------------------------------
 // Auth: parse / login / refresh
 // -----------------------------------------------------------------------------
+
+// intlResolvedModel returns the model id the intl upstream should see
+// (issue #18). The host-resolved executor model wins: the raw body rides
+// the client-written name verbatim — host credential prefix ("tr/…")
+// included — and resolveMode only strips the plugin's own "-intl"
+// suffix, so a prefixed body name would create the SOLO session with an
+// unknown model_name. An empty resolved id (hosts that never populate
+// ExecutorRequest.Model) falls back to the body name, the pre-0.12.59
+// behavior. The mismatch is logged once per distinct body name through
+// the CN upstream's shared diagnostic.
+func intlResolvedModel(resolved, bodyModel string) string {
+	r := strings.TrimSpace(resolved)
+	if r == "" {
+		return bodyModel
+	}
+	if b := strings.TrimSpace(bodyModel); b != "" && b != r {
+		if strings.TrimSuffix(b, "-intl") != strings.TrimSuffix(r, "-intl") {
+			cnupstream.NoteHostPrefixMismatch(b, r, "intl")
+		}
+	}
+	return r
+}
 
 func intlparseStoredAuth(raw []byte) (*upstream.Auth, error) {
 	// Support both nested ({"auth":{...},"account":{...}}) and flat shapes.
@@ -855,7 +878,10 @@ func intlhandleExecExecute(request []byte) ([]byte, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	completion, err := intlupstreamClient.Execute(ctx, a, openaiReq.Model, openaiReq.Messages)
+	// issue #18: 出站模型优先取宿主解析后的 req.Model——body 里的名字在宿主
+	// 配了凭据前缀时带前缀，而 resolveMode 只剥插件自己的 -intl 后缀。
+	model := intlResolvedModel(req.Model, openaiReq.Model)
+	completion, err := intlupstreamClient.Execute(ctx, a, model, openaiReq.Messages)
 	if err != nil {
 		return nil, fmt.Errorf("execute: %w", err)
 	}
@@ -891,7 +917,9 @@ func intlhandleExecStream(request []byte) ([]byte, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	reader, err := intlupstreamClient.ExecuteStream(ctx, a, openaiReq.Model, openaiReq.Messages)
+	// issue #18: 同 intlhandleExecExecute——req.Model 优先，body 名字仅作回退。
+	model := intlResolvedModel(req.Model, openaiReq.Model)
+	reader, err := intlupstreamClient.ExecuteStream(ctx, a, model, openaiReq.Messages)
 	if err != nil {
 		return nil, fmt.Errorf("stream: %w", err)
 	}

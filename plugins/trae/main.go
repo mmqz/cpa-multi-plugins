@@ -140,7 +140,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.58"
+var version = "0.12.59"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -1910,7 +1910,9 @@ func handleExecExecute(request []byte) ([]byte, error) {
 	// issue #13 诊断：入口指纹行（TRAE_DEBUG_PAYLOAD=1 时输出），与 ChatStream
 	// 的 prepared 行对齐后可实测非流式/流式两条链的出站请求是否一致。
 	upstream.LogChatHead("execute", req.Model, req.Payload)
-	rc, status, body, err := upstreamClient.ChatStream(a, req.Payload)
+	// issue #18: req.Model（宿主解析出的模型 id，不含凭据前缀）优先于 body
+	// 里客户端写的名字——后者带前缀时上游会以流内 biz_code=4001 拒绝。
+	rc, status, body, err := upstreamClient.ChatStream(a, req.Payload, req.Model)
 	if err != nil {
 		return nil, fmt.Errorf("execute: chat stream: %w", err)
 	}
@@ -2110,7 +2112,8 @@ func handleExecStream(request []byte) ([]byte, error) {
 
 	// issue #13 诊断：同 handleExecExecute，两入口指纹行使两条执行链可对比。
 	upstream.LogChatHead("stream", req.Model, req.Payload)
-	rc, status, body, err := upstreamClient.ChatStream(a, req.Payload)
+	// issue #18: 同 handleExecExecute——req.Model 优先，body 名字仅作回退。
+	rc, status, body, err := upstreamClient.ChatStream(a, req.Payload, req.Model)
 	if err != nil {
 		return nil, fmt.Errorf("stream: chat stream: %w", err)
 	}
