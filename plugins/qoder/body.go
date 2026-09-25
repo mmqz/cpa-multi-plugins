@@ -138,6 +138,28 @@ func (m openAIMessage) MarshalJSON() ([]byte, error) {
 	return json.Marshal(out)
 }
 
+// assistantCarriesToolCalls reports whether the client message carries a
+// non-empty tool_calls member. The verdict comes from the verbatim raw
+// members, not from a typed field, so any tool_calls shape the client sent
+// counts.
+func assistantCarriesToolCalls(m openAIMessage) bool {
+	var calls []json.RawMessage
+	return json.Unmarshal(m.raw["tool_calls"], &calls) == nil && len(calls) > 0
+}
+
+// isEmptyAssistantBody reports whether the content member carries nothing
+// upstream would keep: absent, null, blank, or an empty part array. Callers
+// gate on Content being empty first, so rawContent is the authority for the
+// non-string shapes — [] is empty, [{"type":"text",...}] is not.
+func isEmptyAssistantBody(m openAIMessage) bool {
+	raw := strings.TrimSpace(m.rawContent)
+	if raw == "" || raw == "null" {
+		return true
+	}
+	var parts []json.RawMessage
+	return json.Unmarshal([]byte(raw), &parts) == nil && len(parts) == 0
+}
+
 // messageTextContent renders one message's textual content for the
 // chat_context.text mirror of the latest user prompt. Plain strings pass
 // through; structured content arrays contribute their text parts.
@@ -285,9 +307,6 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 	var outMsgs []any
 	if slim {
 		delete(base, "tools")
-		for _, m := range req.Messages {
-			outMsgs = append(outMsgs, m)
-		}
 	} else {
 		if msgs, ok := base["messages"].([]any); ok {
 			for _, m := range msgs {
@@ -298,9 +317,21 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 				}
 			}
 		}
-		for _, m := range req.Messages {
-			outMsgs = append(outMsgs, m)
+	}
+	for _, m := range req.Messages {
+		// Qoder discards assistant turns whose content is empty even
+		// when they carry tool_calls, orphaning the tool result that
+		// follows ("Messages with role 'tool' must be a response to a
+		// preceding message with 'tool_calls'"). Give such turns a
+		// minimal body — on the loop's value copy, never in the
+		// caller's request. Everything else round-trips verbatim,
+		// including the 0.8.12 content:null passthrough contract for
+		// turns upstream is willing to keep.
+		if m.Role == "assistant" && strings.TrimSpace(m.Content) == "" &&
+			assistantCarriesToolCalls(m) && isEmptyAssistantBody(m) {
+			m.Content, m.rawContent, m.contentSet = "Calling tools.", "", true
 		}
+		outMsgs = append(outMsgs, m)
 	}
 	base["messages"] = outMsgs
 

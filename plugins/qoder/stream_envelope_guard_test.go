@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -62,6 +63,36 @@ func TestCollectUpstreamStreamQoder_EmptyStreamRejected(t *testing.T) {
 	for _, line := range []string{": keep-alive", `data: {"body":"[DONE]"}`} {
 		if _, meaningful, _ := qoderUnwrapFrame(line); meaningful {
 			t.Fatalf("control line %q must not count toward the empty-stream guard", line)
+		}
+	}
+}
+
+// The gateway wraps provider errors behind a generic top-level message and
+// parks the actionable sentence in details (JSON string or object, nested
+// under error.message). The composed error must surface that sentence — the
+// 4001 tool-orphan family is only diagnosable through it — while the
+// redaction layer still catches credential material.
+func TestQoderUnwrapFrame_ErrorDetailsSurfaced(t *testing.T) {
+	const message = "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"
+	inner := map[string]any{"error": map[string]any{"message": message + " Bearer secret-token-1234567890"}}
+	rawInner, _ := json.Marshal(inner)
+	for _, details := range []any{string(rawInner), inner} {
+		body, _ := json.Marshal(map[string]any{
+			"code": "provider_error", "type": "provider_error",
+			"message": "Error in upstream response", "details": details,
+		})
+		frame, _ := json.Marshal(map[string]any{"body": string(body), "statusCodeValue": 400})
+		_, _, err := qoderUnwrapFrame("data:" + string(frame))
+		if err == nil {
+			t.Fatal("upstream rejection ignored")
+		}
+		for _, want := range []string{"status=400", "code=provider_error", "type=provider_error", message} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("missing %q: %v", want, err)
+			}
+		}
+		if strings.Contains(err.Error(), "secret-token-1234567890") {
+			t.Fatal("credential exposed")
 		}
 	}
 }

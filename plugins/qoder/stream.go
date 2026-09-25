@@ -883,11 +883,55 @@ func qoderUnwrapFrame(line string) (string, bool, error) {
 	_ = json.Unmarshal([]byte(body), &chunk)
 	if outer.Status >= 400 || (len(chunk.Error) > 0 && string(chunk.Error) != "null") {
 		return "", false, &qoderFrameError{
-			msg:    fmt.Sprintf("qoder upstream error: %s", truncateRedacted(body, 200)),
+			msg:    fmt.Sprintf("qoder upstream error: %s", describeQoderEnvelopeRejection(body, chunk.Error, outer.Status)),
 			status: outer.Status,
 		}
 	}
 	return body, true, nil
+}
+
+// describeQoderEnvelopeRejection renders one error envelope as a single
+// greppable line. The gateway parks the actionable provider text in details
+// (a JSON string or an object, nested under error.message) behind a generic
+// top-level message, so the composed line walks those layers instead of
+// dumping a truncated body — the 4001 tool-orphan family is only diagnosable
+// when the provider sentence survives truncation, and redaction still
+// applies. Absorbed alongside the empty-tool-call fix (libo0118's
+// qoder-custom 8e33cec) because that failure only surfaces through this
+// detail chain.
+func describeQoderEnvelopeRejection(body string, rawError json.RawMessage, status int) string {
+	payload := body
+	if len(rawError) > 0 && string(rawError) != "null" {
+		payload = string(rawError)
+	}
+	var probe struct {
+		Code    any             `json:"code"`
+		Type    string          `json:"type"`
+		Message string          `json:"message"`
+		Details json.RawMessage `json:"details"`
+	}
+	_ = json.Unmarshal([]byte(payload), &probe)
+	if len(probe.Details) > 0 {
+		// A JSON-string details value unwraps to the object it quotes.
+		var quoted string
+		if json.Unmarshal(probe.Details, &quoted) == nil {
+			probe.Details = json.RawMessage(quoted)
+		}
+		var nested struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(probe.Details, &nested) == nil {
+			if nested.Error.Message != "" {
+				probe.Message += ": " + nested.Error.Message
+			} else if nested.Message != "" {
+				probe.Message += ": " + nested.Message
+			}
+		}
+	}
+	return truncateRedacted(fmt.Sprintf("status=%d code=%v type=%s: %s", status, probe.Code, probe.Type, probe.Message), 700)
 }
 
 func firstNonEmpty(vals ...string) string {
