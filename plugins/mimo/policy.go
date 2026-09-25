@@ -69,9 +69,12 @@ var (
 	// credential set (serviceToken/passToken/cUserId), the sk lane's key, and
 	// the region-scoped ticket rows (<sid>_ph/<sid>_slh, e.g. mimosgp_slh).
 	// \b keeps the short `sk` name from hitting unrelated shapes like
-	// task=123...; the value class gains % so URL-encoded tickets redact whole
-	// (deep-audit P2 #2, 2026-09-25).
-	redactRETokenKV = regexp.MustCompile(`(?i)((?:access_?token|refresh_?token|id_?token|service_?token|pass_?token|c_?user_?id|\bsk|[a-z0-9]+_(?:ph|slh))["']?\s*[=:]\s*["']?)([A-Za-z0-9._\-+/=%]{12,})`)
+	// task=123...; the value class gains % so URL-encoded tickets redact whole,
+	// and : because the real passToken wire form is `V1:<base64>` — without it
+	// the value run dies at the colon and nothing matches (deep-audit P2 #2,
+	// 2026-09-25; the V1: miss was the reviewer's re-check find, same
+	// fixture-vs-real-shape class as the 0.2.2 nonce bug).
+	redactRETokenKV = regexp.MustCompile(`(?i)((?:access_?token|refresh_?token|id_?token|service_?token|pass_?token|c_?user_?id|\bsk|[a-z0-9]+_(?:ph|slh))["']?\s*[=:]\s*["']?)([A-Za-z0-9._\-+/=%:]{12,})`)
 	// redactRECookie catches Set-Cookie/Cookie header fragments that may ride
 	// an upstream error body — the cookie lane's credential material.
 	redactRECookie = regexp.MustCompile(`(?i)((?:set-)?cookie\s*[:=]\s*)[^;\r\n]{8,}`)

@@ -458,6 +458,10 @@ func TestRedactSecrets(t *testing.T) {
 // ticket set (serviceToken/passToken/cUserId), the sk lane's key, the
 // region-scoped cookie rows (<sid>_ph/<sid>_slh), URL-encoded values — must
 // redact, while unrelated kv shapes (task=/mask=/risk=) must survive intact.
+// The passToken vectors carry the real wire shape `V1:<base64>` — the value
+// class must include `:` or the run dies at the colon and nothing matches
+// (reviewer re-check find; bytes below are synthetic, only the shape is real
+// — never bake a live credential fragment into the repo).
 func TestRedactSecretsCredentialKV(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -468,7 +472,8 @@ func TestRedactSecretsCredentialKV(t *testing.T) {
 		{"bare serviceToken kv", `invalid ticket: serviceToken=TQXRlGs1234567890abc in cookie`, "TQXRlGs1234567890abc", `invalid ticket: `},
 		{"json serviceToken kv", `{"msg":"bad credentials","serviceToken":"TQXRlGs1234567890abc"}`, "TQXRlGs1234567890abc", `"msg":"bad credentials",`},
 		{"snake_case service_token", `{"service_token":"srvTkn1234567890ab"}`, "srvTkn1234567890ab", ""},
-		{"passToken kv", `passToken=ptAbCd1234567890efGh expired`, "ptAbCd1234567890efGh", ` expired`},
+		{"passToken V1: bare kv (real wire shape)", `login failed passToken=V1:zKq8mP2vXw9Qr5Tn3YbC6JdH1sL4FgV0Ne7UjIkMhAo`, "zKq8mP2vXw9Qr5Tn3YbC6JdH1sL4FgV0Ne7UjIkMhAo", `login failed `},
+		{"passToken V1: json kv", `{"error":"stale","passToken":"V1:zKq8mP2vXw9Qr5Tn3YbC6JdH1sL4FgV0Ne7UjIkMhAo"}`, "zKq8mP2vXw9Qr5Tn3YbC6JdH1sL4FgV0Ne7UjIkMhAo", `"error":"stale",`},
 		{"cUserId kv", `cUserId=603318735706639872 rejected`, "603318735706639872", ` rejected`},
 		{"sk kv json", `{"sk":"skval1234567890abcd","detail":"bad key"}`, "skval1234567890abcd", `"detail":"bad key"`},
 		{"sk kv bare", `bad key: sk=skval1234567890abcd`, "skval1234567890abcd", `bad key: `},
@@ -485,8 +490,9 @@ func TestRedactSecretsCredentialKV(t *testing.T) {
 			t.Errorf("%s: lost non-secret context: %q", tc.name, out)
 		}
 	}
-	// The short `sk` name is boundary-guarded: unrelated kv shapes stay intact.
-	in := `task=1234567890123456 mask=abcdefghijklmn risk=9999999999999999`
+	// The short `sk` name is boundary-guarded and names must be complete:
+	// unrelated kv shapes — including colon-carrying values — stay intact.
+	in := `task=1234567890123456 mask=abcdefghijklmn risk=9999999999999999 deadline=12:34:56:78:90:12 access_token_expiry=09:00:00:00`
 	if out := redactSecrets(in); out != in {
 		t.Fatalf("false positive on unrelated kv shapes: %q", out)
 	}
