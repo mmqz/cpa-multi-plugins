@@ -69,6 +69,9 @@ func TestHandleParseAuth_EchoesFileNameAndEmptyID(t *testing.T) {
 	if resp.Auth.Provider != providerName {
 		t.Fatalf("provider=%q", resp.Auth.Provider)
 	}
+	if got := resp.Auth.Metadata["auth_kind"]; got != "oauth" {
+		t.Fatalf("auth_kind=%v; nested WorkBuddy tokens must be classified as OAuth", got)
+	}
 }
 
 func TestHandleParseAuth_LegacyWorkbuddyJSON_KeepsHostFileName(t *testing.T) {
@@ -117,6 +120,9 @@ func TestToAuthDataForRefresh_EmptyFileNameAndID(t *testing.T) {
 		Account: storedAccount{UID: "u-1", Nickname: "n"},
 	}
 	ad := toAuthDataForRefresh(sa)
+	if got := ad.Metadata["auth_kind"]; got != "oauth" {
+		t.Fatalf("refreshed auth_kind=%v, want oauth", got)
+	}
 	if ad.FileName != "" {
 		t.Fatalf("FileName=%q want empty", ad.FileName)
 	}

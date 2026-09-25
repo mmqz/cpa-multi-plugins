@@ -142,6 +142,9 @@ func TestBuildAuthFileJSON_ContainsDisabledAndNote(t *testing.T) {
 	if m["type"] != providerName {
 		t.Fatalf("type=%v", m["type"])
 	}
+	if m["auth_kind"] != "oauth" {
+		t.Fatalf("lifecycle save lost OAuth classification: %v", m["auth_kind"])
+	}
 	if m["disabled"] != true {
 		t.Fatalf("disabled=%v", m["disabled"])
 	}

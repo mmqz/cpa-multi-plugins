@@ -162,6 +162,16 @@ func hostAuthSaveJSON(name string, raw []byte) error {
 	if name == "" {
 		return fmt.Errorf("empty auth file name")
 	}
+	// Every physical write carries the OAuth attribution and keeps foreign
+	// or malformed documents out (write-side twin of handleParseAuth's
+	// read-side ownership check).
+	doc, err := normalizeWorkbuddyAuthDoc(raw)
+	if err != nil {
+		return err
+	}
+	if raw, err = json.Marshal(doc); err != nil {
+		return err
+	}
 	saveReq := pluginapi.HostAuthSaveRequest{
 		Name: name,
 		JSON: raw,
@@ -208,6 +218,8 @@ func buildAuthFileJSON(sa *storedAuth, disabled bool, note string, extra map[str
 	for k, v := range extra {
 		out[k] = v
 	}
+	// extra must not be able to strip the classification.
+	out["auth_kind"] = "oauth"
 	return json.Marshal(out)
 }
 

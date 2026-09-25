@@ -577,10 +577,13 @@ func enrichAuthMetadata(sa *storedAuth, cr *creditsSummary, disabled bool) map[s
 func enrichAuthMetadataWithPrev(sa *storedAuth, cr *creditsSummary, disabled bool, prevCredits string) map[string]any {
 	note := displayNoteWithPrev(sa, cr, disabled, prevCredits)
 	return map[string]any{
-		"type":     providerName,
-		"provider": providerName,
-		"logo":     pluginLogoURL,
-		"note":     note,
-		"disabled": disabled,
+		// Same classification the physical writes stamp — the panel and
+		// the host's auth listing must agree with the file on disk.
+		"auth_kind": "oauth",
+		"type":      providerName,
+		"provider":  providerName,
+		"logo":      pluginLogoURL,
+		"note":      note,
+		"disabled":  disabled,
 	}
 }
