@@ -291,6 +291,13 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		// Upstream has no dedicated count_tokens API. Return an unhandled-style
 		// zero estimate so clients fall back / skip.
 		return okEnvelope(pluginapi.ExecutorResponse{Payload: []byte(`{"input_tokens":0}`)})
+	case pluginabi.MethodManagementRegister:
+		// No BasePath cache needed: the only management surface is a
+		// resource route, and the /v0/resource/plugins/<provider> prefix
+		// is fixed (same shape trae/zcode dispatch on).
+		return okEnvelope(mimoManagementRegistration())
+	case pluginabi.MethodManagementHandle:
+		return handleMimoManagement(request)
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method), nil
 	}
@@ -372,7 +379,7 @@ func mimoRegistration() registration {
 			ExecutorInputFormats:  []string{"chat-completions"},
 			ExecutorOutputFormats: []string{"chat-completions"},
 			Scheduler:             false,
-			ManagementAPI:         false,
+			ManagementAPI:         true, // v0.2.5: /oauth_submit paste-to-complete fallback
 			UsagePlugin:           false,
 		},
 	}
@@ -383,7 +390,7 @@ func mimoRegistration() registration {
 // must stay in lockstep with the VERSION file — the same drift class that
 // shipped trae v0.12.86 self-reporting 0.12.56 (repo lesson 2026-09-23).
 // `make build` may still override it via -X (git describe).
-var version = "0.2.4"
+var version = "0.2.5"
 
 // -----------------------------------------------------------------------------
 // Envelope helpers

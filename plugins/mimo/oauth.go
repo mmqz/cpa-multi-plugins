@@ -262,7 +262,11 @@ func handleStartLogin(raw []byte) ([]byte, error) {
 		State:     state,
 		ExpiresAt: now.Add(loginTTL).UTC(),
 		Metadata: map[string]any{
-			"prompt": "在打开的页面中登录小米账号并授权 MiMo Code 密钥（回调直达本机，完成后自动继续）。授权记录名为 " + keyName + "。",
+			// v0.2.5: the prompt now carries the paste-to-complete
+			// fallback — remote deployments cannot receive the
+			// localhost redirect at all, and without this hint the
+			// login just pends until TTL (issue report 2026-09-26).
+			"prompt": "在打开的页面中登录小米账号并授权 MiMo Code 密钥（回调直达本机，完成后自动继续）。授权记录名为 " + keyName + "。远程部署浏览器跳不回本机时：复制失败页地址栏的完整链接（http://localhost:…/?u=…），打开 <宿主地址>/v0/resource/plugins/mimo/oauth_submit 粘贴提交即可完成登录。",
 		},
 	})
 }
