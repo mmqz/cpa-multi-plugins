@@ -58,6 +58,7 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button:disabled{opacity:.5;
   <div class="bar">
     <button onclick="load(false,false)">刷新缓存</button>
     <button onclick="load(true,true)" class="sec">强制刷新配额</button>
+    <button onclick="loadPreview()" class="sec">查询可领取</button>
     <span class="sub" id="serverTime"></span>
   </div>
   <div class="keybox" id="keyBox" style="display:none">
@@ -68,6 +69,7 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button:disabled{opacity:.5;
     </div>
     <div class="khint">密钥仅保存在当前浏览器（localStorage，混淆存储），用于调用本插件管理接口；同源自托管管理面板可自动拾取，无需手填。</div>
   </div>
+  <div id="claimBox" style="display:none"></div>
   <div class="grid" id="cards"></div>
 </div>
 <div class="toast" id="toast"></div>
@@ -193,6 +195,36 @@ async function loadOne(idx){
 async function switchPlan(idx, plan){
   const r = await api('/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auth_index:idx, plan:plan})});
   toast(r.ok?'已切换到 '+plan:(r.error||'失败')); load(false,false);
+}
+function escHtml(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+function fmtUnix(sec){try{return new Date(sec*1000).toLocaleString()}catch(e){return sec}}
+async function loadPreview(){
+  const box=document.getElementById('claimBox');
+  box.style.display='block';
+  box.innerHTML='<div class="card">查询中…</div>';
+  const data=await api('/preview');
+  if(data.error){box.innerHTML='<div class="card err">'+escHtml(data.error)+'</div>';return}
+  const plans=data.plans||[];
+  if(!plans.length){
+    box.innerHTML='<div class="card"><h2>当前没有可领取的活动</h2><div class="sub">活动由服务端按账号与时段下发；已领取过的活动不会再出现在列表里。</div></div>';
+    return;
+  }
+  let html='<div class="card"><h2>可领取活动（'+plans.length+'）</h2><div class="khint">插件不支持自动领取：claim 需要阿里云无痕验证码，仅官方客户端能完成。请在 ZCode 官方客户端手动领取；领取后面板余量会出现对应额度池。</div></div><div class="grid">';
+  plans.forEach(function(p){
+    const ents=(p.entitlements||[]).map(function(e){
+      let s=escHtml(e.name||'权益');
+      if(e.grant) s+=' <b>'+Number(e.grant).toLocaleString()+'</b>'+(e.unit?' '+escHtml(e.unit):'');
+      return '<div class="stat"><span class="k">包</span><span class="v">'+s+'</span></div>';
+    }).join('');
+    const win=(p.starts_at||p.ends_at)?'<div class="sub">'+(p.starts_at?fmtUnix(p.starts_at):'')+(p.ends_at?' ~ '+fmtUnix(p.ends_at):'')+'</div>':'';
+    html+='<div class="card"><h2>'+escHtml(p.name||p.plan_id)
+      +' <span><span class="badge plan">可领取</span>'
+      +(p.accounts>1?' <span class="badge">'+p.accounts+' 账号可见</span>':'')
+      +'</span></h2>'
+      +(p.description?'<div class="sub">'+escHtml(p.description)+'</div>':'')
+      +ents+win+'</div>';
+  });
+  box.innerHTML=html+'</div>';
 }
 if(!mgmtKey) showKeyBox(MSG_NEEDKEY);
 load(false,false);

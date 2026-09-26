@@ -1,7 +1,9 @@
 // quota.go owns the zcode.z.ai billing plane: the live free-quota snapshot
 // (GET /api/v1/zcode-plan/billing/balance) mapped onto the panel's
-// creditsSummary shape, and the claimable-plan preview reader used for the
-// panel's trial-plan row.
+// creditsSummary shape. The claimable-plan preview reader (the panel's
+// claim view) lives in preview.go — reading billing/preview is all it
+// does; the claim POST itself is captcha-gated and stays official-client
+// only.
 //
 // Header contract (TriDefender/zcode-api routes-quota.ts / claim/client.ts):
 // the billing gateway authenticates with the plan JWT (`Authorization: Bearer
