@@ -76,9 +76,14 @@ import (
 )
 
 const (
-	providerName  = "zcode"
-	authFileName  = "zcode.json"
-	pluginLogoURL = ""
+	providerName = "zcode"
+	authFileName = "zcode.json"
+
+	// ZCode app icon (TriDefender/zcode-api Android-APP design assets,
+	// designated 2026-09-26). raw.githubusercontent serves the image itself —
+	// the github.com blob page serves HTML. The CPA management UI renders
+	// metadata.logo as the plugin icon, same wiring as trae/qoder/workbuddy.
+	pluginLogoURL = "https://raw.githubusercontent.com/TriDefender/zcode-api/master/Android-APP/design/assets/zcode-app-icon.png"
 
 	// LLM upstreams (coding-plan, OpenAI-compatible gateway).
 	openAIBaseZai      = "https://api.z.ai/api/coding/paas/v4"
@@ -331,7 +336,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.1.1"
+var version = "0.1.2"
 
 func wbRegistration() registration {
 	return registration{
