@@ -26,7 +26,7 @@
 
 - **off-peak 流式不重试**：429 排队 / 3102 票废的重试循环仅在非流式路径透明执行；流式一旦开始吐 chunk，重试无法对客户端隐藏（取票阶段的等待/重取两条路径全通道可用）。票已 ready 时 5min TTL 内发送，遇到 429/3102 的概率极低。
 - **off-peak bigmodel-team 形态未支持**：Team 账号需要 `bigmodel-organization` / `bigmodel-project` 双头（缺一不发），插件当前不存储组织/项目 ID，个人套餐（personal）不受影响。
-- **试用套餐领取：展示内建，claim 不内建**：claim 需要 Aliyun 无痕验证码 token（`X-Aliyun-Captcha-Verify-Param`，官方客户端靠进程内浏览器环境生成），无法进入 c-shared 插件。面板已展示可领取活动（billing/preview 只读，0.1.5 起——含 grant 预览，如 300,000,000 tokens 的 GLM-5.3-Flash 体验包），并在面板内提示去官方客户端手动领取；领取后额度包经 billing/balance 显示为独立余量池。自动领取的 Node/Bun 验证码侧车仅有设计定稿（仓库 worklog Task 37），仓库未随附 sidecar 代码。
+- **试用套餐领取：面板内直接领取（0.1.6 起）**：可领取活动经 billing/preview 只读展示（0.1.5 起——含 grant 预览，如 300,000,000 tokens 的 GLM-5.3-Flash 体验包）；点击「领取」后在面板页内弹出阿里云验证码（AliyunCaptcha.js 加载进用户浏览器，SceneId/prefix 复刻官方实例），低风险环境无感通过（等于一键领取），否则拖动滑块，通过后面板把一次性 verify param 交给插件转发 `billing/claim`（最小头集：Authorization + 验证码头 + 版本/平台 + `X-Device-Mid`）。2026-09-26 实测：验证码实例未绑定 zcode.z.ai 域名（127.0.0.1 源上 config/pe/FeiLin/verify 全链 200），用户浏览器即可铸造真实凭据，无需官方客户端、无需侧车。领取后额度包经 billing/balance 显示为独立余量池；biz 3007 = 验证码被拒，重试即可。
 
 ## 构建
 

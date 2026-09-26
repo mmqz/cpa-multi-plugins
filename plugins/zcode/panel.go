@@ -299,7 +299,8 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: base + "/plan", Description: "Switch an account's plan routing (body: {auth_index, plan: coding-plan|start-plan})."},
 			{Method: http.MethodGet, Path: base + "/cooldowns", Description: "List active per-(account, model) cooldown entries."},
 			{Method: http.MethodPost, Path: base + "/cooldowns/clear", Description: "Clear cooldown for one account (auth_id) or one pair (auth_id + model)."},
-			{Method: http.MethodGet, Path: base + "/preview", Description: "List claimable trial plans (billing/preview) across accounts. Read-only: claim must be done in the official client (captcha-gated)."},
+			{Method: http.MethodGet, Path: base + "/preview", Description: "List claimable trial plans (billing/preview) across accounts. Read-only."},
+			{Method: http.MethodPost, Path: base + "/claim", Description: "Claim one trial plan for one account with the panel-minted Aliyun captcha verify param (billing/claim). The captcha challenge runs in the panel page itself."},
 		},
 		Resources: []resourceRoute{
 			{Path: "/panel", Menu: "ZCode", Description: "ZCode dashboard (Z.AI + BigModel): plan, quota, cooldowns."},
@@ -353,6 +354,8 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCooldownClear(req)))
 	case req.Method == http.MethodGet && path == base+"/preview":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handlePreviewList()))
+	case req.Method == http.MethodPost && path == base+"/claim":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleClaim(req)))
 	}
 	return okEnvelope(mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": "not found: " + path}))
 }
@@ -364,7 +367,8 @@ func mutatingManagementPath(path string) bool {
 	case base + "/refresh",
 		base + "/select",
 		base + "/plan",
-		base + "/cooldowns/clear":
+		base + "/cooldowns/clear",
+		base + "/claim":
 		return true
 	}
 	return false

@@ -144,6 +144,7 @@ async function api(path, opts){
   return body;
 }
 function fmt(n){return (n??0).toLocaleString()}
+let selectedIdx = null;
 async function load(force, quota){
   const el = document.getElementById('cards');
   el.innerHTML = '<div class="card">加载中…</div>';
@@ -160,6 +161,7 @@ async function load(force, quota){
   (data.accounts||[]).forEach(a=>{
     const card = document.createElement('div');
     card.className = 'card' + (a.selected?' selected':'');
+    if(a.selected) selectedIdx = String(a.auth_index);
     const quotaHtml = a.credits
       ? '<div class="stat"><span class="k">余量</span><span class="v">'+fmt(a.credits.total_remain)+'</span></div>'
         + '<div class="stat"><span class="k">已用</span><span class="v">'+fmt(a.credits.total_used)+'</span></div>'
@@ -209,7 +211,7 @@ async function loadPreview(){
     box.innerHTML='<div class="card"><h2>当前没有可领取的活动</h2><div class="sub">活动由服务端按账号与时段下发；已领取过的活动不会再出现在列表里。</div></div>';
     return;
   }
-  let html='<div class="card"><h2>可领取活动（'+plans.length+'）</h2><div class="khint">插件不支持自动领取：claim 需要阿里云无痕验证码，仅官方客户端能完成。请在 ZCode 官方客户端手动领取；领取后面板余量会出现对应额度池。</div></div><div class="grid">';
+  let html='<div class="card"><h2>可领取活动（'+plans.length+'）</h2><div class="khint">点击「领取」弹出阿里云验证码：低风险环境无感通过（等于一键领取），否则拖动滑块完成人机验证，通过后插件立即向上游提交领取。领取账号为当前选中的路由账号；成功后余量区会出现对应额度池。</div></div><div class="grid">';
   plans.forEach(function(p){
     const ents=(p.entitlements||[]).map(function(e){
       let s=escHtml(e.name||'权益');
@@ -222,9 +224,81 @@ async function loadPreview(){
       +(p.accounts>1?' <span class="badge">'+p.accounts+' 账号可见</span>':'')
       +'</span></h2>'
       +(p.description?'<div class="sub">'+escHtml(p.description)+'</div>':'')
-      +ents+win+'</div>';
+      +ents+win+'<div class="bar" style="margin-top:12px"><button data-pid="'+escHtml(p.plan_id)+'" onclick="claimPlan(this)">领取</button></div>'+'</div>';
   });
   box.innerHTML=html+'</div>';
+}
+const CAP_SDK_URL='https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js';
+const CAP_SCENE='11xygtvd', CAP_REGION='sgp', CAP_PREFIX='no8xfe';
+let capSdkPromise=null;
+function loadCapSdk(){
+  if(capSdkPromise) return capSdkPromise;
+  capSdkPromise=new Promise(function(res,rej){
+    const s=document.createElement('script');
+    s.src=CAP_SDK_URL;
+    s.onload=function(){res()};
+    s.onerror=function(){capSdkPromise=null; rej(new Error('验证码组件加载失败（浏览器需能访问 alicdn.com）'))};
+    document.head.appendChild(s);
+  });
+  return capSdkPromise;
+}
+function claimFailText(r){
+  const map={
+    already_claimed:'该账号已领取过',
+    ineligible:'该账号不在活动资格内',
+    quota_exhausted:'活动名额已领完',
+    not_found:'活动不存在或已结束',
+    unavailable:'活动暂不可用',
+    invalid_request:'上游拒绝请求（参数错误）',
+    captcha:'验证码校验未通过，请重试',
+    login_required:'账号未登录，请先重新登录',
+    http_error:'上游服务错误'
+  };
+  return (map[r.kind]||'领取失败')+(r.message?('：'+r.message):'');
+}
+let capSeq=0;
+async function claimPlan(btn){
+  const pid=btn.getAttribute('data-pid');
+  if(!pid||btn.disabled) return;
+  if(selectedIdx==null){ toast('请先在账号区把要领取的账号设为路由账号'); return; }
+  btn.disabled=true; btn.textContent='等待验证…';
+  try{ await loadCapSdk(); }
+  catch(e){ toast(e.message); btn.disabled=false; btn.textContent='领取'; return; }
+  const seq=++capSeq, boxId='zcap-box-'+seq, btnId='zcap-btn-'+seq;
+  let holder=document.getElementById('zcap-holder');
+  if(!holder){ holder=document.createElement('div'); holder.id='zcap-holder'; document.body.appendChild(holder); }
+  holder.innerHTML='<div id="'+boxId+'"></div><button id="'+btnId+'" style="display:none"></button>';
+  let settled=false, instRef=null;
+  const finish=function(){
+    if(settled) return; settled=true; clearTimeout(watchdog);
+    btn.disabled=false; btn.textContent='领取';
+    try{ if(instRef&&instRef.destroy) instRef.destroy(); }catch(e){}
+  };
+  const watchdog=setTimeout(function(){ if(!settled){ toast('验证超时未完成，请重试'); finish(); } },180000);
+  try{
+    window.initAliyunCaptcha({
+      SceneId:CAP_SCENE, mode:'popup', region:CAP_REGION, prefix:CAP_PREFIX, language:'cn',
+      element:'#'+boxId, button:'#'+btnId, captchaLogoImg:'', showErrorTip:false,
+      getInstance:function(inst){
+        instRef=inst;
+        try{ (inst.startTracelessVerification||inst.show).call(inst); }
+        catch(e){ toast('验证码启动失败：'+e.message); finish(); }
+      },
+      success:async function(result){
+        const param=(typeof result==='string')?result:((result&&result.captchaVerifyParam)||(result&&result.verifyParam)||'');
+        if(!param){ toast('验证未返回凭据，请重试'); finish(); return; }
+        btn.textContent='提交领取…';
+        try{
+          const r=await api('/claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auth_index:selectedIdx,plan_id:pid,captcha:param,captcha_region:CAP_REGION})});
+          if(r&&r.ok){ toast('领取成功'+(r.message&&r.message!=='claimed'?'：'+r.message:'')); }
+          else{ toast(claimFailText(r||{})); }
+        }catch(e){ toast('领取请求失败：'+e.message); }
+        finish();
+        loadPreview();
+        load(false,false);
+      }
+    });
+  }catch(e){ toast('验证码初始化失败：'+e.message); finish(); }
 }
 if(!mgmtKey) showKeyBox(MSG_NEEDKEY);
 load(false,false);

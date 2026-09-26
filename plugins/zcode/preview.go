@@ -1,14 +1,13 @@
 // preview.go reads the claimable-plan preview plane (billing/preview) — the
-// read-only half of the manual-claim ("weekend plan") subsystem mirrored from
+// discovery half of the manual-claim ("weekend plan") subsystem mirrored from
 // ZCode 3.10-3.12 desktop clients (TriDefender/zcode-api src/claim/*).
 //
-// The plugin deliberately implements NO claim POST: billing/claim requires an
-// Aliyun invisible-captcha verify param (X-Aliyun-Captcha-Verify-Param) that
-// only the official client's in-process browser runtime can produce — a Go
-// c-shared plugin has no equivalent. The panel therefore shows what is
-// currently claimable and routes the user to the official client for the
-// manual click; after a successful claim the granted pack shows up as a
-// balance row via the regular billing/balance plane (quota.go).
+// The claim POST itself lives in claim.go (0.1.6+): the captcha challenge
+// runs inside the panel page — the user's own browser mints the Aliyun verify
+// param (the instance is not domain-bound; verified 2026-09-26, see the
+// claim.go header) — so no official client and no headless solver are needed.
+// After a successful claim the granted pack shows up as a balance row via the
+// regular billing/balance plane (quota.go).
 //
 // Wire contract (src/claim/client.ts, empirically verified against the 0828
 // and wk-0918 campaign gateways): GET /api/v1/zcode-plan/billing/preview with
@@ -251,7 +250,7 @@ func mergePreviewResults(results []accountPreview) ([]previewPlan, []map[string]
 
 // handlePreviewList serves GET {mgmt}/preview: fan the preview query out to
 // every account in parallel and merge. Read-only upstream; the claim POST is
-// intentionally not implemented (captcha — see the file header).
+// a separate management route (POST /claim — claim.go).
 func handlePreviewList() map[string]any {
 	files, err := hostAuthList()
 	if err != nil {

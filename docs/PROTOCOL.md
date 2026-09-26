@@ -353,8 +353,15 @@ plan JWT **无 exp 永不刷新**（8 天旧 JWT 仍可查账务），仅网关 
   —— 头：TV 身份集（无 X-ZCode-Agent）+ `Authorization: Bearer {JWT}` + `Accept` +
   **稳定 `X-Device-Mid`**（活动网关缺头 3001 实证）；应答 balances[]
   `{show_name, remaining_units, total_units, used_units, unit_type, expires_at}`（snake/camel 双兼容）
-- 试用套餐领取（后续版本）：`billing/preview`（5min 轮询）+ `billing/claim`
-  （需 `X-Aliyun-Captcha-Verify-Param`，原实现靠 in-process 浏览器环境，Go 侧无等价物）
+- 试用套餐领取（0.1.6 起内建）：`billing/preview` 只读展示 + `billing/claim`
+  面板内直接领取——验证码挑战跑在面板页（用户浏览器加载 AliyunCaptcha.js，
+  SceneId `11xygtvd` / region `sgp` / prefix `no8xfe`，无感通过失败则回退滑块），
+  铸出的 verify param 由插件转发；claim 头集为最小束（Authorization/Content-Type/
+  X-Aliyun-Captcha-Verify-Param/[X-Aliyun-Captcha-Verify-Region]/
+  X-ZCode-App-Version/X-Platform/X-Device-Mid，非 TV 全家桶）。
+  2026-09-26 实测：实例未绑定域名（127.0.0.1 源 config/pe.089/feilin029/
+  upload/no8xfe-verify/cloudauth-device 全 200）→ 用户浏览器可直接铸造凭据，
+  原「仅官方客户端可生成」结论作废；biz 3007 = 参数被拒换新码重试
 
 ### 模型目录
 
