@@ -90,7 +90,7 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodGet, Path: base + "/accounts", Description: "List Trae SOLO CN accounts with credits, plan, and check-in status."},
 			{Method: http.MethodPost, Path: base + "/checkin", Description: "Manually check in one account (auth_index) or all accounts."},
 			{Method: http.MethodGet, Path: base + "/credits", Description: "Get real-time credits for one (auth_index query) or all accounts."},
-			{Method: http.MethodPost, Path: base + "/refresh", Description: "Force refresh access tokens + credits for all accounts."},
+			{Method: http.MethodPost, Path: base + "/refresh", Description: "Force refresh access tokens for all accounts and return the refreshed dashboard (accounts)."},
 			{Method: http.MethodGet, Path: base + "/status", Description: "Account-pool state: cooling / disabled reasons per account."},
 			{Method: http.MethodPost, Path: base + "/import", Description: "Import Trae credential JSON (nested or flat) into host auth store."},
 			{Method: http.MethodGet, Path: base + "/intl/accounts", Description: "Trae Intl: list accounts with uid, nickname, and token expiry."},
@@ -657,6 +657,7 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 		// 签到前奖励配置（基础 credits + 加码 extra_credits）。
 		beforeCredits := status.Credits
 		awarded := int64(-1)
+		claimAccepted := false // v0.12.61: claim 返回 code:0（含幂等回声）→ 上游接受了本次领取
 		if !status.CheckedIn && !status.DidCheckedIn && status.Enable {
 			claim, err := upstreamClient.CheckinClaim(a, did)
 			if err != nil {
@@ -664,6 +665,7 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 				// v0.12.33: 手动签到撞 9074 也纳入当日退避重试（与调度器同节奏）。
 				notifyCheckinRateLimited(err)
 			} else {
+				claimAccepted = claim.Code == 0
 				entry["claim_code"] = claim.Code
 				entry["claim_message"] = claim.Message
 				// 入账证据：claim 响应携带的数额优先。
@@ -696,28 +698,15 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 		// v0.12.40 语义：e.credits = SUBSCRIPTION pack quota（订阅包余额）；
 		// e.checkin.Credits = 签到奖励数额（非钱包、非可花余额）。此前
 		// "签到 150 积分一刷新就归零"即误把奖励当余额存进 e.credits 所致。
-		prevCredits := int64(-1) // -1 = unknown, keep previous
-		prevUsageFilled := false
+		// v0.12.61: 缓存重建抽成 checkinCacheEntry —— claim 被上游接受
+		// （code:0，含文档化的幂等回声）时作废旧的资金快照，见函数注释。
+		var prev *accountCacheEntry
 		if v, ok := accountCache.Load(f.AuthIndex); ok {
 			if e, ok2 := v.(*accountCacheEntry); ok2 {
-				prevCredits = e.credits
-				prevUsageFilled = e.usageFilled
+				prev = e
 			}
 		}
-		newEntry := &accountCacheEntry{
-			credits: prevCredits,
-			checkin: &checkinStatus{
-				CheckedIn: status.CheckedIn || status.DidCheckedIn,
-				Credits:   status.Credits,
-				Enable:    status.Enable,
-			},
-			fetched:     time.Now(),
-			usageFilled: prevUsageFilled,
-		}
-		if prevUsageFilled {
-			newEntry.usage = cacheUsage(f.AuthIndex)
-			newEntry.plan = cachePlan(f.AuthIndex)
-		}
+		newEntry := checkinCacheEntry(prev, claimAccepted, status)
 		accountCache.Store(f.AuthIndex, newEntry)
 		// Re-enable account in pool if checkin restored credits.
 		// v0.12.28: pool score prefers the usage-model remain when known
@@ -725,14 +714,14 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 		// 评分（旧 pack+wallet 叠加源于同一误读）。
 		if accountPool != nil {
 			score := int64(0)
-			if prevUsageFilled && newEntry.usage.RemainKnown && newEntry.usage.Remain > 0 {
+			if prev != nil && prev.usageFilled && newEntry.usage.RemainKnown && newEntry.usage.Remain > 0 {
 				r := newEntry.usage.Remain
 				if r < 0 { // unlimited fast requests
 					r = 1 << 30
 				}
 				score = r
-			} else if prevCredits > 0 {
-				score = prevCredits
+			} else if prev != nil && prev.credits > 0 {
+				score = prev.credits
 			}
 			accountPool.ReenableIfCredits(sa.Account.UID, score)
 		}
@@ -743,6 +732,39 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 		"results":     results,
 		"server_time": time.Now().Format("2006-01-02 15:04:05"),
 	}
+}
+
+// checkinCacheEntry rebuilds the accountCache entry after a manual checkin.
+//
+// v0.12.61 ("签到成功但积分不变" report 2026-09-26): a claim that upstream
+// accepted (code:0 — a real grant or the documented idempotent echo) pays out
+// asynchronously, so carrying the PRE-checkin usage/pool snapshot forward
+// froze the 积分余额 display on the old number until the next scheduler
+// cycle. When claimAccepted, the returned entry carries NO funds snapshot
+// (credits=-1, usageFilled=false) — buildDashboard omits the credits row and
+// the panel lazy-loads /credits, a live fetch, instead. A failed claim (9074
+// etc.) changed nothing upstream: carry the previous snapshot unchanged.
+// The checkin card itself (award amount / checked_in flag) always refreshes
+// from the fresh status.
+func checkinCacheEntry(prev *accountCacheEntry, claimAccepted bool, status *upstream.CheckinStatusResult) *accountCacheEntry {
+	e := &accountCacheEntry{
+		credits: -1, // -1 = unknown → dashboard omits the credits row
+		checkin: &checkinStatus{
+			CheckedIn: status.CheckedIn || status.DidCheckedIn,
+			Credits:   status.Credits,
+			Enable:    status.Enable,
+		},
+		fetched: time.Now(),
+	}
+	if !claimAccepted && prev != nil {
+		e.credits = prev.credits
+		e.usageFilled = prev.usageFilled
+		if prev.usageFilled {
+			e.usage = prev.usage
+			e.plan = prev.plan
+		}
+	}
+	return e
 }
 
 // cacheUsage/cachePlan read the current usage snapshot without mutating cache.
@@ -996,8 +1018,17 @@ func handleRefresh() map[string]any {
 		results = append(results, entry)
 	}
 	return map[string]any{
-		"provider":    providerName,
-		"results":     results,
+		"provider": providerName,
+		"results":  results,
+		// v0.12.61: the panel's 刷新数据 renders d.accounts directly — its
+		// documented contract is the shared {accounts, provider,
+		// server_time} shape. This handler used to return only the raw
+		// refresh report, so a forced refresh rendered an EMPTY CN grid
+		// (intl accounts still loaded from their own endpoint) and the CN
+		// accounts "vanished" until the next full /accounts load. Attach
+		// the post-refresh dashboard snapshot; results stays for
+		// diagnostics.
+		"accounts":    buildDashboard()["accounts"],
 		"server_time": time.Now().Format("2006-01-02 15:04:05"),
 	}
 }
