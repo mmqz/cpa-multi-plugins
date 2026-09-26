@@ -96,3 +96,67 @@ func TestQoderUnwrapFrame_ErrorDetailsSurfaced(t *testing.T) {
 		}
 	}
 }
+
+// v0.8.25 (issue #19): the gateway occasionally emits a bare timing object on
+// the data channel right before [DONE] — no choices, no usage, no error.
+// Strict clients (ZCode) reject it: "expected array at choices / expected
+// object at error". The unwrapper must treat it as a control line, in both
+// wire shapes it can arrive in.
+func TestQoderUnwrapFrame_SwallowsGatewayTimingMetadata(t *testing.T) {
+	// Real wire lines from the reporter's capture (issue #19).
+	cases := []struct {
+		name string
+		line string
+	}{
+		{"bare timing frame", `data: {"firstTokenDuration":3037,"totalDuration":3045,"serverDuration":28}`},
+		{"bare timing frame (ZCode sample)", `data: {"firstTokenDuration":1335,"totalDuration":6280,"serverDuration":79}`},
+		{"envelope-wrapped timing body", `data: {"statusCodeValue":200,"body":"{\"firstTokenDuration\":1335,\"totalDuration\":6280,\"serverDuration\":79}"}`},
+		// The error:null heartbeat carries no choices/usage either — it was
+		// never a chat chunk, only it predates the rule. Swallowed too (still
+		// not an error; the v0.8.17 assertion only pins err==nil).
+		{"error:null heartbeat", `data: {"statusCodeValue":200,"body":"{\"error\":null}"}`},
+	}
+	for _, tc := range cases {
+		body, meaningful, err := qoderUnwrapFrame(tc.line)
+		if err != nil {
+			t.Errorf("%s: must not error, got %v", tc.name, err)
+		}
+		if meaningful {
+			t.Errorf("%s: must not count toward the empty-stream guard", tc.name)
+		}
+		if body != "" {
+			t.Errorf("%s: must be swallowed, got body %q", tc.name, body)
+		}
+	}
+
+	// A stream made only of timing frames must stay a failure (the
+	// empty-stream guard reads meaningful), never fold into a fake success.
+	// Semantics pinned here at the unwrap level, matching the documented
+	// pump/collect contract.
+}
+
+// Negative guards for the v0.8.25 swallow rule: anything that IS a chat chunk
+// must still come through, even when it looks metadata-ish.
+func TestQoderUnwrapFrame_KeepsRealChunksDespiteSwallowRule(t *testing.T) {
+	kept := []struct {
+		name string
+		line string
+	}{
+		// OpenAI include_usage terminal chunk: empty choices + usage.
+		{"usage terminal chunk", `data: {"id":"q1","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}`},
+		// Usage-only body with no choices key at all.
+		{"usage-only body", `data: {"usage":{"total_tokens":9}}`},
+		// Role-only opener: no content yet, but it IS the chunk that
+		// establishes the message role.
+		{"role-only opener", `data: {"choices":[{"delta":{"role":"assistant"}}]}`},
+	}
+	for _, tc := range kept {
+		body, meaningful, err := qoderUnwrapFrame(tc.line)
+		if err != nil {
+			t.Errorf("%s: unexpected error %v", tc.name, err)
+		}
+		if !meaningful || body == "" {
+			t.Errorf("%s: real chunk must be kept, got meaningful=%v body=%q", tc.name, meaningful, body)
+		}
+	}
+}

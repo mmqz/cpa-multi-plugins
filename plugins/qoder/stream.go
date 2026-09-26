@@ -756,7 +756,10 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 // then aggregate the inner chunks using the same logic as aggregateCompletion.
 //
 // Terminal frames: data:{"body":"[DONE]"} followed by an event:finish line
-// with timing metadata (ignored).
+// with timing metadata (ignored), and — since v0.8.25, issue #19 — a bare
+// timing object on the data channel itself
+// ({"firstTokenDuration":N,"totalDuration":N,"serverDuration":N}), which
+// qoderUnwrapFrame swallows as a control line.
 func aggregateQoderSSE(r io.Reader, model string) ([]byte, error) {
 	// Unwrap the nested SSE into an inner plain-text stream of OpenAI chunks,
 	// then delegate to aggregateCompletion. We materialise the inner stream
@@ -844,13 +847,17 @@ func stripDataPrefix(s string) string {
 // the envelope's "body" string and ignore both "statusCodeValue" and any
 // "error" field inside the body — an upstream error delivered as a 200-OK
 // envelope was silently swallowed and the stream ended looking successful.
+// v0.8.25 (issue #19): bare gateway metadata objects (the
+// firstTokenDuration/totalDuration/serverDuration timing event) are swallowed
+// here instead of being forwarded — see the probe below.
 // Returns (bodyStr, meaningful, err):
 //   - err != nil: upstream error frame — abort the stream, record failure.
 //     The error is a *qoderFrameError so the head gate can recover the frame's
 //     numeric status; the message text is unchanged.
 //   - meaningful: the line carried a real completion payload (empty-stream
 //     guard input).
-//   - bodyStr: the unwrapped inner body ("" for control/non-data lines).
+//   - bodyStr: the unwrapped inner body ("" for control/non-data/metadata
+//     lines).
 func qoderUnwrapFrame(line string) (string, bool, error) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "event:error" || trimmed == "event: error" {
@@ -885,6 +892,27 @@ func qoderUnwrapFrame(line string) (string, bool, error) {
 		return "", false, &qoderFrameError{
 			msg:    fmt.Sprintf("qoder upstream error: %s", describeQoderEnvelopeRejection(body, chunk.Error, outer.Status)),
 			status: outer.Status,
+		}
+	}
+	// v0.8.25 (issue #19): the gateway also emits bare metadata objects on
+	// the data channel — observed right before [DONE]:
+	//
+	//      data: {"firstTokenDuration":3037,"totalDuration":3045,"serverDuration":28}
+	//
+	// A JSON object carrying neither "choices" nor "usage" can never be a
+	// chat chunk (every real OpenAI chunk has choices; the include_usage
+	// terminal chunk carries usage), so forwarding one hands strict clients
+	// a frame they reject ("expected array at choices / expected object at
+	// error"). Swallow it as a control line: meaningful stays false, so a
+	// stream made only of these still trips the empty-stream guard instead
+	// of folding into a fake success. Non-object bodies (JSON strings,
+	// fragments) keep the existing forwarding behavior.
+	var probe map[string]any
+	if json.Unmarshal([]byte(body), &probe) == nil {
+		if _, hasChoices := probe["choices"]; !hasChoices {
+			if _, hasUsage := probe["usage"]; !hasUsage {
+				return "", false, nil
+			}
 		}
 	}
 	return body, true, nil
