@@ -293,8 +293,14 @@ func startLoginWithProvider(raw []byte, provider string) ([]byte, error) {
 		State:     state,
 		ExpiresAt: now.Add(ttl).UTC(),
 		Metadata: map[string]any{
-			"logo":   pluginLogoURL,
-			"prompt": "在打开的页面中登录并授权 Z.AI / 智谱编码套餐（授权记录在服务端完成，无需回调）。完成后此窗口会自动关闭。",
+			"logo": pluginLogoURL,
+			// v0.1.1: the browser's final zcode:// bounce is a custom
+			// scheme — on machines without the desktop app it renders
+			// a dead-end page that reads like a FAILED callback (user
+			// report 2026-09-26). The grant is already recorded
+			// server-side at that point; say so explicitly so the
+			// user waits for the poll instead of restarting.
+			"prompt": "在打开的页面中登录并授权 Z.AI / 智谱编码套餐。浏览器最后跳转 zcode:// 打不开属正常现象——授权已在服务端记录，无需回调，登录窗口会自动完成；若超过 1 分钟仍无进展，请重启登录并确认在授权页最后点了同意。",
 		},
 	})
 }
