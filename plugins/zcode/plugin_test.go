@@ -20,17 +20,19 @@ import (
 // oauth.go
 // -----------------------------------------------------------------------------
 
-func TestApplyInterstitial(t *testing.T) {
-	// The official client serializes the interstitial URL (which itself carries
-	// an encoded zcode:// redirect) as a query param — producing the
-	// double-encoded form %253A on the wire. Both layers are load-bearing.
-	zai := applyInterstitial("https://accounts.zai.org/authorize?x=1", providerZai)
-	if !strings.Contains(zai, "redirect_uri=") || !strings.Contains(zai, "zcode%253A%252F%252Foauth%252Fcallback") {
-		t.Fatalf("zai interstitial param wrong: %s", zai)
+func TestFlowFailureError(t *testing.T) {
+	// The server flow's 5-minute expiry rides HTTP 400 with the
+	// invalid_flow envelope (reproduced live 2026-09-26). The panel shows
+	// the error verbatim, so it must be the actionable message — not the
+	// raw body dump.
+	err := flowFailureError(providerZai, 400, `{"code":3004,"msg":"invalid_flow","logid":"x"}`)
+	if !strings.Contains(err.Error(), "5 分钟") || strings.Contains(err.Error(), "status=400") {
+		t.Fatalf("invalid_flow must map to the friendly expiry message, got: %v", err)
 	}
-	bm := applyInterstitial("https://open.bigmodel.cn/authorize?x=1", providerBigmodel)
-	if !strings.Contains(bm, "redirect=") || strings.Contains(bm, "redirect_uri=") {
-		t.Fatalf("bigmodel interstitial param wrong: %s", bm)
+	// Anything else keeps the diagnostic dump (provider + status + body).
+	err = flowFailureError(providerZai, 403, `{"code":7,"msg":"denied"}`)
+	if !strings.Contains(err.Error(), "status=403") || !strings.Contains(err.Error(), "denied") {
+		t.Fatalf("non-flow failures must keep the diagnostic form, got: %v", err)
 	}
 }
 

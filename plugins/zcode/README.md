@@ -7,9 +7,10 @@
 ## 功能
 
 - **双 provider 单插件**：Z.AI（`api.z.ai`）+ BigModel（`open.bigmodel.cn`）按账号文件内 `auth.provider` 字段路由（对齐 workbuddy 三区 / qoder 双区先例），旧式单文件 `zcode.json` 启动时自动收养。
-- **服务端中转 CLI 登录**（ZCode 3.12.3 桌面端同款，无本地回调）：
-  `POST zcode.z.ai/api/v1/oauth/cli/init`（自生成 32B poll_token）→ 浏览器打开 `authorize_url`（带桌面端中间页参数）→ 轮询 `/oauth/cli/poll/{flow_id}` 至 `ready` → **KeyResolver 解析** → 落盘 `{accessToken, oauthToken, plan JWT, user_id}`。
-  轮询错误语义逐条对齐：4xx（除 408/429）、envelope `code!==0`、未知 status 为致命；5xx/网络/畸形 200 按 pending 重试。
+- **服务端中转 CLI 登录**（无本地回调、无深链跳转）：
+  `POST zcode.z.ai/api/v1/oauth/cli/init`（自生成 32B poll_token）→ 浏览器打开服务端下发的 `authorize_url` 原样直开（其原生 redirect 即服务端 CLI 回调 `/api/v1/oauth/cli/callback/{zai,bigmodel}`，授权后由它落账并渲染结果页）→ 轮询 `/oauth/cli/poll/{flow_id}` 至 `ready` → **KeyResolver 解析** → 落盘 `{accessToken, oauthToken, plan JWT, user_id}`。
+  轮询错误语义逐条对齐：4xx（除 408/429）、envelope `code!==0`、未知 status 为致命；5xx/网络/畸形 200 按 pending 重试。流程过期（HTTP 400 `invalid_flow`）直出友好文案：服务端 flow 有效期约 5 分钟，超时请重新发起登录。
+  v0.1.3 修复：此前把 redirect 覆写为桌面端中间页 `zcode.z.ai/app/oauth/login`，但该页只有带 `app_version>3.9.1` 才会补发落账 fetch——插件不带版本号导致授权永不落账、轮询直至超期报错（实测复现 400/3004）。CLI 场景本无深链需求，现改为 authorize_url 直通。
 - **KeyResolver 凭证链**（M1.1，两参考实现逐行同构 = 账户级 API）：poll ready 的 `access_token` 是 OAuth token 而非聊天 Key —— zai：`z/login` → Bearer bizToken → `getCustomerInfo` 默认机构/项目（子串匹配+首项兜底）→ `api_keys` 找/建 `zcode-api-key` → `copy/{apiKey}` 取 secretKey（必需），终态 `{apiKeyId}.{apiKeySecret}`；bigmodel：裸值作 authorization + copy best-effort 回落单段 Key。解析失败 = 登录失败（与两端一致）。
 - **coding-plan OpenAI 兼容上游**：`{provider}/api/coding/paas/v4/chat/completions` 直连，请求体除 model/stream 钉死外原样透传；身份头按 `g6n` 形状（`X-ZCode-Agent: glm` 内联第 8 位、无 `X-Device-Mid`），LLM UA 追加 `ai-sdk/anthropic/3.0.81`，trace 头五件套全 UUID。
 - **start-plan anthropic 翻译层**（M2，官方开源协议）：OpenAI 入 → anthropic 出 → OpenAI 回。旧 OpenAI 路由已下线（2026-08-28 404），翻译层对齐官方客户端 wire 形状：3 个官方 system 身份块前置（各带 ephemeral cache breakpoint，缺块网关 3012 拒绝）+ `<system-reminder>` 上下文前缀（本地日期）+ `metadata.user_id` blob + cache_control 规范化 + GLM-5.3 `output_config.effort` thinking 通道（low/high/max 预算配对）；SSE 状态机回译（usage 合并/tool 索引/截断流兜底）；业务码全表分流（1261 上下文超限 / 1312 过载可重试 / 1302-1308 限流 / 3007 验证码挑战 / 1006 鉴权 …）。

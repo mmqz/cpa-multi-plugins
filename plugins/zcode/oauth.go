@@ -7,11 +7,20 @@
 //     `Authorization: Bearer` on BOTH init and poll.
 //  2. `POST {zcodeAPIBase}/oauth/cli/init` body `{"provider":...}` →
 //     `{flow_id, poll_token, authorize_url, expires_at, poll_interval_sec}`.
-//  3. Open the server-provided authorize_url with the desktop interstitial
-//     param appended (`redirect_uri` for zai, `redirect` for bigmodel, value
-//     = https://zcode.z.ai/app/oauth/login?redirect=zcode://oauth/callback&app_version=...)
-//     — the browser never comes back to localhost; the grant is recorded
-//     server-side and the poll flips to ready.
+//  3. Open the server-provided authorize_url UNCHANGED. Its native redirect
+//     target is the server-side CLI callback (zcode.z.ai/api/v1/oauth/cli/
+//     callback/{zai|bigmodel}): after the user authorizes, the browser lands
+//     there, the grant is recorded for the flow, and a self-contained result
+//     page is rendered — no localhost hop, no deep link.
+//     (v0.1.3 fix: the plugin used to override the redirect with the desktop
+//     interstitial page zcode.z.ai/app/oauth/login — but that page only
+//     re-fires the grant-recording fetch ("polling bridge") when the URL
+//     carries app_version > 3.9.1 (page JS gates on f=[3,9,1]; equal or
+//     missing both fail). The plugin never appended app_version, so the
+//     grant was NEVER recorded, the poll stayed pending until the flow
+//     expired (HTTP 400 code=3004 invalid_flow, reproduced live 2026-09-26)
+//     and every login failed. A CLI has no use for the desktop deep-link
+//     bounce anyway — pass the authorize_url through verbatim.)
 //  4. `GET {zcodeAPIBase}/oauth/cli/poll/{flow_id}` until
 //     `data.status == "ready"` → `{token (plan JWT), user.user_id,
 //     zai|bigmodel:{access_token}}`.
@@ -51,12 +60,6 @@ const (
 	// zcodeAppVersion mirrors the ZCode desktop release the plugin's identity
 	// headers claim to be. Configurable via plugin config (identity_version).
 	zcodeAppVersion = "3.14.0"
-
-	// oauthInterstitial is the zcode.z.ai page the desktop client appends to
-	// the server-issued authorize_url: it records the authorization
-	// server-side (so the poll flips to ready) before bouncing the browser to
-	// zcode://oauth/callback.
-	oauthInterstitial = "https://zcode.z.ai/app/oauth/login?redirect=zcode%3A%2F%2Foauth%2Fcallback"
 )
 
 // cliInitData is the `data` of a successful /oauth/cli/init call.
@@ -134,21 +137,16 @@ func normalizePlan(p string) string {
 	}
 }
 
-// applyInterstitial appends the desktop interstitial param to the
-// server-provided authorize_url (param name differs per provider).
-func applyInterstitial(authorizeURL, provider string) string {
-	u, err := url.Parse(authorizeURL)
-	if err != nil {
-		return authorizeURL
+// flowFailureError renders a poll 4xx as the user-facing login error. The
+// dominant shape is the server flow's 5-minute expiry (HTTP 400,
+// {"code":3004,"msg":"invalid_flow"} — reproduced live 2026-09-26): surface
+// an actionable message instead of a raw body dump, because the management
+// panel shows this string verbatim.
+func flowFailureError(provider string, status int, body string) error {
+	if strings.Contains(body, "invalid_flow") || strings.Contains(body, "3004") {
+		return fmt.Errorf("授权流程已失效或不存在（服务端有效期约 5 分钟）。请从 CPA 重新发起登录，并在打开的页面中一次性完成登录与授权")
 	}
-	q := u.Query()
-	if provider == providerBigmodel {
-		q.Set("redirect", oauthInterstitial)
-	} else {
-		q.Set("redirect_uri", oauthInterstitial)
-	}
-	u.RawQuery = q.Encode()
-	return u.String()
+	return fmt.Errorf("%s login poll failed: status=%d body=%s", provider, status, truncateRedacted(body, 200))
 }
 
 // initCliLogin performs POST /oauth/cli/init with a freshly generated poll
@@ -194,7 +192,7 @@ func pollCliLogin(flowID, pollToken, provider string) (*cliPollData, bool, error
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusRequestTimeout && resp.StatusCode != http.StatusTooManyRequests {
-		return nil, false, fmt.Errorf("%s login poll failed: status=%d body=%s", provider, resp.StatusCode, truncateRedacted(string(raw), 200))
+		return nil, false, flowFailureError(provider, resp.StatusCode, string(raw))
 	}
 	if resp.StatusCode >= 300 {
 		return nil, true, nil // 5xx/3xx → retry as pending
@@ -289,18 +287,18 @@ func startLoginWithProvider(raw []byte, provider string) ([]byte, error) {
 	})
 	return okEnvelope(pluginapi.AuthLoginStartResponse{
 		Provider:  providerName,
-		URL:       applyInterstitial(initData.AuthorizeURL, provider),
+		URL:       initData.AuthorizeURL,
 		State:     state,
 		ExpiresAt: now.Add(ttl).UTC(),
 		Metadata: map[string]any{
 			"logo": pluginLogoURL,
-			// v0.1.1: the browser's final zcode:// bounce is a custom
-			// scheme — on machines without the desktop app it renders
-			// a dead-end page that reads like a FAILED callback (user
-			// report 2026-09-26). The grant is already recorded
-			// server-side at that point; say so explicitly so the
-			// user waits for the poll instead of restarting.
-			"prompt": "在打开的页面中登录并授权 Z.AI / 智谱编码套餐。浏览器最后跳转 zcode:// 打不开属正常现象——授权已在服务端记录，无需回调，登录窗口会自动完成；若超过 1 分钟仍无进展，请重启登录并确认在授权页最后点了同意。",
+			// v0.1.3: the authorize URL now goes to the server-side CLI
+			// callback, which renders its own result page — the dead-end
+			// zcode:// bounce is gone entirely (user report 2026-09-26;
+			// root cause was the unversioned interstitial, see the
+			// oauth.go header). The 5-minute server TTL is the binding
+			// constraint now, so the prompt leads with it.
+			"prompt": "在打开的页面中登录 Z.AI / 智谱编码套餐账号并完成授权，页面会显示登录结果，CPA 登录窗口会自动完成，无需手动操作。整个登录有效期约 5 分钟，请一次性完成；若提示已过期或失败，请重新发起登录并尽快完成。",
 		},
 	})
 }

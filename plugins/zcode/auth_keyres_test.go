@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -589,4 +590,44 @@ func TestPollLoginResolutionFailureFailsLogin(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "resolve coding-plan key") {
 		t.Fatalf("expected resolution failure to fail the login, got %v", err)
 	}
+}
+
+// TestStartLoginPassesThroughAuthorizeURL pins the v0.1.3 fix: the
+// server-issued authorize_url reaches the panel VERBATIM. Its native redirect
+// target is the server-side CLI callback that records the grant; the retired
+// interstitial override (zcode.z.ai/app/oauth/login) only re-fires the
+// grant-recording fetch with app_version > 3.9.1, which the plugin never
+// appended — every login stayed pending until the flow expired as
+// invalid_flow (reproduced live 2026-09-26).
+func TestStartLoginPassesThroughAuthorizeURL(t *testing.T) {
+	k := newKeyResServer(t)
+	const authorizeURL = "https://chat.z.ai/api/oauth/authorize?client_id=client_X&redirect_uri=https%3A%2F%2Fzcode.z.ai%2Fapi%2Fv1%2Foauth%2Fcli%2Fcallback%2Fzai&state=abc123&response_type=code"
+	initBody := `{"code":0,"msg":"","data":{"flow_id":"flow-1","poll_token":"pt","authorize_url":"` +
+		authorizeURL +
+		`","expires_at":` + strconv.FormatInt(time.Now().Add(5*time.Minute).Unix(), 10) + `,"poll_interval_sec":2}}`
+	k.handle("/api/v1/oauth/cli/init", http.StatusOK, initBody)
+	pointBasesAt(t, k, true)
+
+	raw, err := startLoginWithProvider([]byte(`{}`), providerZai)
+	if err != nil {
+		t.Fatalf("startLoginWithProvider: %v", err)
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
+		t.Fatalf("start envelope: err=%v ok=%v", err, env.OK)
+	}
+	var resp pluginapi.AuthLoginStartResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatalf("start result: %v", err)
+	}
+	if resp.URL != authorizeURL {
+		t.Fatalf("authorize URL must pass through unchanged\n got: %s\nwant: %s", resp.URL, authorizeURL)
+	}
+	if !strings.HasPrefix(resp.State, "zc-") {
+		t.Fatalf("state = %q, want zc- prefix", resp.State)
+	}
+	if _, ok := loginStates.Load(resp.State); !ok {
+		t.Fatal("login state not registered for polling")
+	}
+	loginStates.Delete(resp.State)
 }
