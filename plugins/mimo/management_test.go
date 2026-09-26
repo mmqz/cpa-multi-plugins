@@ -19,6 +19,20 @@ import (
 
 const mimoSubmitRoute = "/v0/resource/plugins/mimo/oauth_submit"
 
+// clearPendingLogins drops every pending login (same sweep a fresh start
+// performs). Tests that assert the IDLE oauth_submit shape need this —
+// earlier tests legitimately leave pending flows behind.
+func clearPendingLogins(t *testing.T) {
+	t.Helper()
+	loginStates.Range(func(key, value any) bool {
+		if lc, ok := value.(*loginCtx); ok {
+			lc.shutdown()
+		}
+		loginStates.Delete(key)
+		return true
+	})
+}
+
 func startTestLogin(t *testing.T) (state string) {
 	t.Helper()
 	raw, err := handleStartLogin(nil)
@@ -36,8 +50,9 @@ func startTestLogin(t *testing.T) (state string) {
 	if start.State == "" || start.URL == "" {
 		t.Fatalf("start missing state/url: %+v", start)
 	}
-	// v0.2.7: StartLogin returns the RELATIVE gate URL (the panel opens it
-	// against the CPA origin); the state rides the query.
+	// v0.2.7/0.2.8: with no login_base_url configured, StartLogin returns
+	// the RELATIVE gate URL (the panel opens it against the CPA origin);
+	// the state rides the query.
 	wantPrefix := "/v0/resource/plugins/mimo/login_gate?state="
 	if !strings.HasPrefix(start.URL, wantPrefix) {
 		t.Fatalf("start URL = %q, want prefix %q", start.URL, wantPrefix)
@@ -218,8 +233,10 @@ func TestMimoOAuthSubmitWrongBlobLeavesLoginPending(t *testing.T) {
 }
 
 func TestMimoOAuthSubmitFormAndGuards(t *testing.T) {
-	// No params → the instruction form.
-	if body := submitPaste(t, ""); !strings.Contains(body, `name="cb_url"`) || !strings.Contains(body, "完成登录") {
+	clearPendingLogins(t) // earlier tests leave pending flows behind
+	// No params → the idle instruction form (with the auto-refresh that
+	// flips the page to the guided flow once a login starts).
+	if body := submitPaste(t, ""); !strings.Contains(body, `name="cb_url"`) || !strings.Contains(body, "完成登录") || !strings.Contains(body, `http-equiv="refresh"`) {
 		t.Fatalf("empty paste must render the form, got: %s", body)
 	}
 	// Truncated copy → explicit message, not a decrypt error.
@@ -241,6 +258,65 @@ func TestMimoOAuthSubmitFormAndGuards(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown route status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestMimoOAuthSubmitShowsPendingLogin(t *testing.T) {
+	clearPendingLogins(t)
+	// Idle → instructions + auto-refresh (picks up a login started later).
+	idle := submitPaste(t, "")
+	if !strings.Contains(idle, `name="cb_url"`) || !strings.Contains(idle, `http-equiv="refresh"`) {
+		t.Fatalf("idle menu page must render the form with auto-refresh, got: %s", idle)
+	}
+	// A pending login turns the SAME page into the guided flow — the
+	// cross-origin-safe entry (the panel's OAuth dialog link breaks on
+	// hosted origins; the menu page iframe is apiBase-prefixed and works).
+	state := startTestLogin(t)
+	v, ok := loginStates.Load(state)
+	if !ok {
+		t.Fatal("pending login not registered")
+	}
+	lc := v.(*loginCtx)
+	body := submitPaste(t, "")
+	if !strings.Contains(body, "前往小米登录") || !strings.Contains(body, html.EscapeString(lc.authorizeURL)) {
+		t.Fatalf("menu page must render the live flow, got: %s", body)
+	}
+	if strings.Contains(body, `http-equiv="refresh"`) {
+		t.Fatal("live flow page must not auto-refresh")
+	}
+	for _, want := range []string{`action="oauth_submit"`, `name="cb_url"`, html.EscapeString(lc.keyName)} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("live flow page missing %q, got: %s", want, body)
+		}
+	}
+}
+
+func TestStartLoginHonorsLoginBaseURL(t *testing.T) {
+	clearPendingLogins(t)
+	loginBaseURLMu.Lock()
+	loginBaseURL = "https://cpa.example.com//" // trailing slashes must be stripped
+	loginBaseURLMu.Unlock()
+	t.Cleanup(func() {
+		loginBaseURLMu.Lock()
+		loginBaseURL = ""
+		loginBaseURLMu.Unlock()
+	})
+	raw, err := handleStartLogin(nil)
+	if err != nil {
+		t.Fatalf("handleStartLogin: %v", err)
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
+		t.Fatalf("start envelope: err=%v ok=%v", err, env.OK)
+	}
+	var start pluginapi.AuthLoginStartResponse
+	if err := json.Unmarshal(env.Result, &start); err != nil {
+		t.Fatalf("start result: %v", err)
+	}
+	// Hosted-panel case: the ABSOLUTE gate URL the OAuth dialog can open.
+	want := "https://cpa.example.com/v0/resource/plugins/mimo/login_gate?state=" + url.QueryEscape(start.State)
+	if start.URL != want {
+		t.Fatalf("start URL = %q, want %q", start.URL, want)
 	}
 }
 

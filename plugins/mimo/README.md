@@ -28,7 +28,7 @@ from official sources and documented in
 
 ## 登录（sk lane）
 
-`auth.login.start` 返回**插件自带登录引导页**的相对 URL `/v0/resource/plugins/mimo/login_gate?state=…`（v0.2.7）——管理面板原样 `window.open`，相对路径按面板（即 CPA 服务）源解析，任何部署形态都可达。引导页 = 注册面板：
+`auth.login.start` 返回**插件自带登录引导页** URL `/v0/resource/plugins/mimo/login_gate?state=…`（v0.2.8）——默认相对路径，按管理面板自己的源解析，仅当面板与 CPA 同源（自托管面板）时可达；**托管面板（跨源）的 OAuth 对话框原样 `window.open` 该相对路径会 404**，这类部署在插件配置里把 `login_base_url` 设为 CPA 对外地址（如 `https://cpa.example.com`），登录链接即变为绝对 URL。引导页 = 注册面板：
 
 1. 「前往小米登录」新标签页打开 platform 授权页（授权 URL 存于登录会话）；
 2. 授权后平台 302 回 `http://localhost:<port>/auth?u=<密文>`——本机部署直达回环服务器自动完成；远程/Docker 部署该页打不开，复制地址栏完整链接；
@@ -38,7 +38,7 @@ from official sources and documented in
 AES-256-GCM，key = `SHA256(ECDH(X25519))` → `{sk, uid, url}`。sk 为永久凭据，
 AuthRefresh 仅回显元数据。登录 TTL 6 分钟；**单活策略**：再次点「登录」会关闭旧回环服务器并作废旧引导页。
 
-兜底入口：插件菜单「登录兜底粘贴」（`/v0/resource/plugins/mimo/oauth_submit`，资源路由免管理鉴权，浏览器直开；也支持 `GET ?cb_url=<完整失败链接>`）。
+跨源安全入口：插件菜单「OAuth 登录 / 兜底粘贴」（`/v0/resource/plugins/mimo/oauth_submit`，资源路由免管理鉴权；面板经 apiBase 前缀 iframe 渲染，任何部署形态都可达）。v0.2.8 起该页**状态感知**：有进行中的登录时自动呈现完整引导流（「前往小米登录」按钮 + 粘贴框），空闲时显示粘贴指引并每 5 秒自动刷新——在 CPA 点「登录」后无需任何额外操作，本页即变为引导页。直开时也支持 `GET ?cb_url=<完整失败链接>`。
 
 ## 桌面会话收养（cookie lane）
 

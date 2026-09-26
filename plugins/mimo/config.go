@@ -35,6 +35,16 @@ var (
 	// edge ever starts gating user agents.
 	exchangeUserAgent   string
 	exchangeUserAgentMu sync.RWMutex
+
+	// loginBaseURL is the browser-facing CPA base used to build the ABSOLUTE
+	// login_gate URL returned by StartLogin (v0.2.8). Empty keeps the
+	// relative path, which resolves against the management panel's origin —
+	// correct whenever the panel is served from the CPA origin itself.
+	// Panels hosted on a DIFFERENT origin window.open the URL raw (mc-ui
+	// OAuthPage has no apiBase prefixing), so such deployments set this to
+	// their CPA base (e.g. https://cpa.example.com).
+	loginBaseURL   string
+	loginBaseURLMu sync.RWMutex
 )
 
 func loadedRegionMode() string {
@@ -72,6 +82,20 @@ func loadedCookiePaths() []string {
 	return out
 }
 
+// loadedLoginBaseURL returns the normalized login base: trimmed, trailing
+// slashes stripped, http/https scheme required — anything else (typo'd
+// config) falls back to "" and the relative gate URL.
+func loadedLoginBaseURL() string {
+	loginBaseURLMu.RLock()
+	defer loginBaseURLMu.RUnlock()
+	v := strings.TrimSpace(loginBaseURL)
+	v = strings.TrimRight(v, "/")
+	if !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") {
+		return ""
+	}
+	return v
+}
+
 // configure decodes plugin config from the lifecycle request. The request is
 // the same envelope as zcode's: {"config": <plugin config object>} — the
 // host forwards plugins.configs.<pluginID> on register/reconfigure. Tolerate
@@ -90,6 +114,7 @@ func configure(raw []byte) {
 		PlatformURL       string `json:"platform_url"`
 		CookiePaths       string `json:"cookie_paths"`
 		ExchangeUserAgent string `json:"exchange_user_agent"`
+		LoginBaseURL      string `json:"login_base_url"`
 	}
 	if err := json.Unmarshal(cfgRaw, &cfg); err != nil {
 		return
@@ -116,6 +141,11 @@ func configure(raw []byte) {
 		exchangeUserAgentMu.Lock()
 		exchangeUserAgent = v
 		exchangeUserAgentMu.Unlock()
+	}
+	if v := strings.TrimSpace(cfg.LoginBaseURL); v != "" {
+		loginBaseURLMu.Lock()
+		loginBaseURL = v
+		loginBaseURLMu.Unlock()
 	}
 	if v := strings.TrimSpace(cfg.CookiePaths); v != "" {
 		var paths []string

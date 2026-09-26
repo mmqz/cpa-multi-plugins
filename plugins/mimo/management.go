@@ -44,12 +44,17 @@ type managementRegistrationResponse struct {
 // mimoManagementRegistration advertises the login surfaces. v0.2.7: the
 // oauth_submit resource carries a Menu label — the management panel renders
 // labeled plugin resources as sidebar navigation entries (menu →
-// /plugin-pages/<id>/<idx> iframe), giving remote/Docker users a DISCOVERABLE
-// registration fallback instead of a URL they must know.
+// /plugin-pages/<id>/<idx> iframe on the CPA origin via apiBase-prefixed
+// iframe src), giving remote/Docker users a DISCOVERABLE registration
+// fallback instead of a URL they must know. v0.2.8: the entry is renamed and
+// the page is state-aware (live guided flow when a login is under way) — it
+// is now the cross-origin-safe login entry, since the panel's OAuth dialog
+// opens StartLogin's URL raw and 404s on hosted panels whose origin is not
+// the CPA origin.
 func mimoManagementRegistration() managementRegistrationResponse {
 	return managementRegistrationResponse{
 		Resources: []resourceRoute{
-			{Path: "/oauth_submit", Menu: "登录兜底粘贴", Description: "MiMo paste-to-complete fallback: open this page (or GET ?cb_url=<url-encoded failed redirect URL>) to finish a login whose localhost redirect failed."},
+			{Path: "/oauth_submit", Menu: "OAuth 登录 / 兜底粘贴", Description: "MiMo OAuth login guide + paste-to-complete fallback: with a pending login this page IS the guided registration flow; idle it accepts ?cb_url=<url-encoded failed redirect URL> to finish a login whose localhost redirect failed."},
 		},
 	}
 }
@@ -84,9 +89,9 @@ func mgmtHTMLResponse(body []byte) pluginapi.ManagementResponse {
 	return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: h, Body: body}
 }
 
-const mimoSubmitFormHTML = `<p>远程部署时浏览器无法跳回本机完成 MiMo 登录。请：</p>
+const mimoSubmitFormHTML = `<p>本页是 MiMo 登录的兜底入口：在 CPA 点「登录」后约 5 秒内，本页会自动变为登录引导页（含「前往小米登录」按钮）。手动粘贴兜底：</p>
 <ol>
-<li>回到 CPA 重新点「登录」，在打开的页面中完成小米账号授权；</li>
+<li>在 CPA 点「登录」，按引导页完成小米账号授权（本页一直开着时无需重复）；</li>
 <li>浏览器最后会跳转 <code>http://localhost:…/auth?u=…</code> 并打开失败——复制地址栏<b>完整链接</b>（登录 6 分钟内有效）；</li>
 <li>粘贴到下面并提交。</li>
 </ol>
@@ -116,19 +121,45 @@ func handleMimoLoginGate(req pluginapi.ManagementRequest) []byte {
 		if v, ok := loginStates.Load(state); ok {
 			lc := v.(*loginCtx)
 			if time.Now().Before(lc.expires) && lc.authorizeURL != "" {
-				body := fmt.Sprintf(`<ol>
+				return mimoSubmitPage("MiMo 登录引导", mimoGateLiveBody(lc))
+			}
+		}
+	}
+	return mimoSubmitPage("MiMo 登录引导", mimoGateStaleHTML)
+}
+
+// mimoPendingLogin returns the newest unexpired pending login, if any. The
+// single-active policy (v0.2.7) keeps at most one alive; the scan is
+// defensive against future multi-flow shapes. Expired states are skipped,
+// not deleted — poll semantics own their lifecycle.
+func mimoPendingLogin() *loginCtx {
+	var found *loginCtx
+	loginStates.Range(func(key, value any) bool {
+		lc, ok := value.(*loginCtx)
+		if !ok || time.Now().After(lc.expires) {
+			return true
+		}
+		if found == nil || lc.startedAt > found.startedAt {
+			found = lc
+		}
+		return true
+	})
+	return found
+}
+
+// mimoGateLiveBody renders the guided flow for a live pending login: the
+// step list, the authorize link (step one), the auth record name and the
+// shared paste box. Shared by the stateful gate page (v0.2.7) and the
+// state-aware oauth_submit menu page (v0.2.8).
+func mimoGateLiveBody(lc *loginCtx) string {
+	return fmt.Sprintf(`<ol>
 <li>点击下方按钮，在<strong>新标签页</strong>打开小米授权页并完成登录授权；本页请保持打开。</li>
 <li>授权后浏览器会跳转 <code>http://localhost:…/auth?u=…</code>：本机部署会自动完成；远程 / Docker 部署该页打不开——复制地址栏<b>完整链接</b>（本次登录 6 分钟内有效）。</li>
 <li>把完整链接粘贴到下面并点「完成登录」，然后回到 CPA 登录窗口等待自动完成。</li>
 </ol>
 <p><a href="%s" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#ff6900;color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none;font-weight:600">前往小米登录</a></p>
 <p>授权记录名 <code>%s</code></p>`,
-					html.EscapeString(lc.authorizeURL), html.EscapeString(lc.keyName)) + mimoGateFormHTML
-				return mimoSubmitPage("MiMo 登录引导", body)
-			}
-		}
-	}
-	return mimoSubmitPage("MiMo 登录引导", mimoGateStaleHTML)
+		html.EscapeString(lc.authorizeURL), html.EscapeString(lc.keyName)) + mimoGateFormHTML
 }
 
 // handleMimoOAuthSubmit serves GET/POST /v0/resource/plugins/mimo/oauth_submit.
@@ -150,7 +181,17 @@ func handleMimoOAuthSubmit(req pluginapi.ManagementRequest) []byte {
 		return mimoSubmitPage("链接不完整", html.EscapeString(truncMsg))
 	}
 	if blob == "" {
-		return mimoSubmitPage("MiMo 登录兜底", mimoSubmitFormHTML)
+		// v0.2.8: the menu page is state-aware. With a pending login it IS
+		// the guided registration page — the cross-origin-safe entry (the
+		// panel renders plugin menu pages on the CPA origin through
+		// apiBase-prefixed iframes, while its OAuth dialog window.open's
+		// StartLogin's URL raw, which 404s when the panel origin is not the
+		// CPA origin). Idle, it keeps the paste instructions and
+		// auto-refreshes so a login started afterwards is picked up.
+		if lc := mimoPendingLogin(); lc != nil && lc.authorizeURL != "" {
+			return mimoSubmitPage("MiMo 登录引导", mimoGateLiveBody(lc))
+		}
+		return mimoSubmitPageHead("MiMo 登录兜底", mimoIdleMetaRefresh, mimoSubmitFormHTML)
 	}
 	res, ok := mimoCompletePendingLogin(blob)
 	if !ok {
@@ -261,10 +302,20 @@ func mimoCompletePendingLogin(blob string) (oauthResult, bool) {
 	return res, found
 }
 
+// mimoIdleMetaRefresh drives the idle menu page: a login started after the
+// page was opened flips it to the guided flow within ~5s.
+const mimoIdleMetaRefresh = `<meta http-equiv="refresh" content="5">`
+
 // mimoSubmitPage renders the minimal browser-facing fallback page. body may
 // carry trusted HTML (the form); dynamic interpolations are escaped by the
 // callers.
 func mimoSubmitPage(title, body string) []byte {
-	return []byte(fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><title>%s</title></head><body style="font-family:system-ui,sans-serif;max-width:640px;margin:48px auto;padding:0 16px;line-height:1.7"><h2>%s</h2>%s<p style="color:#888;font-size:13px;margin-top:32px">cpa-multi-plugins · mimo</p></body></html>`,
-		html.EscapeString(title), html.EscapeString(title), body))
+	return mimoSubmitPageHead(title, "", body)
+}
+
+// mimoSubmitPageHead additionally injects raw head HTML (headExtra is a
+// trusted constant, e.g. the idle page's auto-refresh meta tag).
+func mimoSubmitPageHead(title, headExtra, body string) []byte {
+	return []byte(fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8">%s<title>%s</title></head><body style="font-family:system-ui,sans-serif;max-width:640px;margin:48px auto;padding:0 16px;line-height:1.7"><h2>%s</h2>%s<p style="color:#888;font-size:13px;margin-top:32px">cpa-multi-plugins · mimo</p></body></html>`,
+		headExtra, html.EscapeString(title), html.EscapeString(title), body))
 }

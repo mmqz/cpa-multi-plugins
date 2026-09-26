@@ -271,24 +271,31 @@ func handleStartLogin(raw []byte) ([]byte, error) {
 		startedAt:    now.UnixNano(),
 		authorizeURL: authorizeURL,
 	})
+	// v0.2.8: the panel's OAuth dialog opens this URL verbatim (window.open)
+	// with NO apiBase prefixing (mc-ui OAuthPage.tsx) — a RELATIVE path only
+	// resolves when the panel origin IS the CPA origin (self-hosted UI).
+	// Hosted panels on a different origin 404 the relative path; deployments
+	// configure login_base_url to receive an ABSOLUTE gate URL, and the
+	// sidebar menu page (apiBase-prefixed iframe on the CPA origin) stays
+	// the zero-config cross-origin entry. The gate page carries the real
+	// authorize URL (step one), the localhost-redirect explainer and the
+	// paste box: a self-contained registration surface for remote/Docker
+	// hosts (user report 2026-09-26 — there was nowhere to submit the failed
+	// callback URL; the host's own paste box 400s on mimo's state-less
+	// callback shape and its callback file has no plugin consumer).
+	gateURL := "/v0/resource/plugins/mimo/login_gate?state=" + url.QueryEscape(state)
+	if base := loadedLoginBaseURL(); base != "" {
+		gateURL = base + gateURL
+	}
 	return okEnvelope(pluginapi.AuthLoginStartResponse{
-		Provider: providerName,
-		// v0.2.7: the host panel opens this URL verbatim (window.open), so a
-		// RELATIVE path resolves against the panel origin — which is the CPA
-		// server itself in every supported deployment. The gate page carries
-		// the real authorize URL (step one), the localhost-redirect explainer
-		// and the paste box: a self-contained registration surface for
-		// remote/Docker hosts (user report 2026-09-26 — there was nowhere to
-		// submit the failed callback URL; the host's own paste box 400s on
-		// mimo's state-less callback shape and its callback file has no
-		// plugin consumer).
-		URL:       "/v0/resource/plugins/mimo/login_gate?state=" + url.QueryEscape(state),
+		Provider:  providerName,
+		URL:       gateURL,
 		State:     state,
 		ExpiresAt: now.Add(loginTTL).UTC(),
 		Metadata: map[string]any{
 			// v0.2.5 carried the paste fallback; v0.2.7 turns the flow itself
 			// into the guided gate page, so the prompt just points at it.
-			"prompt": "已打开 MiMo 登录引导页：点击「前往小米登录」完成账号授权；本机部署回调直达自动完成，远程/Docker 部署按引导页提示复制失败页完整链接（http://localhost:…/auth?u=…）并粘贴提交。授权记录名为 " + keyName + "。",
+			"prompt": "已发起 MiMo 登录（授权记录名 " + keyName + "）：引导页含「前往小米登录」按钮；本机部署回调直达自动完成，远程/Docker 部署按引导页提示复制失败页完整链接（http://localhost:…/auth?u=…）并粘贴提交。若自动打开的页面空白或 404（管理面板与 CPA 不同源），请改用管理面板左侧菜单「OAuth 登录 / 兜底粘贴」打开引导页。",
 		},
 	})
 }
