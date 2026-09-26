@@ -29,7 +29,7 @@ from official sources and documented in
 ## 登录（sk lane）
 
 `auth.login.start` 返回 platform 授权页 URL（本机随机端口回调，6 分钟 TTL）。
-浏览器完成授权后平台 302 回 `http://localhost:<port>/?u=<密文>`，插件按官方
+浏览器完成授权后平台 302 回 `http://localhost:<port>/auth?u=<密文>`，插件按官方
 CLI 同款参数解密：`base64url(ephemeralPub(32B) ‖ nonce(12B) ‖ ct ‖ tag(16B))`，
 AES-256-GCM，key = `SHA256(ECDH(X25519))` → `{sk, uid, url}`。sk 为永久凭据，
 AuthRefresh 仅回显元数据。

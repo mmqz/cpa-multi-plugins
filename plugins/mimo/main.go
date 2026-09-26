@@ -89,6 +89,13 @@ const (
 	providerName = "mimo"
 	authFileName = "mimo.json"
 
+	// Official MiMo avatar (GitHub account 208276378, designated by the
+	// maintainer 2026-09-26). The CPA management UI renders metadata.logo as
+	// the plugin icon (sidebar drawer + OAuth entry) — same wiring as
+	// trae/qoder/workbuddy, which shipped without a logo for two releases
+	// before their URLs landed.
+	pluginLogoURL = "https://avatars.githubusercontent.com/u/208276378?s=60&v=4"
+
 	// Lane identifiers stored in credentials.
 	laneKey    = "key"    // sk lane — official CLI OAuth credential
 	laneCookie = "cookie" // adopted desktop SSO session
@@ -362,7 +369,7 @@ func mimoRegistration() registration {
 			Version:          version,
 			Author:           "mmqz",
 			GitHubRepository: "https://github.com/mmqz/cpa-multi-plugins",
-			Logo:             "",
+			Logo:             pluginLogoURL,
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"auto", "cn", "sgp", "ru", "in"}, Description: "Cookie-lane region base: auto (adopt from the desktop session / cn default), cn, sgp, ru or in."},
 				{Name: "x_client_version", Type: pluginapi.ConfigFieldTypeString, Description: "X-Client-Version header value for the cookie lane (desktop parity, default 26.922.222056)."},
@@ -390,7 +397,7 @@ func mimoRegistration() registration {
 // must stay in lockstep with the VERSION file — the same drift class that
 // shipped trae v0.12.86 self-reporting 0.12.56 (repo lesson 2026-09-23).
 // `make build` may still override it via -X (git describe).
-var version = "0.2.5"
+var version = "0.2.6"
 
 // -----------------------------------------------------------------------------
 // Envelope helpers

@@ -83,7 +83,9 @@ func TestMimoOAuthSubmitCompletesPendingLogin(t *testing.T) {
 	want := oauthResult{SK: "sk-paste-1234567890", UID: "20260926", URL: "https://api.xiaomimimo.com/v1"}
 	blob := encryptOAuthBlob(t, mustPub(lc.privKey), want)
 
-	body := submitPaste(t, "http://localhost:51999/?u="+blob)
+	// Real redirect shape (user paste 2026-09-26): the platform 302s to
+	// {redirect_uri}auth?u=… — the path is /auth, not /.
+	body := submitPaste(t, "http://localhost:36945/auth?u="+blob)
 	if !strings.Contains(body, "登录完成") {
 		t.Fatalf("paste should complete the login, got: %s", body)
 	}
@@ -165,11 +167,13 @@ func TestMimoExtractBlobForms(t *testing.T) {
 	inputs := []string{
 		"http://localhost:51000/?u=" + blob,
 		"http://localhost:51000/?x=1&u=" + blob,
-		"localhost:51000/?u=" + blob, // scheme-less
-		"?u=" + blob,                 // bare query
-		"u=" + blob,                  // bare pair
-		blob,                         // bare blob
-		"  \"" + blob + "\"  ",       // quoted IM paste
+		"http://localhost:36945/auth?u=" + blob, // real 302 shape (2026-09-26 paste): path is /auth
+		"localhost:36945/auth?u=" + blob,        // scheme-less real shape
+		"localhost:51000/?u=" + blob,            // scheme-less
+		"?u=" + blob,                            // bare query
+		"u=" + blob,                             // bare pair
+		blob,                                    // bare blob
+		"  \"" + blob + "\"  ",                  // quoted IM paste
 	}
 	for _, in := range inputs {
 		got, trunc := mimoExtractBlob(in)

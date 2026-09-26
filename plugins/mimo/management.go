@@ -3,7 +3,7 @@
 // redirect failed. The sk-lane OAuth starts a loopback callback server on the
 // HOST machine (127.0.0.1:<random port>) — when CPA runs on a remote server
 // (or in Docker without the port published), the browser's redirect to
-// http://localhost:<port>/?u=<blob> never lands, and the login pends until
+// http://localhost:<port>/auth?u=<blob> never lands, and the login pends until
 // TTL while the user stares at a dead address-bar URL. The paste-to-complete
 // page replays that failed redirect through the exact same decryption path,
 // so the login completes without the callback ever reaching the host.
@@ -82,10 +82,10 @@ func mgmtHTMLResponse(body []byte) pluginapi.ManagementResponse {
 const mimoSubmitFormHTML = `<p>远程部署时浏览器无法跳回本机完成 MiMo 登录。请：</p>
 <ol>
 <li>回到 CPA 重新点「登录」，在打开的页面中完成小米账号授权；</li>
-<li>浏览器最后会跳转 <code>http://localhost:…/?u=…</code> 并打开失败——复制地址栏<b>完整链接</b>（登录 6 分钟内有效）；</li>
+<li>浏览器最后会跳转 <code>http://localhost:…/auth?u=…</code> 并打开失败——复制地址栏<b>完整链接</b>（登录 6 分钟内有效）；</li>
 <li>粘贴到下面并提交。</li>
 </ol>
-<form method="GET" action=""><input name="cb_url" style="width:78%" placeholder="http://localhost:…/?u=…"> <button>完成登录</button></form>`
+<form method="GET" action=""><input name="cb_url" style="width:78%" placeholder="http://localhost:…/auth?u=…"> <button>完成登录</button></form>`
 
 // handleMimoOAuthSubmit serves GET/POST /v0/resource/plugins/mimo/oauth_submit.
 // GET ?cb_url=<url-encoded failed redirect URL> (or the page form, which
@@ -153,7 +153,7 @@ func mimoExtractBlob(raw string) (blob, truncMsg string) {
 		case strings.HasPrefix(s, "?"):
 			s = "http://localhost/" + s
 		case strings.Contains(s, "/"):
-			// Scheme-less host form ("localhost:51000/?u=…") — only reachable
+			// Scheme-less host form ("localhost:51000/auth?u=…") — only reachable
 			// after the pair/base64url checks above.
 			s = "http://" + s
 		case strings.Contains(s, "="):
