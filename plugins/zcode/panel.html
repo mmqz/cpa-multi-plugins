@@ -43,6 +43,11 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button:disabled{opacity:.5;
 .summary{padding:14px 16px;margin-bottom:16px;display:flex;gap:18px;flex-wrap:wrap;font-size:13px}
 .summary b{font-size:16px}
 .err{color:var(--err);font-size:12px;margin-top:8px}
+.keybox{background:var(--card);border:1px solid var(--warn-border);border-radius:12px;padding:14px 16px;margin-bottom:16px}
+.keybox .kmsg{font-size:13px;color:var(--warn);margin-bottom:10px}
+.keybox .krow{display:flex;gap:8px;flex-wrap:wrap}
+.keybox input{flex:1;min-width:220px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;color:var(--fg);font-size:13px}
+.keybox .khint{font-size:12px;color:var(--mut);margin-top:8px}
 </style>
 </head>
 <body>
@@ -55,15 +60,86 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button:disabled{opacity:.5;
     <button onclick="load(true,true)" class="sec">强制刷新配额</button>
     <span class="sub" id="serverTime"></span>
   </div>
+  <div class="keybox" id="keyBox" style="display:none">
+    <div class="kmsg" id="keyMsg"></div>
+    <div class="krow">
+      <input id="keyInput" type="password" placeholder="粘贴 CPA 管理密钥（与 Web 管理面板登录密钥一致）">
+      <button onclick="saveKey()">保存并重试</button>
+    </div>
+    <div class="khint">密钥仅保存在当前浏览器（localStorage，混淆存储），用于调用本插件管理接口；同源自托管管理面板可自动拾取，无需手填。</div>
+  </div>
   <div class="grid" id="cards"></div>
 </div>
 <div class="toast" id="toast"></div>
 <script>
 const base = new URLSearchParams(location.search).get('base') || '';
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200)}
+// ---- management key bootstrap --------------------------------------------
+// The plugin management API lives behind the host management middleware, so
+// every call must carry `Authorization: Bearer <management key>`. The key is
+// resolved from (1) ?key= query, (2) our own saved copy, (3) the management
+// UI's localStorage when the UI is self-hosted on this same origin, (4) the
+// UI's legacy key slot; otherwise the manual input box below is shown.
+const KEY_STORE = 'zcode_panel_key';
+const ENC_PREFIX = 'enc::v1::';
+const OBF_SALT = 'cli-proxy-api-webui::secure-storage';
+const MSG_NEEDKEY = '本面板需要 CPA 管理密钥：请粘贴与 Web 管理面板相同的密钥后重试。';
+const MSG_AUTHFAIL = '管理密钥验证失败';
+const MSG_SAVING = '已保存，正在验证…';
+const MSG_SAVE_EMPTY = '请先输入管理密钥';
+let mgmtKey = '';
+function obfKeyBytes(){
+  try{ return new TextEncoder().encode(OBF_SALT+'|'+location.host+'|'+navigator.userAgent); }
+  catch(e){ return new TextEncoder().encode(OBF_SALT); }
+}
+function xorBytes(bytes, kb){ const out=new Uint8Array(bytes.length); for(let i=0;i<bytes.length;i++) out[i]=bytes[i]^kb[i%kb.length]; return out; }
+function b64ToBytes(b){ const bin=atob(b); const out=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) out[i]=bin.charCodeAt(i); return out; }
+function bytesToB64(u){ let s=''; for(let i=0;i<u.length;i++) s+=String.fromCharCode(u[i]); return btoa(s); }
+function obfDecode(raw){
+  if(typeof raw!=='string'||raw.indexOf(ENC_PREFIX)!==0) return raw;
+  try{ return new TextDecoder().decode(xorBytes(b64ToBytes(raw.slice(ENC_PREFIX.length)), obfKeyBytes())); }catch(e){ return ''; }
+}
+function obfEncode(text){ return ENC_PREFIX+bytesToB64(xorBytes(new TextEncoder().encode(text), obfKeyBytes())); }
+function lsGet(name){ try{ const v=localStorage.getItem(name); return v==null?'':v; }catch(e){ return ''; } }
+function unjson(s){ try{ return JSON.parse(s); }catch(e){ return s; } }
+function strKey(v){ return (typeof v==='string'&&v.trim())?v.trim():''; }
+function detectManagementKey(){
+  const q = strKey(new URLSearchParams(location.search).get('key')||'');
+  if(q) return q;
+  let v = strKey(unjson(obfDecode(lsGet(KEY_STORE)))); if(v) return v;
+  try{
+    const blob = obfDecode(lsGet('cli-proxy-auth'));
+    if(blob){ const o=JSON.parse(blob); const k=o&&o.state&&o.state.managementKey; v=strKey(k); if(v) return v; }
+  }catch(e){}
+  v = strKey(unjson(obfDecode(lsGet('managementKey')))); if(v) return v;
+  return '';
+}
+mgmtKey = detectManagementKey();
+function showKeyBox(msg){
+  const box=document.getElementById('keyBox'); if(!box) return;
+  if(msg) document.getElementById('keyMsg').textContent = msg;
+  box.style.display='block';
+}
+function hideKeyBox(){ const box=document.getElementById('keyBox'); if(box) box.style.display='none'; }
+async function saveKey(){
+  const v = strKey(document.getElementById('keyInput').value||'');
+  if(!v){ toast(MSG_SAVE_EMPTY); return; }
+  mgmtKey = v;
+  try{ localStorage.setItem(KEY_STORE, obfEncode(JSON.stringify(v))); }catch(e){}
+  toast(MSG_SAVING);
+  load(false,false);
+}
 async function api(path, opts){
-  const res = await fetch(base + '/v0/management/plugins/zcode' + path, opts);
-  return await res.json().catch(()=>({error:'bad json'}));
+  opts = opts||{};
+  const headers = Object.assign({}, opts.headers||{});
+  if(mgmtKey) headers['Authorization'] = 'Bearer '+mgmtKey;
+  const res = await fetch(base + '/v0/management/plugins/zcode' + path, Object.assign({}, opts, {headers:headers}));
+  const body = await res.json().catch(()=>({error:'bad json'}));
+  if(res.status===401||res.status===403){
+    const m = (body&&body.error)?body.error:'unauthorized';
+    showKeyBox(MSG_AUTHFAIL+'：'+m);
+  }
+  return body;
 }
 function fmt(n){return (n??0).toLocaleString()}
 async function load(force, quota){
@@ -71,6 +147,7 @@ async function load(force, quota){
   el.innerHTML = '<div class="card">加载中…</div>';
   const data = force ? await api('/refresh',{method:'POST'}) : await api('/accounts');
   if(data.error){ el.innerHTML = '<div class="card err">'+data.error+'</div>'; document.getElementById('summary').textContent=''; return; }
+  hideKeyBox();
   document.getElementById('serverTime').textContent = '更新于 ' + (data.server_time||'');
   const s = data.summary||{};
   document.getElementById('summary').innerHTML =
@@ -117,6 +194,7 @@ async function switchPlan(idx, plan){
   const r = await api('/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auth_index:idx, plan:plan})});
   toast(r.ok?'已切换到 '+plan:(r.error||'失败')); load(false,false);
 }
+if(!mgmtKey) showKeyBox(MSG_NEEDKEY);
 load(false,false);
 </script>
 </body>
