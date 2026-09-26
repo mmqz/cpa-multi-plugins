@@ -367,6 +367,9 @@ func selfCompleteCN(lc *loginCtx, source string) {
 			Domain:       "trae.cn",
 			MachineID:    lc.machineID,
 			DeviceID:     lc.deviceID,
+			// v0.12.60: 同 oauth_callback——refreshLocked 以谱系选 OAuth
+			// ClientID，裸 Auth 缺 variant 会把 SOLO 凭证换发成 cn 类。
+			Variant: lc.variant,
 		}
 		if err := upstreamClient.RefreshToken(a); err != nil {
 			accessToken, refreshToken = lc.refreshToken, lc.refreshToken

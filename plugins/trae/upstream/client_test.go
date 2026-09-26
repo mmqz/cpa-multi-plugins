@@ -666,3 +666,52 @@ func TestPickCreditField(t *testing.T) {
 }
 
 func ptr64(v int64) *int64 { return &v }
+
+// TestRefreshLockedSendsLineageClientID 钉死 v0.12.60 的谱系修复：ExchangeToken
+// 刷新的 ClientID 必须跟随账号 variant（v0.12.44 2×2 矩阵），不再钉死包级
+// cn 默认值。回归背景：SOLO CN 账号（登录走 en1oxy7wnw8j9n）每次刷新都被
+// ono9krqynydwx5 换发出跨类 token——ug/pay 族（ide_user_ent_usage /
+// checkin_credits）401 code=1001，用户可见为「更新完成后积分查询
+// session_dead、签到全挂」。三个线型取值均为上游真实 OAuth client id
+// （constants.go / variant.go，v0.12.43-44 抓包与官方包反编译双实证），
+// 非合成值。
+func TestRefreshLockedSendsLineageClientID(t *testing.T) {
+	cases := []struct {
+		name     string
+		variant  string
+		clientID string
+	}{
+		{"solo lineage", "solo", "en1oxy7wnw8j9n"},
+		{"cn lineage", "cn", "ono9krqynydwx5"},
+		{"legacy empty variant falls back to cn (old behavior byte-identical)", "", "ono9krqynydwx5"},
+		{"unknown variant falls back to cn", "mystery", "ono9krqynydwx5"},
+		{"variant normalization is case/space tolerant", "  SOLO ", "en1oxy7wnw8j9n"},
+	}
+	for _, tc := range cases {
+		var gotClient string
+		c := testClient(func(r *http.Request) (*http.Response, error) {
+			if !strings.HasSuffix(r.URL.Path, EpExchange) {
+				return nil, errors.New("wrong path: " + r.URL.Path)
+			}
+			body, _ := io.ReadAll(r.Body)
+			var probe struct {
+				ClientID string `json:"ClientID"`
+			}
+			if err := json.Unmarshal(body, &probe); err != nil {
+				return nil, err
+			}
+			gotClient = probe.ClientID
+			return jsonResp(200, `{"Result":{"Token":"newat","RefreshToken":"newrt","TokenExpireAt":1786805537}}`), nil
+		})
+		a := &auth.Auth{AccessToken: "at", RefreshToken: "oldrt", Variant: tc.variant, APIHost: "https://oauth.example"}
+		if err := c.RefreshToken(a); err != nil {
+			t.Fatalf("%s: refresh: %v", tc.name, err)
+		}
+		if gotClient != tc.clientID {
+			t.Errorf("%s: exchange ClientID=%q want %q (variant=%q)", tc.name, gotClient, tc.clientID, tc.variant)
+		}
+		if a.AccessToken != "newat" {
+			t.Errorf("%s: token not updated", tc.name)
+		}
+	}
+}

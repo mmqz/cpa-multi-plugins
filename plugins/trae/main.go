@@ -140,7 +140,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.59"
+var version = "0.12.60"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -1303,6 +1303,11 @@ func handlePollLogin(request []byte) ([]byte, error) {
 			Domain:       "trae.cn",
 			MachineID:    lc.machineID,
 			DeviceID:     lc.deviceID,
+			// v0.12.60: refreshLocked 以谱系选 OAuth ClientID
+			// （solo → en1oxy7wnw8j9n）。裸 Auth 缺 variant 时一律解析成
+			// cn client，SOLO 登录当场就换发出跨类 token——ug/pay 族
+			// 401 code=1001（积分查询/签到全挂，聊天却正常）。
+			Variant: lc.variant,
 		}
 		if err := upstreamClient.RefreshToken(a); err != nil {
 			// Fallback: treat the callback's refreshToken as access token directly.

@@ -270,13 +270,24 @@ func (c *Client) RefreshTokenIfNeeded(a *auth.Auth, skew time.Duration) (bool, e
 // 任何失败路径都不改写 a 字段，保证旧 refreshToken 可重试。
 // 多源 fallback（对齐 cockpit-tools build_api_urls）：依次尝试
 // a.APIHost → OAuthHost → 备用 CN 源，避免单一 host 不可达时刷新失败。
+//
+// v0.12.60: ClientID 跟随账号谱系（v0.12.44 2×2 矩阵：ClientID 只由 solo 与
+// 否决定）。登录链路一直用 ClientIDFor(variant)（solo → en1oxy7wnw8j9n），
+// 本函数却钉死包级 cn 默认值（ono9krqynydwx5）——SOLO CN 账号的每一次刷新
+// （03:00 定时/执行器到期/15 天签发龄轮换/签到前保鲜）都以错误谱系换发
+// token。跨类 token 的实测后果：llm_utils_chat 容忍（聊天正常），而谱系
+// 敏感的 ug/pay 族（ide_user_ent_usage / checkin_credits）以 HTTP 401 +
+// code=1001 "We're sorry, but we are not able to authenticate you" 拒绝
+// ——用户可见为「刷新/重登完成后积分查询报 ent_usage session_dead、签到
+// 全挂」。空/legacy variant 解析回 cn id，与旧行为逐字节一致。
 func (c *Client) refreshLocked(a *auth.Auth) error {
 	if strings.TrimSpace(a.RefreshToken) == "" {
 		return fmt.Errorf("no refreshToken")
 	}
+	lineageClient := ClientIDFor(strings.ToLower(strings.TrimSpace(a.Variant)))
 	hosts := exchangeHosts(a.APIHost, c.OAuthHost)
 	body := map[string]any{
-		"ClientID":     c.ClientID,
+		"ClientID":     lineageClient,
 		"RefreshToken": a.RefreshToken, // 已持 a 写锁，直接读
 		"ClientSecret": "-",
 		"UserID":       "",
@@ -315,6 +326,10 @@ func (c *Client) refreshLocked(a *auth.Auth) error {
 	if resp.Result.Token == "" {
 		return fmt.Errorf("refresh_failed: no token in response — re-login required")
 	}
+	// v0.12.60: 谱系留痕——每次实际换发记一行 variant+clientID。本 bug
+	// （solo 账号被 cn client 换发）在聊天正常的前提下只表现为 ug/pay 401，
+	// 没有这行日志就只能凭报错倒推。
+	log.Printf("exchange refresh: uid=%s variant=%q client=%s", a.UID, a.Variant, lineageClient)
 	a.AccessToken = resp.Result.Token
 	if resp.Result.RefreshToken != "" {
 		a.RefreshToken = resp.Result.RefreshToken
