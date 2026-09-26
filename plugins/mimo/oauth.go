@@ -291,7 +291,7 @@ func handleStartLogin(raw []byte) ([]byte, error) {
 		Metadata: map[string]any{
 			// v0.2.5 carried the paste fallback; v0.2.7 turns the flow itself
 			// into the guided gate page, so the prompt just points at it.
-			"prompt": "已打开小米 OAuth 授权页（授权记录名 " + keyName + "）：完成账号授权后本机部署自动完成；远程/Docker 部署授权后浏览器会跳到打不开的 http://localhost:…/auth?u=… 页——复制地址栏完整链接（6 分钟内有效），到管理面板左侧菜单「Mimo」页粘贴提交。",
+			"prompt": "已打开小米 OAuth 授权页（授权记录名 " + keyName + "）：完成账号授权后本机部署自动完成；远程/Docker 部署授权后浏览器会跳到打不开的 http://localhost:…/auth?u=… 页——复制地址栏完整链接（6 分钟内有效），到管理面板左侧菜单「Mimo」页粘贴提交；粘贴后凭证直接保存，无需回到登录窗口等待。",
 		},
 	})
 }

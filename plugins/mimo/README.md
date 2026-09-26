@@ -32,13 +32,13 @@ from official sources and documented in
 
 1. 点「登录」→ 浏览器直接打开平台 OAuth 授权页，完成小米账号授权；
 2. 授权后平台 302 回 `http://localhost:<port>/auth?u=<密文>`——本机部署直达回环服务器自动完成；远程/Docker 部署该页打不开，复制地址栏完整链接；
-3. 到插件菜单「Mimo」页粘贴提交（同源转发 `/oauth_submit`）。
+3. 到插件菜单「Mimo」页粘贴提交（同源转发 `/oauth_submit`）——**粘贴后凭证直接保存**进宿主凭据库（v0.2.10 起经 `host.auth.save`，文件名 `mimo-key-<uid>.json` 与轮询路径同一份，不会重复）；无需保持 CPA 登录窗口开启。
 
 解密与官方 CLI 同款：`base64url(ephemeralPub(32B) ‖ nonce(12B) ‖ ct ‖ tag(16B))`，
 AES-256-GCM，key = `SHA256(ECDH(X25519))` → `{sk, uid, url}`。sk 为永久凭据，
 AuthRefresh 仅回显元数据。登录 TTL 6 分钟；**单活策略**：再次点「登录」会关闭旧回环服务器并作废旧会话。
 
-兜底入口：插件菜单「Mimo」（`/v0/resource/plugins/mimo/oauth_submit`，资源路由免管理鉴权；面板经 apiBase 前缀 iframe 渲染，任何部署形态都可达）。v0.2.8 起该页**状态感知**：有进行中的登录时显示冗余授权按钮 + 粘贴框，空闲时显示粘贴指引并每 5 秒自动刷新。直开时也支持 `GET ?cb_url=<完整失败链接>`。
+兜底入口：插件菜单「Mimo」（`/v0/resource/plugins/mimo/oauth_submit`，资源路由免管理鉴权；面板经 apiBase 前缀 iframe 渲染，任何部署形态都可达）。v0.2.8 起该页**状态感知**：有进行中的登录时显示冗余授权按钮 + 粘贴框，空闲时显示粘贴指引并每 5 秒自动刷新。直开时也支持 `GET ?cb_url=<完整失败链接>`。粘贴提交后凭证直接保存（v0.2.10），不再依赖登录窗口的轮询——窗口已关也能完成登录。
 
 ## 桌面会话收养（cookie lane）
 

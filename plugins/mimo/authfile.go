@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -128,6 +129,30 @@ func hostAuthPersist(name string, raw []byte) error {
 		return fmt.Errorf("%s", msg)
 	}
 	return nil
+}
+
+// persistOAuthLogin saves a completed OAuth login STRAIGHT into the host's
+// auth store (host.auth.save — the desktop-adoption path's writer). Paste
+// completion used to rely on the host's next PollLogin to persist the
+// delivered result, but that loop is UI-driven and dies with the OAuth
+// dialog: closing the window before pasting orphaned an already-authorized
+// key (user report 2026-09-26 — the page said 登录完成 but no credential
+// landed). Both paths converge on the same file name (authFileNameFor) and
+// the host derives the record ID from the file path, so a live poller's own
+// save replaces the same record instead of duplicating it. The payload
+// carries the top-level "type" the host's buildAuthFromFileData reads to
+// attribute the provider record.
+func persistOAuthLogin(res oauthResult) (string, error) {
+	sa := buildStoredAuthFromOAuth(res)
+	raw, err := buildAuthFileJSON(sa, false, "OAuth 登录 · 粘贴兜底直存 · "+time.Now().Format("2006-01-02 15:04"), nil)
+	if err != nil {
+		return "", err
+	}
+	name := authFileNameFor(sa)
+	if err := hostAuthPersistFn(name, raw); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 // buildAuthFileJSON produces the host-save payload: nested storage + top-level

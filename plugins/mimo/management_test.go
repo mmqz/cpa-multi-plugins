@@ -14,8 +14,10 @@ import (
 // management_test.go covers the /oauth_submit paste-to-complete fallback
 // end-to-end with REAL blob crypto: start a login, encrypt the callback blob
 // against the pending flow's static X25519 key (the same wire shape the
-// platform's redirect carries), paste it, and watch the host's next poll
-// complete the login.
+// platform's redirect carries), paste it, and watch the login complete —
+// since v0.2.10 the paste path ALSO persists the credential straight to the
+// host auth store (stubbed here), while a live poller still completes the
+// dialog via the result channel.
 
 const mimoSubmitRoute = "/v0/resource/plugins/mimo/oauth_submit"
 
@@ -184,11 +186,47 @@ func TestMimoOAuthSubmitCompletesPendingLogin(t *testing.T) {
 	want := oauthResult{SK: "sk-paste-1234567890", UID: "20260926", URL: "https://api.xiaomimimo.com/v1"}
 	blob := encryptOAuthBlob(t, mustPub(lc.privKey), want)
 
+	// v0.2.10: stub the direct-save RPC and capture the payload (restored
+	// on exit so other tests keep the real host bridge).
+	var savedName string
+	var savedRaw []byte
+	hostAuthPersistFn = func(name string, raw []byte) error {
+		savedName, savedRaw = name, raw
+		return nil
+	}
+	defer func() { hostAuthPersistFn = hostAuthPersist }()
+
 	// Real redirect shape (user paste 2026-09-26): the platform 302s to
 	// {redirect_uri}auth?u=… — the path is /auth, not /.
 	body := submitPaste(t, "http://localhost:36945/auth?u="+blob)
 	if !strings.Contains(body, "登录完成") {
 		t.Fatalf("paste should complete the login, got: %s", body)
+	}
+
+	// The paste path must have persisted the credential directly — the
+	// canonical mimo-key-<uid>.json name both paths converge on, carrying
+	// the top-level type the host needs to attribute the provider.
+	if savedName != "mimo-key-"+want.UID+".json" {
+		t.Fatalf("persist name = %q, want %q", savedName, "mimo-key-"+want.UID+".json")
+	}
+	var fileProbe struct {
+		Type string `json:"type"`
+		Auth struct {
+			SK  string `json:"sk"`
+			UID string `json:"uid"`
+		} `json:"auth"`
+	}
+	if err := json.Unmarshal(savedRaw, &fileProbe); err != nil {
+		t.Fatalf("persisted auth JSON: %v", err)
+	}
+	if fileProbe.Type != providerName || fileProbe.Auth.SK != want.SK || fileProbe.Auth.UID != want.UID {
+		t.Fatalf("persisted auth mismatch: type=%q sk=%q uid=%q", fileProbe.Type, fileProbe.Auth.SK, fileProbe.Auth.UID)
+	}
+	if !strings.Contains(body, "已直接保存") || !strings.Contains(body, html.EscapeString(savedName)) {
+		t.Fatalf("page must name the saved credential file, got: %s", body)
+	}
+	if strings.Contains(body, "重新登录一次即可") {
+		t.Fatal("page must not advise a blind re-login (it orphans the authorized key)")
 	}
 
 	// The host's next poll must now succeed and carry the decrypted payload —

@@ -91,7 +91,7 @@ const mimoSubmitFormHTML = `<p>本页是 MiMo 登录的兜底粘贴页：在 CPA
 <ol>
 <li>在 CPA 点「登录」，浏览器直接打开小米 OAuth 授权页并完成账号授权；</li>
 <li>浏览器最后会跳转 <code>http://localhost:…/auth?u=…</code> 并打开失败（远程 / Docker 部署常态）——复制地址栏<b>完整链接</b>（登录 6 分钟内有效）；</li>
-<li>粘贴到下面并提交。</li>
+<li>粘贴到下面并提交（提交后凭证直接保存，无需等待）。</li>
 </ol>
 <form method="GET" action=""><input name="cb_url" style="width:78%" placeholder="http://localhost:…/auth?u=…"> <button>完成登录</button></form>`
 
@@ -154,7 +154,7 @@ func mimoGateLiveBody(lc *loginCtx) string {
 	return fmt.Sprintf(`<ol>
 <li>在 CPA 点「登录」后浏览器会<strong>直接打开小米 OAuth 授权页</strong>（通常无需再点下面的按钮）；本页请保持打开。</li>
 <li>授权后浏览器会跳转 <code>http://localhost:…/auth?u=…</code>：本机部署会自动完成；远程 / Docker 部署该页打不开——复制地址栏<b>完整链接</b>（本次登录 6 分钟内有效）。</li>
-<li>把完整链接粘贴到下面并点「完成登录」，然后回到 CPA 登录窗口等待自动完成。</li>
+<li>把完整链接粘贴到下面并点「完成登录」——凭证会直接保存进 CPA（登录窗口若仍开着，也会随之自动完成）。</li>
 </ol>
 <p><a href="%s" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#ff6900;color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none;font-weight:600">重新打开小米授权页</a></p>
 <p>授权记录名 <code>%s</code></p>`,
@@ -200,7 +200,18 @@ func handleMimoOAuthSubmit(req pluginapi.ManagementRequest) []byte {
 	if uid := strings.TrimSpace(res.UID); uid != "" {
 		summary += "（账号 uid " + html.EscapeString(uid) + "）"
 	}
-	return mimoSubmitPage("登录完成", summary+" —— 回到 CPA 的登录窗口，它会在下一次轮询时自动完成；若该窗口已关闭，直接在 CPA 里重新登录一次即可（密钥已生效）。")
+	// v0.2.10: persist HERE, not via the host's next poll — the poll loop
+	// is UI-driven (the panel's OAuth page polls every ~3s) and dies with
+	// the dialog, so the old "回到登录窗口等下一次轮询；若已关闭就重新登录
+	// 一次" advice orphaned an already-authorized key whenever the window
+	// had been closed (user report 2026-09-26: the page said 登录完成 but
+	// no credential ever landed). A still-open dialog completes normally
+	// on its next poll and converges on the same auth file, so the double
+	// save replaces one record instead of duplicating it.
+	if name, err := persistOAuthLogin(res); err == nil {
+		return mimoSubmitPage("登录完成", summary+" —— 凭证已直接保存为 <code>"+html.EscapeString(name)+"</code>。回到 CPA 刷新凭据列表即可看到；登录窗口若仍开着，它也会在下一次轮询时正常完成（同一份凭证，不会重复）。")
+	}
+	return mimoSubmitPage("登录完成", summary+" —— 已解出凭证并送交 CPA 登录窗口，它会在下一次轮询时自动完成；若窗口已关闭且刷新凭据列表后没有新凭证，请重新点「登录」并再走一次粘贴（上一次已授权的密钥作废属正常）。")
 }
 
 // mimoExtractBlob pulls the ?u= payload out of a pasted redirect URL. Users
