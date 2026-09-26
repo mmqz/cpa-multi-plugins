@@ -376,7 +376,6 @@ func mimoRegistration() registration {
 				{Name: "x_client_version", Type: pluginapi.ConfigFieldTypeString, Description: "X-Client-Version header value for the cookie lane (desktop parity, default 26.922.222056)."},
 				{Name: "platform_url", Type: pluginapi.ConfigFieldTypeString, Description: "OAuth platform base for NEW sk-lane logins (default https://platform.xiaomimimo.com; the CLI's MIMO_PLATFORM_URL equivalent)."},
 				{Name: "cookie_paths", Type: pluginapi.ConfigFieldTypeString, Description: "Optional comma-separated extra Chromium 'Cookies' file paths for desktop SSO adoption (auto-detect covers standard installs of both 'Xiaomi MiMo AI' and 'Xiaomi MiMo')."},
-				{Name: "login_base_url", Type: pluginapi.ConfigFieldTypeString, Description: "Browser-facing CPA base (e.g. https://cpa.example.com) used to build the ABSOLUTE login_gate URL for management panels hosted on a different origin; empty keeps the relative URL (self-hosted same-origin panels)."},
 			},
 		},
 		Capabilities: registrationCapability{
@@ -399,7 +398,7 @@ func mimoRegistration() registration {
 // must stay in lockstep with the VERSION file — the same drift class that
 // shipped trae v0.12.86 self-reporting 0.12.56 (repo lesson 2026-09-23).
 // `make build` may still override it via -X (git describe).
-var version = "0.2.8"
+var version = "0.2.9"
 
 // -----------------------------------------------------------------------------
 // Envelope helpers

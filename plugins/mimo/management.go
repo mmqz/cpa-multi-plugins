@@ -41,20 +41,18 @@ type managementRegistrationResponse struct {
 	Resources []resourceRoute   `json:"resources,omitempty"`
 }
 
-// mimoManagementRegistration advertises the login surfaces. v0.2.7: the
-// oauth_submit resource carries a Menu label — the management panel renders
-// labeled plugin resources as sidebar navigation entries (menu →
-// /plugin-pages/<id>/<idx> iframe on the CPA origin via apiBase-prefixed
-// iframe src), giving remote/Docker users a DISCOVERABLE registration
-// fallback instead of a URL they must know. v0.2.8: the entry is renamed and
-// the page is state-aware (live guided flow when a login is under way) — it
-// is now the cross-origin-safe login entry, since the panel's OAuth dialog
-// opens StartLogin's URL raw and 404s on hosted panels whose origin is not
-// the CPA origin.
+// mimoManagementRegistration advertises the login surfaces. The oauth_submit
+// resource carries a Menu label ("Mimo", the user's explicit choice) — the
+// management panel renders labeled plugin resources as sidebar navigation
+// entries (menu → /plugin-pages/<id>/<idx> iframe on the CPA origin via
+// apiBase-prefixed iframe src), giving remote/Docker users a DISCOVERABLE
+// paste fallback. Since v0.2.9 StartLogin passes the platform authorize URL
+// straight through, this page is the recovery surface for dead localhost
+// redirects, no longer the login entry itself.
 func mimoManagementRegistration() managementRegistrationResponse {
 	return managementRegistrationResponse{
 		Resources: []resourceRoute{
-			{Path: "/oauth_submit", Menu: "OAuth 登录 / 兜底粘贴", Description: "MiMo OAuth login guide + paste-to-complete fallback: with a pending login this page IS the guided registration flow; idle it accepts ?cb_url=<url-encoded failed redirect URL> to finish a login whose localhost redirect failed."},
+			{Path: "/oauth_submit", Menu: "Mimo", Description: "MiMo login fallback: paste the full failed redirect URL (http://localhost:…/auth?u=…) here — or GET ?cb_url=<url-encoded> — to finish a login whose localhost redirect never landed (remote/Docker hosts). Shows the live authorize link while a login is pending."},
 		},
 	}
 }
@@ -89,10 +87,10 @@ func mgmtHTMLResponse(body []byte) pluginapi.ManagementResponse {
 	return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: h, Body: body}
 }
 
-const mimoSubmitFormHTML = `<p>本页是 MiMo 登录的兜底入口：在 CPA 点「登录」后约 5 秒内，本页会自动变为登录引导页（含「前往小米登录」按钮）。手动粘贴兜底：</p>
+const mimoSubmitFormHTML = `<p>本页是 MiMo 登录的兜底粘贴页：在 CPA 点「登录」后约 5 秒内，本页会自动变为引导页（含「重新打开小米授权页」按钮）。手动粘贴兜底：</p>
 <ol>
-<li>在 CPA 点「登录」，按引导页完成小米账号授权（本页一直开着时无需重复）；</li>
-<li>浏览器最后会跳转 <code>http://localhost:…/auth?u=…</code> 并打开失败——复制地址栏<b>完整链接</b>（登录 6 分钟内有效）；</li>
+<li>在 CPA 点「登录」，浏览器直接打开小米 OAuth 授权页并完成账号授权；</li>
+<li>浏览器最后会跳转 <code>http://localhost:…/auth?u=…</code> 并打开失败（远程 / Docker 部署常态）——复制地址栏<b>完整链接</b>（登录 6 分钟内有效）；</li>
 <li>粘贴到下面并提交。</li>
 </ol>
 <form method="GET" action=""><input name="cb_url" style="width:78%" placeholder="http://localhost:…/auth?u=…"> <button>完成登录</button></form>`
@@ -148,16 +146,17 @@ func mimoPendingLogin() *loginCtx {
 }
 
 // mimoGateLiveBody renders the guided flow for a live pending login: the
-// step list, the authorize link (step one), the auth record name and the
-// shared paste box. Shared by the stateful gate page (v0.2.7) and the
-// state-aware oauth_submit menu page (v0.2.8).
+// step list, a redundant authorize link (normally clicking Login in CPA
+// already opened the real platform OAuth page — v0.2.9 passthrough), the
+// auth record name and the shared paste box. Shared by the stateful gate
+// page (v0.2.7) and the state-aware oauth_submit menu page (v0.2.8).
 func mimoGateLiveBody(lc *loginCtx) string {
 	return fmt.Sprintf(`<ol>
-<li>点击下方按钮，在<strong>新标签页</strong>打开小米授权页并完成登录授权；本页请保持打开。</li>
+<li>在 CPA 点「登录」后浏览器会<strong>直接打开小米 OAuth 授权页</strong>（通常无需再点下面的按钮）；本页请保持打开。</li>
 <li>授权后浏览器会跳转 <code>http://localhost:…/auth?u=…</code>：本机部署会自动完成；远程 / Docker 部署该页打不开——复制地址栏<b>完整链接</b>（本次登录 6 分钟内有效）。</li>
 <li>把完整链接粘贴到下面并点「完成登录」，然后回到 CPA 登录窗口等待自动完成。</li>
 </ol>
-<p><a href="%s" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#ff6900;color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none;font-weight:600">前往小米登录</a></p>
+<p><a href="%s" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#ff6900;color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none;font-weight:600">重新打开小米授权页</a></p>
 <p>授权记录名 <code>%s</code></p>`,
 		html.EscapeString(lc.authorizeURL), html.EscapeString(lc.keyName)) + mimoGateFormHTML
 }

@@ -28,17 +28,17 @@ from official sources and documented in
 
 ## 登录（sk lane）
 
-`auth.login.start` 返回**插件自带登录引导页** URL `/v0/resource/plugins/mimo/login_gate?state=…`（v0.2.8）——默认相对路径，按管理面板自己的源解析，仅当面板与 CPA 同源（自托管面板）时可达；**托管面板（跨源）的 OAuth 对话框原样 `window.open` 该相对路径会 404**，这类部署在插件配置里把 `login_base_url` 设为 CPA 对外地址（如 `https://cpa.example.com`），登录链接即变为绝对 URL。引导页 = 注册面板：
+`auth.login.start` **直通小米 OAuth 授权页** URL `https://platform.xiaomimimo.com/authorize?pk=…&redirect_uri=…&key_name=…`（v0.2.9，zcode 0.1.3 同款直通；URL 为平台站绝对地址，任何面板源下 `window.open` 都直达真登录页）：
 
-1. 「前往小米登录」新标签页打开 platform 授权页（授权 URL 存于登录会话）；
+1. 点「登录」→ 浏览器直接打开平台 OAuth 授权页，完成小米账号授权；
 2. 授权后平台 302 回 `http://localhost:<port>/auth?u=<密文>`——本机部署直达回环服务器自动完成；远程/Docker 部署该页打不开，复制地址栏完整链接；
-3. 粘贴到引导页输入框提交（同源转发 `/oauth_submit`）。
+3. 到插件菜单「Mimo」页粘贴提交（同源转发 `/oauth_submit`）。
 
 解密与官方 CLI 同款：`base64url(ephemeralPub(32B) ‖ nonce(12B) ‖ ct ‖ tag(16B))`，
 AES-256-GCM，key = `SHA256(ECDH(X25519))` → `{sk, uid, url}`。sk 为永久凭据，
-AuthRefresh 仅回显元数据。登录 TTL 6 分钟；**单活策略**：再次点「登录」会关闭旧回环服务器并作废旧引导页。
+AuthRefresh 仅回显元数据。登录 TTL 6 分钟；**单活策略**：再次点「登录」会关闭旧回环服务器并作废旧会话。
 
-跨源安全入口：插件菜单「OAuth 登录 / 兜底粘贴」（`/v0/resource/plugins/mimo/oauth_submit`，资源路由免管理鉴权；面板经 apiBase 前缀 iframe 渲染，任何部署形态都可达）。v0.2.8 起该页**状态感知**：有进行中的登录时自动呈现完整引导流（「前往小米登录」按钮 + 粘贴框），空闲时显示粘贴指引并每 5 秒自动刷新——在 CPA 点「登录」后无需任何额外操作，本页即变为引导页。直开时也支持 `GET ?cb_url=<完整失败链接>`。
+兜底入口：插件菜单「Mimo」（`/v0/resource/plugins/mimo/oauth_submit`，资源路由免管理鉴权；面板经 apiBase 前缀 iframe 渲染，任何部署形态都可达）。v0.2.8 起该页**状态感知**：有进行中的登录时显示冗余授权按钮 + 粘贴框，空闲时显示粘贴指引并每 5 秒自动刷新。直开时也支持 `GET ?cb_url=<完整失败链接>`。
 
 ## 桌面会话收养（cookie lane）
 

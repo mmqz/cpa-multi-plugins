@@ -50,15 +50,19 @@ func startTestLogin(t *testing.T) (state string) {
 	if start.State == "" || start.URL == "" {
 		t.Fatalf("start missing state/url: %+v", start)
 	}
-	// v0.2.7/0.2.8: with no login_base_url configured, StartLogin returns
-	// the RELATIVE gate URL (the panel opens it against the CPA origin);
-	// the state rides the query.
-	wantPrefix := "/v0/resource/plugins/mimo/login_gate?state="
-	if !strings.HasPrefix(start.URL, wantPrefix) {
-		t.Fatalf("start URL = %q, want prefix %q", start.URL, wantPrefix)
+	// v0.2.9 passthrough: the URL IS the real platform authorize page
+	// (absolute — opens from any panel origin), identical to the loginCtx's
+	// stored authorizeURL the menu page links as the redundant entry.
+	v, ok := loginStates.Load(start.State)
+	if !ok {
+		t.Fatal("pending login not registered")
 	}
-	if got := strings.TrimPrefix(start.URL, wantPrefix); got != url.QueryEscape(start.State) {
-		t.Fatalf("start URL state = %q, want %q", got, url.QueryEscape(start.State))
+	lc := v.(*loginCtx)
+	if start.URL != lc.authorizeURL {
+		t.Fatalf("start URL = %q, want stored authorizeURL %q", start.URL, lc.authorizeURL)
+	}
+	if !strings.HasPrefix(start.URL, loadedPlatformURL()+"/authorize?") {
+		t.Fatalf("start URL = %q, want authorize page under %q", start.URL, loadedPlatformURL())
 	}
 	return start.State
 }
@@ -135,7 +139,7 @@ func TestMimoLoginGateRendersLiveFlow(t *testing.T) {
 	if !strings.Contains(body, `href="`+html.EscapeString(lc.authorizeURL)+`"`) {
 		t.Fatalf("gate page must link the stored authorize URL, got: %s", body)
 	}
-	for _, want := range []string{"前往小米登录", `action="oauth_submit"`, `name="cb_url"`, html.EscapeString(lc.keyName)} {
+	for _, want := range []string{"重新打开小米授权页", `action="oauth_submit"`, `name="cb_url"`, html.EscapeString(lc.keyName)} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("gate page missing %q, got: %s", want, body)
 		}
@@ -164,7 +168,7 @@ func TestMimoLoginGateStaleAndRotates(t *testing.T) {
 	if body := gatePage(t, first); !strings.Contains(body, "不存在或已失效") {
 		t.Fatalf("first gate page must flip to stale, got: %s", body)
 	}
-	if body := gatePage(t, second); !strings.Contains(body, "前往小米登录") {
+	if body := gatePage(t, second); !strings.Contains(body, "重新打开小米授权页") {
 		t.Fatalf("second gate page must be live, got: %s", body)
 	}
 }
@@ -278,7 +282,7 @@ func TestMimoOAuthSubmitShowsPendingLogin(t *testing.T) {
 	}
 	lc := v.(*loginCtx)
 	body := submitPaste(t, "")
-	if !strings.Contains(body, "前往小米登录") || !strings.Contains(body, html.EscapeString(lc.authorizeURL)) {
+	if !strings.Contains(body, "重新打开小米授权页") || !strings.Contains(body, html.EscapeString(lc.authorizeURL)) {
 		t.Fatalf("menu page must render the live flow, got: %s", body)
 	}
 	if strings.Contains(body, `http-equiv="refresh"`) {
@@ -288,35 +292,6 @@ func TestMimoOAuthSubmitShowsPendingLogin(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("live flow page missing %q, got: %s", want, body)
 		}
-	}
-}
-
-func TestStartLoginHonorsLoginBaseURL(t *testing.T) {
-	clearPendingLogins(t)
-	loginBaseURLMu.Lock()
-	loginBaseURL = "https://cpa.example.com//" // trailing slashes must be stripped
-	loginBaseURLMu.Unlock()
-	t.Cleanup(func() {
-		loginBaseURLMu.Lock()
-		loginBaseURL = ""
-		loginBaseURLMu.Unlock()
-	})
-	raw, err := handleStartLogin(nil)
-	if err != nil {
-		t.Fatalf("handleStartLogin: %v", err)
-	}
-	var env envelope
-	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
-		t.Fatalf("start envelope: err=%v ok=%v", err, env.OK)
-	}
-	var start pluginapi.AuthLoginStartResponse
-	if err := json.Unmarshal(env.Result, &start); err != nil {
-		t.Fatalf("start result: %v", err)
-	}
-	// Hosted-panel case: the ABSOLUTE gate URL the OAuth dialog can open.
-	want := "https://cpa.example.com/v0/resource/plugins/mimo/login_gate?state=" + url.QueryEscape(start.State)
-	if start.URL != want {
-		t.Fatalf("start URL = %q, want %q", start.URL, want)
 	}
 }
 

@@ -232,9 +232,13 @@ func buildAuthorizeURL(platform, publicKeyB64, redirectURI, keyName string) stri
 // -----------------------------------------------------------------------------
 
 // handleStartLogin implements AuthProvider.StartLogin: generate the key pair,
-// start the loopback callback server, and hand the login_gate panel URL to the
-// host (v0.2.7; the raw platform authorize URL rides the stored loginCtx —
-// the gate page links it as step one).
+// start the loopback callback server, and hand the REAL platform authorize
+// URL to the host (v0.2.9 passthrough, zcode 0.1.3 precedent — the host's
+// ServePluginAuthURL passes resp.URL verbatim and only validates the state).
+// v0.2.7-0.2.8 returned the plugin's own login_gate page instead; the user
+// verdict was unambiguous: clicking Login must surface the actual mimo OAuth
+// authorize link, not an intermediate panel page. The authorize URL still
+// rides the stored loginCtx (the menu page links it as a redundant entry).
 func handleStartLogin(raw []byte) ([]byte, error) {
 	_ = raw // AuthLoginStartRequest carries provider/host; nothing needed here.
 	platform := loadedPlatformURL()
@@ -271,31 +275,23 @@ func handleStartLogin(raw []byte) ([]byte, error) {
 		startedAt:    now.UnixNano(),
 		authorizeURL: authorizeURL,
 	})
-	// v0.2.8: the panel's OAuth dialog opens this URL verbatim (window.open)
-	// with NO apiBase prefixing (mc-ui OAuthPage.tsx) — a RELATIVE path only
-	// resolves when the panel origin IS the CPA origin (self-hosted UI).
-	// Hosted panels on a different origin 404 the relative path; deployments
-	// configure login_base_url to receive an ABSOLUTE gate URL, and the
-	// sidebar menu page (apiBase-prefixed iframe on the CPA origin) stays
-	// the zero-config cross-origin entry. The gate page carries the real
-	// authorize URL (step one), the localhost-redirect explainer and the
-	// paste box: a self-contained registration surface for remote/Docker
-	// hosts (user report 2026-09-26 — there was nowhere to submit the failed
-	// callback URL; the host's own paste box 400s on mimo's state-less
-	// callback shape and its callback file has no plugin consumer).
-	gateURL := "/v0/resource/plugins/mimo/login_gate?state=" + url.QueryEscape(state)
-	if base := loadedLoginBaseURL(); base != "" {
-		gateURL = base + gateURL
-	}
+	// The authorize URL is ABSOLUTE (platform origin), so the panel's
+	// window.open lands on the real mimo OAuth page from any panel origin —
+	// no apiBase prefixing needed, no cross-origin caveat. Local
+	// deployments complete via the loopback redirect automatically;
+	// remote/Docker hosts hit the dead localhost page and fall back to the
+	// "Mimo" menu page's paste box (the host's own paste UI 400s on mimo's
+	// state-less callback shape and its callback file has no plugin
+	// consumer — user report 2026-09-26).
 	return okEnvelope(pluginapi.AuthLoginStartResponse{
 		Provider:  providerName,
-		URL:       gateURL,
+		URL:       authorizeURL,
 		State:     state,
 		ExpiresAt: now.Add(loginTTL).UTC(),
 		Metadata: map[string]any{
 			// v0.2.5 carried the paste fallback; v0.2.7 turns the flow itself
 			// into the guided gate page, so the prompt just points at it.
-			"prompt": "已发起 MiMo 登录（授权记录名 " + keyName + "）：引导页含「前往小米登录」按钮；本机部署回调直达自动完成，远程/Docker 部署按引导页提示复制失败页完整链接（http://localhost:…/auth?u=…）并粘贴提交。若自动打开的页面空白或 404（管理面板与 CPA 不同源），请改用管理面板左侧菜单「OAuth 登录 / 兜底粘贴」打开引导页。",
+			"prompt": "已打开小米 OAuth 授权页（授权记录名 " + keyName + "）：完成账号授权后本机部署自动完成；远程/Docker 部署授权后浏览器会跳到打不开的 http://localhost:…/auth?u=… 页——复制地址栏完整链接（6 分钟内有效），到管理面板左侧菜单「Mimo」页粘贴提交。",
 		},
 	})
 }
