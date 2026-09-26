@@ -41,13 +41,15 @@ type managementRegistrationResponse struct {
 	Resources []resourceRoute   `json:"resources,omitempty"`
 }
 
-// mimoManagementRegistration advertises the paste-to-complete resource. Menu
-// stays empty on purpose: the page is reachable by URL only — the login
-// prompt (and the failed-redirect instructions) link it.
+// mimoManagementRegistration advertises the login surfaces. v0.2.7: the
+// oauth_submit resource carries a Menu label — the management panel renders
+// labeled plugin resources as sidebar navigation entries (menu →
+// /plugin-pages/<id>/<idx> iframe), giving remote/Docker users a DISCOVERABLE
+// registration fallback instead of a URL they must know.
 func mimoManagementRegistration() managementRegistrationResponse {
 	return managementRegistrationResponse{
 		Resources: []resourceRoute{
-			{Path: "/oauth_submit", Description: "MiMo paste-to-complete fallback: open this page (or GET ?cb_url=<url-encoded failed redirect URL>) to finish a login whose localhost redirect failed."},
+			{Path: "/oauth_submit", Menu: "登录兜底粘贴", Description: "MiMo paste-to-complete fallback: open this page (or GET ?cb_url=<url-encoded failed redirect URL>) to finish a login whose localhost redirect failed."},
 		},
 	}
 }
@@ -62,6 +64,9 @@ func handleMimoManagement(raw []byte) ([]byte, error) {
 	resPrefix := "/v0/resource/plugins/" + providerName
 	if (req.Method == http.MethodGet || req.Method == http.MethodPost) && path == resPrefix+"/oauth_submit" {
 		return okEnvelope(mgmtHTMLResponse(handleMimoOAuthSubmit(req)))
+	}
+	if (req.Method == http.MethodGet || req.Method == http.MethodPost) && path == resPrefix+"/login_gate" {
+		return okEnvelope(mgmtHTMLResponse(handleMimoLoginGate(req)))
 	}
 	return okEnvelope(mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": "not found: " + path}))
 }
@@ -86,6 +91,45 @@ const mimoSubmitFormHTML = `<p>远程部署时浏览器无法跳回本机完成 
 <li>粘贴到下面并提交。</li>
 </ol>
 <form method="GET" action=""><input name="cb_url" style="width:78%" placeholder="http://localhost:…/auth?u=…"> <button>完成登录</button></form>`
+
+// mimoGateFormHTML is the paste box shared by the gate page variants; the
+// relative action resolves against /v0/resource/plugins/mimo/login_gate →
+// /v0/resource/plugins/mimo/oauth_submit (same origin the panel serves from).
+const mimoGateFormHTML = `<form method="GET" action="oauth_submit"><input name="cb_url" style="width:78%" placeholder="http://localhost:…/auth?u=…"> <button>完成登录</button></form>`
+
+// mimoGateStaleHTML renders when the requested state is missing/expired:
+// every login start rotates the state (v0.2.7 single-active policy), so old
+// gate tabs must not look live.
+const mimoGateStaleHTML = `<p>该登录会话不存在或已失效——每次在 CPA 点「登录」都会生成新会话，旧引导页随之作废。</p>
+<p>请回到 CPA 重新发起 MiMo 登录并使用新打开的引导页；若手头已有失败页地址栏的完整链接（<code>http://localhost:…/auth?u=…</code>），且登录是最近 6 分钟内发起的，可直接在下方粘贴提交。</p>` + mimoGateFormHTML
+
+// handleMimoLoginGate serves GET /v0/resource/plugins/mimo/login_gate — the
+// registration panel (v0.2.7). StartLogin now RETURNS this page's URL
+// (relative → the panel opens it against the CPA origin), so the login flow
+// itself lands here: step 1 opens the platform authorize page in a new tab,
+// step 2 explains the localhost redirect, step 3 is the paste-to-complete box.
+// This closes the Docker/remote gap where the callback can never arrive and
+// there was no visible place to submit it (user report 2026-09-26).
+func handleMimoLoginGate(req pluginapi.ManagementRequest) []byte {
+	state := strings.TrimSpace(req.Query.Get("state"))
+	if state != "" {
+		if v, ok := loginStates.Load(state); ok {
+			lc := v.(*loginCtx)
+			if time.Now().Before(lc.expires) && lc.authorizeURL != "" {
+				body := fmt.Sprintf(`<ol>
+<li>点击下方按钮，在<strong>新标签页</strong>打开小米授权页并完成登录授权；本页请保持打开。</li>
+<li>授权后浏览器会跳转 <code>http://localhost:…/auth?u=…</code>：本机部署会自动完成；远程 / Docker 部署该页打不开——复制地址栏<b>完整链接</b>（本次登录 6 分钟内有效）。</li>
+<li>把完整链接粘贴到下面并点「完成登录」，然后回到 CPA 登录窗口等待自动完成。</li>
+</ol>
+<p><a href="%s" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#ff6900;color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none;font-weight:600">前往小米登录</a></p>
+<p>授权记录名 <code>%s</code></p>`,
+					html.EscapeString(lc.authorizeURL), html.EscapeString(lc.keyName)) + mimoGateFormHTML
+				return mimoSubmitPage("MiMo 登录引导", body)
+			}
+		}
+	}
+	return mimoSubmitPage("MiMo 登录引导", mimoGateStaleHTML)
+}
 
 // handleMimoOAuthSubmit serves GET/POST /v0/resource/plugins/mimo/oauth_submit.
 // GET ?cb_url=<url-encoded failed redirect URL> (or the page form, which

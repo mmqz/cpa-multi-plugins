@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"html"
 	"net/http"
 	"net/url"
 	"strings"
@@ -34,6 +35,15 @@ func startTestLogin(t *testing.T) (state string) {
 	}
 	if start.State == "" || start.URL == "" {
 		t.Fatalf("start missing state/url: %+v", start)
+	}
+	// v0.2.7: StartLogin returns the RELATIVE gate URL (the panel opens it
+	// against the CPA origin); the state rides the query.
+	wantPrefix := "/v0/resource/plugins/mimo/login_gate?state="
+	if !strings.HasPrefix(start.URL, wantPrefix) {
+		t.Fatalf("start URL = %q, want prefix %q", start.URL, wantPrefix)
+	}
+	if got := strings.TrimPrefix(start.URL, wantPrefix); got != url.QueryEscape(start.State) {
+		t.Fatalf("start URL state = %q, want %q", got, url.QueryEscape(start.State))
 	}
 	return start.State
 }
@@ -70,6 +80,78 @@ func testJSON(t *testing.T, v any) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return raw
+}
+
+func gatePage(t *testing.T, state string) string {
+	t.Helper()
+	q := url.Values{}
+	if state != "" {
+		q.Set("state", state)
+	}
+	raw, err := handleMimoManagement(testJSON(t, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/mimo/login_gate",
+		Query:  q,
+	}))
+	if err != nil {
+		t.Fatalf("login_gate: %v", err)
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
+		t.Fatalf("gate envelope: err=%v ok=%v", err, env.OK)
+	}
+	var resp pluginapi.ManagementResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatalf("gate result: %v", err)
+	}
+	return string(resp.Body)
+}
+
+func TestMimoLoginGateRendersLiveFlow(t *testing.T) {
+	state := startTestLogin(t)
+	v, ok := loginStates.Load(state)
+	if !ok {
+		t.Fatal("pending login not registered")
+	}
+	lc := v.(*loginCtx)
+	body := gatePage(t, state)
+	// The live gate page links the stored authorize URL and carries the paste
+	// box with the RELATIVE oauth_submit action (resolves on the CPA origin).
+	if !strings.Contains(body, `href="`+html.EscapeString(lc.authorizeURL)+`"`) {
+		t.Fatalf("gate page must link the stored authorize URL, got: %s", body)
+	}
+	for _, want := range []string{"前往小米登录", `action="oauth_submit"`, `name="cb_url"`, html.EscapeString(lc.keyName)} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("gate page missing %q, got: %s", want, body)
+		}
+	}
+}
+
+func TestMimoLoginGateStaleAndRotates(t *testing.T) {
+	first := startTestLogin(t)
+	// Missing / no state → stale notice with the paste box.
+	for _, s := range []string{"", "mimo-gone"} {
+		if body := gatePage(t, s); !strings.Contains(body, "不存在或已失效") || !strings.Contains(body, `name="cb_url"`) {
+			t.Fatalf("state %q must render the stale notice with paste box, got: %s", s, body)
+		}
+	}
+	// v0.2.7 single-active policy: a second start SHUTS DOWN the first flow
+	// (loopback server closed) and the first gate page flips to the stale
+	// notice — stale authorize tabs can never complete against an unpollled
+	// flow.
+	second := startTestLogin(t)
+	if first == second {
+		t.Fatal("states must rotate")
+	}
+	if _, ok := loginStates.Load(first); ok {
+		t.Fatal("first flow must be dropped after re-login")
+	}
+	if body := gatePage(t, first); !strings.Contains(body, "不存在或已失效") {
+		t.Fatalf("first gate page must flip to stale, got: %s", body)
+	}
+	if body := gatePage(t, second); !strings.Contains(body, "前往小米登录") {
+		t.Fatalf("second gate page must be live, got: %s", body)
+	}
 }
 
 func TestMimoOAuthSubmitCompletesPendingLogin(t *testing.T) {

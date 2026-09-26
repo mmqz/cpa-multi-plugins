@@ -232,7 +232,9 @@ func buildAuthorizeURL(platform, publicKeyB64, redirectURI, keyName string) stri
 // -----------------------------------------------------------------------------
 
 // handleStartLogin implements AuthProvider.StartLogin: generate the key pair,
-// start the loopback callback server, and hand the authorize URL to the host.
+// start the loopback callback server, and hand the login_gate panel URL to the
+// host (v0.2.7; the raw platform authorize URL rides the stored loginCtx —
+// the gate page links it as step one).
 func handleStartLogin(raw []byte) ([]byte, error) {
 	_ = raw // AuthLoginStartRequest carries provider/host; nothing needed here.
 	platform := loadedPlatformURL()
@@ -248,25 +250,45 @@ func handleStartLogin(raw []byte) ([]byte, error) {
 	}
 	now := time.Now()
 	state := fmt.Sprintf("mimo-%d", now.UnixNano())
+	authorizeURL := buildAuthorizeURL(platform, pkB64, ls.redirectURI(), keyName)
+	// v0.2.7 single-active policy: a fresh start shuts down every still-pending
+	// flow and drops their states, so stale authorize tabs can never decrypt
+	// against a flow the host is no longer polling (their loopback servers die
+	// with them and their gate pages flip to the stale notice).
+	loginStates.Range(func(key, value any) bool {
+		if lc, ok := value.(*loginCtx); ok {
+			lc.shutdown()
+		}
+		loginStates.Delete(key)
+		return true
+	})
 	loginStates.Store(state, &loginCtx{
-		keyName:   keyName,
-		privKey:   privRaw,
-		callback:  ls,
-		result:    result,
-		expires:   now.Add(loginTTL),
-		startedAt: now.UnixNano(),
+		keyName:      keyName,
+		privKey:      privRaw,
+		callback:     ls,
+		result:       result,
+		expires:      now.Add(loginTTL),
+		startedAt:    now.UnixNano(),
+		authorizeURL: authorizeURL,
 	})
 	return okEnvelope(pluginapi.AuthLoginStartResponse{
-		Provider:  providerName,
-		URL:       buildAuthorizeURL(platform, pkB64, ls.redirectURI(), keyName),
+		Provider: providerName,
+		// v0.2.7: the host panel opens this URL verbatim (window.open), so a
+		// RELATIVE path resolves against the panel origin — which is the CPA
+		// server itself in every supported deployment. The gate page carries
+		// the real authorize URL (step one), the localhost-redirect explainer
+		// and the paste box: a self-contained registration surface for
+		// remote/Docker hosts (user report 2026-09-26 — there was nowhere to
+		// submit the failed callback URL; the host's own paste box 400s on
+		// mimo's state-less callback shape and its callback file has no
+		// plugin consumer).
+		URL:       "/v0/resource/plugins/mimo/login_gate?state=" + url.QueryEscape(state),
 		State:     state,
 		ExpiresAt: now.Add(loginTTL).UTC(),
 		Metadata: map[string]any{
-			// v0.2.5: the prompt now carries the paste-to-complete
-			// fallback — remote deployments cannot receive the
-			// localhost redirect at all, and without this hint the
-			// login just pends until TTL (issue report 2026-09-26).
-			"prompt": "在打开的页面中登录小米账号并授权 MiMo Code 密钥（回调直达本机，完成后自动继续）。授权记录名为 " + keyName + "。远程部署浏览器跳不回本机时：复制失败页地址栏的完整链接（http://localhost:…/auth?u=…），打开 <宿主地址>/v0/resource/plugins/mimo/oauth_submit 粘贴提交即可完成登录。",
+			// v0.2.5 carried the paste fallback; v0.2.7 turns the flow itself
+			// into the guided gate page, so the prompt just points at it.
+			"prompt": "已打开 MiMo 登录引导页：点击「前往小米登录」完成账号授权；本机部署回调直达自动完成，远程/Docker 部署按引导页提示复制失败页完整链接（http://localhost:…/auth?u=…）并粘贴提交。授权记录名为 " + keyName + "。",
 		},
 	})
 }

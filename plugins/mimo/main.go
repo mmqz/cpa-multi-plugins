@@ -132,12 +132,13 @@ const (
 // callback server the platform redirects to (the CLI does the same in-process
 // via its `authorize` hook).
 type loginCtx struct {
-	keyName   string
-	privKey   []byte // raw X25519 private scalar (32 bytes)
-	callback  *loopbackServer
-	result    chan oauthResult
-	expires   time.Time
-	startedAt int64
+	keyName      string
+	privKey      []byte // raw X25519 private scalar (32 bytes)
+	callback     *loopbackServer
+	result       chan oauthResult
+	expires      time.Time
+	startedAt    int64
+	authorizeURL string // platform authorize page (v0.2.7: carried by the login_gate panel page)
 }
 
 // oauthResult is the decrypted platform callback payload.
@@ -397,7 +398,7 @@ func mimoRegistration() registration {
 // must stay in lockstep with the VERSION file — the same drift class that
 // shipped trae v0.12.86 self-reporting 0.12.56 (repo lesson 2026-09-23).
 // `make build` may still override it via -X (git describe).
-var version = "0.2.6"
+var version = "0.2.7"
 
 // -----------------------------------------------------------------------------
 // Envelope helpers
