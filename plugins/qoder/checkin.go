@@ -461,10 +461,24 @@ func checkinLockFor(authIndex string) *sync.Mutex {
 // .../campaigns/{id}/claim claims one (campaign.go claimCampaignByID).
 // handleClaimPro now claims rows that look like the Pro upgrade pack and,
 // when none is present, answers with a diagnostic listing instead of a bare
-// http error. Upstream gates campaign rows behind the client session (#27):
-// an account must open the activity once inside the official client before
-// its rows appear — the most likely reason a healthy account sees no Pro row
-// at all.
+// http error.
+//
+// v0.8.36 (machine identity, cross-verified against the qoder2api-hub
+// capture): the "open the activity once inside the official client" gate
+// is NOT a session sync — the campaigns surface filters DEVICE-TARGETED
+// rows (daily 100 Credits, the +1800 Pro pack) on the Cosy-Machine*
+// request headers, and the real values come from the official client's
+// native bridge <install>/resources/umid/runtime-info.exe
+// (`prod --account-stdin` → machineToken/machineType/machineCode/vmInfo).
+// A derived/absent identity gets HTTP 200 with those rows silently
+// missing — hub live observation: switching to the native identity made
+// the device rows appear immediately. machine_identity.go now attaches
+// the real identity when the official client is installed (30min cache,
+// machine-level), falls back to the hub-parity derivation otherwise, and
+// the claimPro diagnostics say which one ran (plus the VM exclusion the
+// bridge's vmInfo reveals). The +1800 face value can also hide behind a
+// VIEW_DETAILS row with no listed benefit — the read-only
+// GET .../campaigns/{id}/reward probe reveals it before claiming.
 
 // campaignLooksLikeProUpgrade reports whether a campaign row looks like the
 // one-time Pro upgrade pack. Upstream never published the exact key (live
@@ -529,12 +543,66 @@ func claimProViaCampaigns(sa *storedAuth) (map[string]any, error) {
                 out["message"] = "Pro 升级包已领取过（活动行状态 CLAIMED）"
                 return out, nil
         }
+        // v0.8.36: the Pro pack can sit in the list as a row the name/benefit
+        // matcher cannot see — live shape: actionType=VIEW_DETAILS, CLAIMABLE,
+        // NO listed benefit (the real face value lives behind the activity
+        // page). The page reads it via the read-only
+        // GET /sash/api/v1/me/campaigns/{id}/reward (hub capture), so probe
+        // every unmatched CLAIMABLE row and claim ONLY the one whose revealed
+        // reward is the verified big one-shot CREDITS pack (+1800). Read-only
+        // probes never claim anything by themselves.
+        const (
+                rewardProbeCap    = 5
+                proPackMinCredits = 1000
+        )
+        probes := make([]string, 0, rewardProbeCap)
+        for i := range status.Campaigns {
+                if len(probes) >= rewardProbeCap {
+                        break
+                }
+                c := &status.Campaigns[i]
+                if !strings.EqualFold(c.ClaimStatus, "CLAIMABLE") || campaignLooksLikeProUpgrade(c) {
+                        continue
+                }
+                body, rerr := fetchCampaignReward(sa, c.CampaignID)
+                if rerr != nil {
+                        probes = append(probes, c.CampaignKey+"(面值不可读)")
+                        continue
+                }
+                kind, amount := rewardBenefit(body)
+                if strings.EqualFold(kind, "CREDITS") && amount >= proPackMinCredits {
+                        res, cerr := claimCampaignByID(sa, c)
+                        if cerr != nil {
+                                return nil, cerr
+                        }
+                        if success, _ := res["success"].(bool); success {
+                                // The list row carried no benefit — report the reward's
+                                // own face value instead of a zero.
+                                if rc, _ := res["rewardCredits"].(float64); rc == 0 {
+                                        res["rewardCredits"] = float64(amount)
+                                }
+                                return res, nil
+                        }
+                        // Actionable non-success shapes (ALREADY_CLAIMED / BLOCKED)
+                        // propagate as-is; anything else keeps scanning.
+                        if _, ok := res["result"]; ok {
+                                return res, nil
+                        }
+                        probes = append(probes, fmt.Sprintf("%s(reward=+%d 未到账)", c.CampaignKey, amount))
+                        continue
+                }
+                if amount > 0 {
+                        probes = append(probes, fmt.Sprintf("%s(reward=+%d %s)", c.CampaignKey, amount, kind))
+                } else {
+                        probes = append(probes, c.CampaignKey+"(reward 无面值)")
+                }
+        }
         // No pro-looking row at all. Diagnose from the actual response instead
         // of guessing an endpoint: list what the server returned and point at
         // the client-session gate.
         out["reason"] = "no_pro_row"
         if len(status.Campaigns) == 0 {
-                out["message"] = "此账号活动列表为空——活动资格挂官方客户端会话，请先在官方客户端「福利中心」打开一次活动，再回来领取"
+                out["message"] = "此账号活动列表为空——活动资格挂官方客户端会话，请先在官方客户端「福利中心」打开一次活动，再回来领取" + machineIdentityHint(sa)
                 return out, nil
         }
         keys := make([]string, 0, len(status.Campaigns))
@@ -556,6 +624,12 @@ func claimProViaCampaigns(sa *storedAuth) (map[string]any, error) {
                 keys = append(keys, k+")")
         }
         out["message"] = "此账号活动列表暂无 Pro 升级项（现有：" + strings.Join(keys, "、") + "）。若刚注册，请先在官方客户端打开一次活动页同步资格后再试"
+        msg, _ := out["message"].(string)
+        if len(probes) > 0 {
+                msg += "；面值核对：" + strings.Join(probes, "、")
+        }
+        msg += machineIdentityHint(sa)
+        out["message"] = msg
         return out, nil
 }
 

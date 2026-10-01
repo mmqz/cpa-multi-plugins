@@ -11,7 +11,7 @@
 | 能力 | 说明 |
 |---|---|
 | **双登录方式** | ① OAuth 设备授权（PKCE，浏览器授权，dt- 30 天 + drt- 1 年自动旋转）② PAT 导入（pt-，长期有效兜底）——两家族可共存于同一 auth 文件 |
-| **领取Pro** | 面板手动触发（每账号按钮）。v0.8.34：走 campaigns 通道领取 Pro 升级包——上游官方客户端（CN v0.4.3，sha256 a796a175…05084f5）二进制中不存在 `/me/pro-upgrade/*` 端点（v0.8.18-0.8.33 的 eligibility→claim 为误判，404 即"无此路由"）；资格即 campaigns 行的 claimStatus，活动行挂官方客户端会话（账号需在客户端内打开过一次活动页，否则列表为空并提示同步资格） |
+| **领取Pro** | 面板手动触发（每账号按钮）。v0.8.34：走 campaigns 通道领取 Pro 升级包——上游官方客户端（CN v0.4.3，sha256 a796a175…05084f5）二进制中不存在 `/me/pro-upgrade/*` 端点（v0.8.18-0.8.33 的 eligibility→claim 为误判，404 即"无此路由"）；资格即 campaigns 行的 claimStatus。v0.8.36：补齐 campaigns 的机器身份层（"打开客户端同步资格"的真身）——服务端按 `Cosy-Machine*` 请求头过滤设备定向活动（每日 100 / +1800 Pro 包），真值来自官方客户端原生风控桥 `<install>/resources/umid/runtime-info.exe prod --account-stdin`；插件优先调同一官方二进制取真身份（30 分钟缓存，机器级），未装官方客户端时回退 hub 同款稳定派生值并在诊断里如实标注（定向行可能被服务端过滤、虚拟机不参与，VBS/HVCI 实体机可能被误报）；另增只读 `GET /me/campaigns/{id}/reward` 面值探测——无面值的 VIEW_DETAILS 行（实测账号 ud2d62d72 的 live 形态）也能按验证过的 +1800 面值认领 |
 | **COSY 推理** | RSA 包 AES 会话密钥 + MD5 请求签名，按账号区域对接 gateway.qoder.com.cn（CN）/ api3.qoder.sh（Intl）SSE 流式 |
 | **动态模型** | COSY 拉取 `/algo/api/v2/model/list`（chat scene），10 静态模型兜底 |
 | **大上下文** | 客户端自带 system 时自动模板瘦身（省 ~10K token/请求）+ 消息逐字透传（tool_calls/多模态 content 保真）+ 客户端 tools 直通；上游判输入过大（413/过长文案）时给出明确指引，与账号积分问题严格区分 |
@@ -64,7 +64,7 @@ oauth-model-alias:
 
 1. CPA 管理面板 → Auth 文件 → QoderWork OAuth 登录卡片
 2. 浏览器打开授权链接 → 登录 qoder.com.cn（阿里云 SSO）→ 点 Continue 授权
-3. 插件自动轮询拿 token 落盘（dt-/drt-），并自动领取 Pro 升级包（若 eligible）
+3. 插件自动轮询拿 token 落盘（dt-/drt-）。Pro 升级包（+1800）请在面板账号卡片点「领取Pro」手动领取（v0.8.34 起；登录不再自动触发，见上方能力表）
 
 ### 方式二：PAT 导入
 

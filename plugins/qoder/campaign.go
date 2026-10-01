@@ -108,9 +108,41 @@ type campaignBen struct {
 }
 
 func fetchCampaignStatus(sa *storedAuth) (*campaignStatusResponse, error) {
-        req, err := http.NewRequest(http.MethodGet, billingBaseFor(sa)+"/sash/api/v1/me/campaigns?forceRefresh=true", nil)
+        out, miSource, hadFlag, err := fetchCampaignStatusOnce(sa, false)
         if err != nil {
                 return nil, err
+        }
+        // v0.8.36 self-heal (hub live pattern): showCampaign=false with a NATIVE
+        // identity usually means the identity rotated past its acceptance window
+        // — force a fresh one from the official bridge and retry exactly once.
+        // Derived identities never retry (there is nothing to rotate); CN
+        // envelopes may omit the flag entirely, and an absent flag (hadFlag=false)
+        // never triggers the retry either.
+        if miSource == "runtime-info" && hadFlag && !out.ShowCampaign {
+                machineIdentityFor(authRegion(sa), sa.Account.UID, true)
+                if machineIdentityForceHook != nil {
+                        machineIdentityForceHook()
+                }
+                if out2, _, _, err2 := fetchCampaignStatusOnce(sa, true); err2 == nil && out2.ShowCampaign {
+                        return out2, nil
+                }
+        }
+        return out, nil
+}
+
+func campaignsURL(sa *storedAuth) string {
+        return billingBaseFor(sa) + "/sash/api/v1/me/campaigns?forceRefresh=true"
+}
+
+// fetchCampaignStatusOnce fires one campaigns GET with the desktop headers
+// plus the machine-identity layer. Returns the parsed envelope, the identity
+// source actually attached ("runtime-info" | "derived"), and whether the
+// upstream envelope carried the showCampaign key at all (CN responses may
+// omit it — a plain bool field cannot distinguish absent from false).
+func fetchCampaignStatusOnce(sa *storedAuth, forceIdentity bool) (*campaignStatusResponse, string, bool, error) {
+        req, err := http.NewRequest(http.MethodGet, campaignsURL(sa), nil)
+        if err != nil {
+                return nil, "", false, err
         }
         // v0.12.76: bounded wait (billing.go parity) — a hung campaigns probe
         // used to ride the bridge's long default ceiling.
@@ -118,18 +150,78 @@ func fetchCampaignStatus(sa *storedAuth) (*campaignStatusResponse, error) {
         defer cancel()
         req = req.WithContext(ctx)
         billingHeaders(req, sa)
+        mi := machineIdentityFor(authRegion(sa), sa.Account.UID, forceIdentity)
+        attachMachineIdentityHeaders(req, &mi)
+        resp, err := hostHTTPDo(req)
+        if err != nil {
+                return nil, mi.Source, false, err
+        }
+        if resp.StatusCode >= 400 {
+                return nil, mi.Source, false, fmt.Errorf("campaigns http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))
+        }
+        var probe map[string]any
+        _ = json.Unmarshal(resp.Body, &probe)
+        _, hadFlag := probe["showCampaign"]
+        var out campaignStatusResponse
+        if err := json.Unmarshal(resp.Body, &out); err != nil {
+                return nil, mi.Source, hadFlag, fmt.Errorf("campaigns parse: %w", err)
+        }
+        return &out, mi.Source, hadFlag, nil
+}
+
+// fetchCampaignReward reads one campaign's grant state via
+// GET /sash/api/v1/me/campaigns/{id}/reward — the read-only endpoint the
+// official growth-page/activity-iframe JS uses to render the real benefit
+// (hub capture). The list rows sometimes carry no benefit for
+// detail-oriented rows (actionType=VIEW_DETAILS), so the reward probe is
+// how 领取Pro sees the actual face value without opening the page. Read-only
+// and idempotent upstream; any HTTP error is the caller's "unknown" signal.
+func fetchCampaignReward(sa *storedAuth, campaignID string) (map[string]any, error) {
+        req, err := http.NewRequest(http.MethodGet,
+                billingBaseFor(sa)+"/sash/api/v1/me/campaigns/"+campaignID+"/reward", nil)
+        if err != nil {
+                return nil, err
+        }
+        ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+        defer cancel()
+        req = req.WithContext(ctx)
+        billingHeaders(req, sa)
+        mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
+        attachMachineIdentityHeaders(req, &mi)
         resp, err := hostHTTPDo(req)
         if err != nil {
                 return nil, err
         }
         if resp.StatusCode >= 400 {
-                return nil, fmt.Errorf("campaigns http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))
+                return nil, fmt.Errorf("reward http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))
         }
-        var out campaignStatusResponse
-        if err := json.Unmarshal(resp.Body, &out); err != nil {
-                return nil, fmt.Errorf("campaigns parse: %w", err)
+        var m map[string]any
+        if err := json.Unmarshal(resp.Body, &m); err != nil {
+                return nil, err
         }
-        return &out, nil
+        return m, nil
+}
+
+// rewardBenefit unwraps a /reward payload (bare or {data:{...}} envelope)
+// into its benefit kind and amount; zero values mean "not revealed".
+func rewardBenefit(body map[string]any) (string, int64) {
+        if body == nil {
+                return "", 0
+        }
+        if data, ok := body["data"].(map[string]any); ok {
+                body = data
+        }
+        kind, _ := body["kind"].(string)
+        amount := float64(0)
+        if b, ok := body["benefit"].(map[string]any); ok {
+                if k, ok := b["kind"].(string); ok && k != "" {
+                        kind = k
+                }
+                amount, _ = b["amount"].(float64)
+        } else if a, ok := body["amount"].(float64); ok {
+                amount = a
+        }
+        return kind, int64(amount)
 }
 
 // claimableCampaign returns the first CLAIM_BENEFIT campaign that is
@@ -239,6 +331,8 @@ func claimCampaignByID(sa *storedAuth, c *campaign) (map[string]any, error) {
         defer cancel()
         req = req.WithContext(ctx)
         billingHeaders(req, sa)
+        mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
+        attachMachineIdentityHeaders(req, &mi)
         resp, err := hostHTTPDo(req)
         if err != nil {
                 return map[string]any{"success": false, "message": err.Error()}, nil
