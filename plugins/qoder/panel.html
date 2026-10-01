@@ -772,7 +772,7 @@ async function claimPro(idx, btn){
     const d=await api("/claim-pro",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth_index:idx})});
     const name=d.nickname||"账号";
     if(d.error){toast(name+"：领取失败","err",asText(d.error));busy(btn,false);return}
-    if(d.success){toast(name+"：领取成功","ok","Pro 升级包已领取"+(d.credits?(" · 积分 "+(d.credits.total_remain||0)):""))}
+    if(d.success){toast(name+"：领取成功","ok",(asText(d.message)||"Pro 升级包已领取")+(d.credits?(" · 积分 "+(d.credits.total_remain||0)):""))}
     else{toast(name+"："+(asText(d.message)||"不可领取"),"warn")}
     await load(true);
   }catch(e){

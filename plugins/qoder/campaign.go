@@ -19,20 +19,20 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"strings"
-	"time"
+        "context"
+        "encoding/json"
+        "fmt"
+        "net/http"
+        "strings"
+        "time"
 )
 
 // checkinContract selects the upstream check-in dialect for a credential.
 type checkinContract int
 
 const (
-	checkinContractDaily    checkinContract = iota // RETIRED v0.12.80 — legacy daily-check-in is DISABLED upstream
-	checkinContractCampaign                        // campaigns list + claim (Intl since v0.8.18, CN since v0.12.80)
+        checkinContractDaily    checkinContract = iota // RETIRED v0.12.80 — legacy daily-check-in is DISABLED upstream
+        checkinContractCampaign                        // campaigns list + claim (Intl since v0.8.18, CN since v0.12.80)
 )
 
 // regionCapabilities records which upstream billing contracts exist per
@@ -50,102 +50,102 @@ const (
 // endpoint stays readable and is merged as a read-only stats supplement
 // (billing.go mergeLegacyCheckinStats).
 type regionCapabilities struct {
-	Checkin    bool
-	ProUpgrade bool
-	Contract   checkinContract
+        Checkin    bool
+        ProUpgrade bool
+        Contract   checkinContract
 }
 
 func capabilitiesForRegion(region string) regionCapabilities {
-	if normalizeRegion(region) == regionIntl {
-		return regionCapabilities{
-			Checkin:    true,
-			ProUpgrade: false,
-			Contract:   checkinContractCampaign,
-		}
-	}
-	return regionCapabilities{
-		Checkin:    true,
-		ProUpgrade: true,
-		Contract:   checkinContractCampaign,
-	}
+        if normalizeRegion(region) == regionIntl {
+                return regionCapabilities{
+                        Checkin:    true,
+                        ProUpgrade: false,
+                        Contract:   checkinContractCampaign,
+                }
+        }
+        return regionCapabilities{
+                Checkin:    true,
+                ProUpgrade: true,
+                Contract:   checkinContractCampaign,
+        }
 }
 
 // supportsProUpgrade reports whether the credential's region has a Pro
 // upgrade contract at all (Intl does not — skip, never retry a 404).
 func supportsProUpgrade(sa *storedAuth) bool {
-	return capabilitiesForRegion(authRegion(sa)).ProUpgrade
+        return capabilitiesForRegion(authRegion(sa)).ProUpgrade
 }
 
 type campaignStatusResponse struct {
-	ShowCampaign bool       `json:"showCampaign"`
-	Claimable    bool       `json:"claimable"`
-	Campaigns    []campaign `json:"campaigns"`
+        ShowCampaign bool       `json:"showCampaign"`
+        Claimable    bool       `json:"claimable"`
+        Campaigns    []campaign `json:"campaigns"`
 }
 
 type campaign struct {
-	CampaignID  string       `json:"campaignId"`
-	CampaignKey string       `json:"campaignKey"`
-	ActionType  string       `json:"actionType"`
-	StartAt     int64        `json:"startAt"`
-	EndAt       int64        `json:"endAt"`
-	ClaimStatus string       `json:"claimStatus"` // CLAIMABLE | CLAIMED | ...
-	Benefit     *campaignBen `json:"benefit,omitempty"`
+        CampaignID  string       `json:"campaignId"`
+        CampaignKey string       `json:"campaignKey"`
+        ActionType  string       `json:"actionType"`
+        StartAt     int64        `json:"startAt"`
+        EndAt       int64        `json:"endAt"`
+        ClaimStatus string       `json:"claimStatus"` // CLAIMABLE | CLAIMED | ...
+        Benefit     *campaignBen `json:"benefit,omitempty"`
 }
 
 type campaignBen struct {
-	Kind   string `json:"kind"`
-	Amount int64  `json:"amount"`
+        Kind   string `json:"kind"`
+        Amount int64  `json:"amount"`
 }
 
 func fetchCampaignStatus(sa *storedAuth) (*campaignStatusResponse, error) {
-	req, err := http.NewRequest(http.MethodGet, billingBaseFor(sa)+"/sash/api/v1/me/campaigns?forceRefresh=true", nil)
-	if err != nil {
-		return nil, err
-	}
-	// v0.12.76: bounded wait (billing.go parity) — a hung campaigns probe
-	// used to ride the bridge's long default ceiling.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	req = req.WithContext(ctx)
-	billingHeaders(req, sa)
-	resp, err := hostHTTPDo(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("campaigns http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))
-	}
-	var out campaignStatusResponse
-	if err := json.Unmarshal(resp.Body, &out); err != nil {
-		return nil, fmt.Errorf("campaigns parse: %w", err)
-	}
-	return &out, nil
+        req, err := http.NewRequest(http.MethodGet, billingBaseFor(sa)+"/sash/api/v1/me/campaigns?forceRefresh=true", nil)
+        if err != nil {
+                return nil, err
+        }
+        // v0.12.76: bounded wait (billing.go parity) — a hung campaigns probe
+        // used to ride the bridge's long default ceiling.
+        ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+        defer cancel()
+        req = req.WithContext(ctx)
+        billingHeaders(req, sa)
+        resp, err := hostHTTPDo(req)
+        if err != nil {
+                return nil, err
+        }
+        if resp.StatusCode >= 400 {
+                return nil, fmt.Errorf("campaigns http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))
+        }
+        var out campaignStatusResponse
+        if err := json.Unmarshal(resp.Body, &out); err != nil {
+                return nil, fmt.Errorf("campaigns parse: %w", err)
+        }
+        return &out, nil
 }
 
 // claimableCampaign returns the first CLAIM_BENEFIT campaign that is
 // currently claimable and inside its activity window.
 func claimableCampaign(status *campaignStatusResponse) *campaign {
-	if status == nil {
-		return nil
-	}
-	now := time.Now().Unix()
-	for i := range status.Campaigns {
-		c := &status.Campaigns[i]
-		if !strings.EqualFold(c.ActionType, "CLAIM_BENEFIT") {
-			continue
-		}
-		if !strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
-			continue
-		}
-		if c.StartAt > 0 && now < c.StartAt {
-			continue
-		}
-		if c.EndAt > 0 && now > c.EndAt {
-			continue
-		}
-		return c
-	}
-	return nil
+        if status == nil {
+                return nil
+        }
+        now := time.Now().Unix()
+        for i := range status.Campaigns {
+                c := &status.Campaigns[i]
+                if !strings.EqualFold(c.ActionType, "CLAIM_BENEFIT") {
+                        continue
+                }
+                if !strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
+                        continue
+                }
+                if c.StartAt > 0 && now < c.StartAt {
+                        continue
+                }
+                if c.EndAt > 0 && now > c.EndAt {
+                        continue
+                }
+                return c
+        }
+        return nil
 }
 
 // claimedCampaign returns a CLAIM_BENEFIT row already claimed. Note: claimed
@@ -153,121 +153,133 @@ func claimableCampaign(status *campaignStatusResponse) *campaign {
 // an inactive summary is a normal state, not a failure (v0.8.18: surfaced as
 // reason=none instead of an error path).
 func claimedCampaign(status *campaignStatusResponse) *campaign {
-	if status == nil {
-		return nil
-	}
-	for i := range status.Campaigns {
-		c := &status.Campaigns[i]
-		if strings.EqualFold(c.ActionType, "CLAIM_BENEFIT") && strings.EqualFold(c.ClaimStatus, "CLAIMED") {
-			return c
-		}
-	}
-	return nil
+        if status == nil {
+                return nil
+        }
+        for i := range status.Campaigns {
+                c := &status.Campaigns[i]
+                if strings.EqualFold(c.ActionType, "CLAIM_BENEFIT") && strings.EqualFold(c.ClaimStatus, "CLAIMED") {
+                        return c
+                }
+        }
+        return nil
 }
 
 func campaignCredit(c *campaign) int64 {
-	if c == nil || c.Benefit == nil || !strings.EqualFold(c.Benefit.Kind, "CREDITS") {
-		return 0
-	}
-	return c.Benefit.Amount
+        if c == nil || c.Benefit == nil || !strings.EqualFold(c.Benefit.Kind, "CREDITS") {
+                return 0
+        }
+        return c.Benefit.Amount
 }
 
 // fetchCampaignCheckinSummary maps the campaign list onto the panel's shared
 // checkinSummary shape so dashboard rendering stays dialect-agnostic.
 func fetchCampaignCheckinSummary(sa *storedAuth) (*checkinSummary, error) {
-	status, err := fetchCampaignStatus(sa)
-	if err != nil {
-		return nil, err
-	}
-	return campaignCheckinSummary(status), nil
+        status, err := fetchCampaignStatus(sa)
+        if err != nil {
+                return nil, err
+        }
+        return campaignCheckinSummary(status), nil
 }
 
 func campaignCheckinSummary(status *campaignStatusResponse) *checkinSummary {
-	sum := &checkinSummary{ActivityName: "权益活动"}
-	if status == nil {
-		return sum
-	}
-	// v0.12.80: a CLAIMABLE row is authoritative evidence of an active
-	// benefit regardless of the envelope's showCampaign/claimable flags —
-	// the CN campaigns response (unlike the Intl growth-page envelope this
-	// dialect was built on) may not carry them. The old order left
-	// Active=false with DailyCredit set whenever the flags were absent,
-	// which the panel renders as an unreachable "不可签".
-	if c := claimableCampaign(status); c != nil {
-		sum.Active = true
-		sum.DailyCredit = campaignCredit(c)
-		return sum
-	}
-	sum.Active = status.ShowCampaign || status.Claimable
-	if c := claimedCampaign(status); c != nil {
-		sum.TodayCheckedIn = true
-		sum.DailyCredit = campaignCredit(c)
-		sum.TodayCredit = campaignCredit(c)
-	}
-	return sum
+        sum := &checkinSummary{ActivityName: "权益活动"}
+        if status == nil {
+                return sum
+        }
+        // v0.12.80: a CLAIMABLE row is authoritative evidence of an active
+        // benefit regardless of the envelope's showCampaign/claimable flags —
+        // the CN campaigns response (unlike the Intl growth-page envelope this
+        // dialect was built on) may not carry them. The old order left
+        // Active=false with DailyCredit set whenever the flags were absent,
+        // which the panel renders as an unreachable "不可签".
+        if c := claimableCampaign(status); c != nil {
+                sum.Active = true
+                sum.DailyCredit = campaignCredit(c)
+                return sum
+        }
+        sum.Active = status.ShowCampaign || status.Claimable
+        if c := claimedCampaign(status); c != nil {
+                sum.TodayCheckedIn = true
+                sum.DailyCredit = campaignCredit(c)
+                sum.TodayCredit = campaignCredit(c)
+        }
+        return sum
+}
+
+// claimCampaignByID POSTs one campaign's claim endpoint and normalizes the
+// response to the panel's shared shape ({success, result, rewardCredits,
+// campaign_id, ...} / {"success":false,"result":"ALREADY_CLAIMED"} /
+// {"success":false,"message":...}). Shared by the check-in flow
+// (performCampaignCheckin) and, since v0.8.34, by the Pro-upgrade flow
+// (handleClaimPro) — the pro-upgrade pack rides this same campaigns system;
+// see checkin.go for the upstream forensics that retired the standalone
+// pro-upgrade endpoints.
+func claimCampaignByID(sa *storedAuth, c *campaign) (map[string]any, error) {
+        req, err := http.NewRequest(
+                http.MethodPost,
+                billingBaseFor(sa)+"/sash/api/v1/me/campaigns/"+c.CampaignID+"/claim",
+                strings.NewReader("{}"),
+        )
+        if err != nil {
+                return nil, err
+        }
+        // v0.12.76: bounded wait (billing.go parity).
+        ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+        defer cancel()
+        req = req.WithContext(ctx)
+        billingHeaders(req, sa)
+        resp, err := hostHTTPDo(req)
+        if err != nil {
+                return map[string]any{"success": false, "message": err.Error()}, nil
+        }
+        if resp.StatusCode >= 400 {
+                return map[string]any{"success": false, "message": fmt.Sprintf("http %d: %s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))}, nil
+        }
+        var m map[string]any
+        if err := json.Unmarshal(resp.Body, &m); err != nil {
+                return nil, err
+        }
+        // The activity page accepts either a bare payload or a {data:{...}}
+        // envelope; the claim succeeded when status reports CLAIMED.
+        // replayed=true is the upstream's idempotent replay (the same claim
+        // landed earlier today — qoder2api capture): surface it as
+        // ALREADY_CLAIMED so the panel shows 今日已签 instead of a fresh
+        // success toast that would invite the user to claim again.
+        body := m
+        if data, ok := m["data"].(map[string]any); ok {
+                body = data
+        }
+        if statusValue, _ := body["status"].(string); strings.EqualFold(statusValue, "CLAIMED") {
+                if replayed, _ := body["replayed"].(bool); replayed {
+                        return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
+                }
+                return map[string]any{
+                        "success":        true,
+                        "result":         "CLAIMED",
+                        "rewardCredits":  float64(campaignCredit(c)),
+                        "campaign_id":    c.CampaignID,
+                        "campaign_key":   c.CampaignKey,
+                        "campaign_title": c.CampaignKey,
+                }, nil
+        }
+        return map[string]any{"success": false, "upstream": m}, nil
 }
 
 // performCampaignCheckin claims one Intl campaign and normalizes the result
 // to the same shape as the CN daily-check-in claim ({"success":true,
 // "rewardCredits":N} / result=ALREADY_CLAIMED / success+message failure).
 func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
-	status, err := fetchCampaignStatus(sa)
-	if err != nil {
-		return nil, err
-	}
-	c := claimableCampaign(status)
-	if c == nil {
-		if claimedCampaign(status) != nil {
-			return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
-		}
-		return map[string]any{"success": false, "message": "当前没有可领取的活动"}, nil
-	}
-	req, err := http.NewRequest(
-		http.MethodPost,
-		billingBaseFor(sa)+"/sash/api/v1/me/campaigns/"+c.CampaignID+"/claim",
-		strings.NewReader("{}"),
-	)
-	if err != nil {
-		return nil, err
-	}
-	// v0.12.76: bounded wait (billing.go parity).
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	req = req.WithContext(ctx)
-	billingHeaders(req, sa)
-	resp, err := hostHTTPDo(req)
-	if err != nil {
-		return map[string]any{"success": false, "message": err.Error()}, nil
-	}
-	if resp.StatusCode >= 400 {
-		return map[string]any{"success": false, "message": fmt.Sprintf("http %d: %s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))}, nil
-	}
-	var m map[string]any
-	if err := json.Unmarshal(resp.Body, &m); err != nil {
-		return nil, err
-	}
-	// The activity page accepts either a bare payload or a {data:{...}}
-	// envelope; the claim succeeded when status reports CLAIMED.
-	// replayed=true is the upstream's idempotent replay (the same claim
-	// landed earlier today — qoder2api capture): surface it as
-	// ALREADY_CLAIMED so the panel shows 今日已签 instead of a fresh
-	// success toast that would invite the user to claim again.
-	body := m
-	if data, ok := m["data"].(map[string]any); ok {
-		body = data
-	}
-	if statusValue, _ := body["status"].(string); strings.EqualFold(statusValue, "CLAIMED") {
-		if replayed, _ := body["replayed"].(bool); replayed {
-			return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
-		}
-		return map[string]any{
-			"success":        true,
-			"result":         "CLAIMED",
-			"rewardCredits":  float64(campaignCredit(c)),
-			"campaign_id":    c.CampaignID,
-			"campaign_key":   c.CampaignKey,
-			"campaign_title": c.CampaignKey,
-		}, nil
-	}
-	return map[string]any{"success": false, "upstream": m}, nil
+        status, err := fetchCampaignStatus(sa)
+        if err != nil {
+                return nil, err
+        }
+        c := claimableCampaign(status)
+        if c == nil {
+                if claimedCampaign(status) != nil {
+                        return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
+                }
+                return map[string]any{"success": false, "message": "当前没有可领取的活动"}, nil
+        }
+        return claimCampaignByID(sa, c)
 }

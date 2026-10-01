@@ -6,9 +6,7 @@ package main
 
 import (
         "encoding/json"
-        "errors"
         "fmt"
-        "net/http"
         "strings"
         "sync"
         "time"
@@ -446,118 +444,101 @@ func checkinLockFor(authIndex string) *sync.Mutex {
         return v.(*sync.Mutex)
 }
 
-// checkProUpgradeEligibility returns whether the account can still claim the
-// one-time Pro Upgrade pack (+1800).
+// v0.8.34 (upstream forensics): the standalone pro-upgrade endpoints this
+// plugin called since v0.8.18 — /sash/api/v1/me/pro-upgrade/{eligibility,claim}
+// — DO NOT EXIST upstream. Field report ("领取失败 eligibility: http 404",
+// CN account ud2d62d72) verified against the OFFICIAL CN desktop client
+// v0.4.3 (x-oss-meta-commit e921dfbf, sha256 a796a175…05084f5): the shipped
+// app.asar contains ZERO matches for "pro-upgrade"; its entire /sash/api/v1
+// surface is campaigns / achievements / ai-conversations / organizations.
+// The eligibility→claim flow was endpoint guesswork (v0.8.33's dual-prefix
+// probe only guessed two prefixes instead of removing the guess); the 404
+// was upstream truthfully answering "no such route".
 //
-// v0.8.33 (field report "领取Pro失败 eligibility: http 404"): our calls carry
-// the /sash activity-gateway prefix (the same prefix the campaigns surface
-// verifiably requires), while the desktop client's binary strings show the
-// bare /api/v1/me/pro-upgrade/* form — the same truncation pattern as
-// /api/v1/me/campaigns, which in practice DOES need /sash. A 404 therefore
-// has two candidate roots: gateway-prefix drift, or the one-time promo being
-// retired upstream. Probe both prefixes (the bare one only as fallback); a
-// 404 on BOTH maps to the retired sentinel so the panel shows an actionable
-// line instead of a bare "eligibility: http 404".
-var proUpgradeEligibilityPaths = []string{
-        "/sash/api/v1/me/pro-upgrade/eligibility",
-        "/api/v1/me/pro-upgrade/eligibility",
+// The campaigns system is the only verifiable benefits channel (the same one
+// daily check-in rides): GET /sash/api/v1/me/campaigns lists the account's
+// rows — eligibility IS the row's claimStatus — and POST
+// .../campaigns/{id}/claim claims one (campaign.go claimCampaignByID).
+// handleClaimPro now claims rows that look like the Pro upgrade pack and,
+// when none is present, answers with a diagnostic listing instead of a bare
+// http error. Upstream gates campaign rows behind the client session (#27):
+// an account must open the activity once inside the official client before
+// its rows appear — the most likely reason a healthy account sees no Pro row
+// at all.
+
+// campaignLooksLikeProUpgrade reports whether a campaign row looks like the
+// one-time Pro upgrade pack. Upstream never published the exact key, so the
+// match is a deliberately broad, case-insensitive substring over the row's
+// visible identity fields (campaignKey/actionType). It never fabricates a
+// campaign id, and unmatched rows are surfaced in the diagnostics instead of
+// being claimed blind.
+func campaignLooksLikeProUpgrade(c *campaign) bool {
+        for _, s := range []string{c.CampaignKey, c.ActionType} {
+                l := strings.ToLower(s)
+                if strings.Contains(l, "pro") || strings.Contains(l, "upgrade") {
+                        return true
+                }
+        }
+        return false
 }
 
-// errProUpgradeRetired marks "both gateway prefixes answered 404" — treated
-// as a capability fact (promo retired), not a transient failure. Callers
-// surface it as skipped/retired so the panel stops inviting the user to
-// retry a dead activity.
-var errProUpgradeRetired = errors.New("pro-upgrade: both gateway prefixes 404")
-
-func checkProUpgradeEligibility(sa *storedAuth) (bool, error) {
-        for _, path := range proUpgradeEligibilityPaths {
-                eligible, status, err := proUpgradeEligibilityOnce(sa, path)
-                if err != nil {
-                        return false, err
-                }
-                if status == http.StatusNotFound {
-                        continue // alternate gateway prefix
-                }
-                if status >= 400 {
-                        return false, fmt.Errorf("http %d", status)
-                }
-                return eligible, nil
+// claimProViaCampaigns claims the Pro upgrade pack through the campaigns
+// channel. Results:
+//   - a pro-looking CLAIMABLE row exists → claim it, panel shape out
+//   - pro-looking row already CLAIMED → success=false, 已领取 message
+//   - no pro-looking row → success=false + diagnostic listing of the rows
+//     the server actually returned (plus the client-session hint)
+func claimProViaCampaigns(sa *storedAuth) (map[string]any, error) {
+        // v0.8.18: Intl has no Pro-upgrade contract (capability fact, not a
+        // transient failure) — skip without firing a request that can only 404.
+        if !supportsProUpgrade(sa) {
+                return map[string]any{
+                        "success": false,
+                        "skipped": true,
+                        "reason":  "unsupported",
+                        "message": "国际版暂无 Pro 升级活动",
+                }, nil
         }
-        return false, errProUpgradeRetired
-}
-
-func proUpgradeEligibilityOnce(sa *storedAuth, path string) (bool, int, error) {
-        // v0.8.33: rides billingBaseFor (the sash/quota test seam) instead of a
-        // raw upstreamBaseFor — pro-upgrade is the same billing family, and the
-        // seam is what makes the fallback-prefix tests possible.
-        req, err := http.NewRequest(http.MethodGet, billingBaseFor(sa)+path, nil)
+        status, err := fetchCampaignStatus(sa)
         if err != nil {
-                return false, 0, err
+                return nil, err
         }
-        billingHeaders(req, sa)
-        resp, err := hostHTTPDo(req)
-        if err != nil {
-                return false, 0, err
-        }
-        if resp.StatusCode >= 400 {
-                return false, resp.StatusCode, nil
-        }
-        var m struct {
-                Eligible bool `json:"eligible"`
-        }
-        if err := json.Unmarshal(resp.Body, &m); err != nil {
-                return false, resp.StatusCode, err
-        }
-        return m.Eligible, resp.StatusCode, nil
-}
-
-// claimProUpgrade claims the one-time Pro Upgrade pack (+1800 credits).
-// Same dual-prefix contract as checkProUpgradeEligibility (v0.8.33): /sash
-// first, bare fallback; both 404 → skipped/retired result map (no error) so
-// handleClaimPro renders the neutral "活动已下线" toast.
-func claimProUpgrade(sa *storedAuth) (map[string]any, error) {
-        for _, path := range []string{
-                "/sash/api/v1/me/pro-upgrade/claim",
-                "/api/v1/me/pro-upgrade/claim",
-        } {
-                body, status, err := proUpgradeClaimOnce(sa, path)
-                if err != nil {
-                        return nil, err
+        var claimable, claimed *campaign
+        for i := range status.Campaigns {
+                c := &status.Campaigns[i]
+                if !campaignLooksLikeProUpgrade(c) {
+                        continue
                 }
-                if status == http.StatusNotFound {
-                        continue // alternate gateway prefix
+                if strings.EqualFold(c.ClaimStatus, "CLAIMABLE") && claimable == nil {
+                        claimable = c
                 }
-                if status >= 400 {
-                        return map[string]any{"success": false, "message": fmt.Sprintf("http %d: %s", status, truncateRedacted(string(body), 200))}, nil
+                if strings.EqualFold(c.ClaimStatus, "CLAIMED") && claimed == nil {
+                        claimed = c
                 }
-                var m map[string]any
-                if err := json.Unmarshal(body, &m); err != nil {
-                        return nil, err
-                }
-                if _, ok := m["success"]; !ok {
-                        m["success"] = true
-                }
-                return m, nil
         }
-        return map[string]any{
-                "success": false,
-                "skipped": true,
-                "reason":  "retired",
-                "message": "Pro 升级活动已下线或当前不可用（双网关前缀均 404）",
-        }, nil
-}
-
-func proUpgradeClaimOnce(sa *storedAuth, path string) ([]byte, int, error) {
-        req, err := http.NewRequest(http.MethodPost, billingBaseFor(sa)+path, strings.NewReader("{}"))
-        if err != nil {
-                return nil, 0, err
+        if claimable != nil {
+                return claimCampaignByID(sa, claimable)
         }
-        billingHeaders(req, sa)
-        resp, err := hostHTTPDo(req)
-        if err != nil {
-                return nil, 0, err
+        out := map[string]any{"success": false}
+        if claimed != nil {
+                out["message"] = "Pro 升级包已领取过（活动行状态 CLAIMED）"
+                return out, nil
         }
-        return resp.Body, resp.StatusCode, nil
+        // No pro-looking row at all. Diagnose from the actual response instead
+        // of guessing an endpoint: list what the server returned and point at
+        // the client-session gate.
+        out["reason"] = "no_pro_row"
+        if len(status.Campaigns) == 0 {
+                out["message"] = "此账号活动列表为空——活动资格挂官方客户端会话，请先在官方客户端「福利中心」打开一次活动，再回来领取"
+                return out, nil
+        }
+        keys := make([]string, 0, len(status.Campaigns))
+        for i := range status.Campaigns {
+                c := &status.Campaigns[i]
+                keys = append(keys, fmt.Sprintf("%s(%s/%s)", c.CampaignKey, c.ActionType, c.ClaimStatus))
+        }
+        out["message"] = "此账号活动列表暂无 Pro 升级项（现有：" + strings.Join(keys, "、") + "）。若刚注册，请先在官方客户端打开一次活动页同步资格后再试"
+        return out, nil
 }
 
 // pruneCheckinLocks removes lock entries for auth indices that no longer
@@ -582,10 +563,12 @@ func pruneCheckinLocks() {
         })
 }
 
-// handleClaimPro checks pro-upgrade eligibility for one account and claims
-// the one-time Pro pack (+ credits) when eligible. Surfaced as a panel
-// per-card button — NOT called automatically during login (login writes the
-// auth file first; this is a user-triggered post-login action).
+// handleClaimPro claims the one-time Pro pack for one account through the
+// campaigns channel (v0.8.34 — the standalone pro-upgrade endpoints never
+// existed upstream; see the forensics note above claimProViaCampaigns).
+// Surfaced as a panel per-card button — NOT called automatically during
+// login (login writes the auth file first; this is a user-triggered
+// post-login action).
 func handleClaimPro(req pluginapi.ManagementRequest) map[string]any {
         var body struct {
                 AuthIndex string `json:"auth_index"`
@@ -603,35 +586,11 @@ func handleClaimPro(req pluginapi.ManagementRequest) map[string]any {
                 "auth_index": authIndex,
                 "nickname":   sa.Account.Nickname,
         }
-        // v0.8.18: Intl has no Pro-upgrade contract (capability fact, not a
-        // transient failure) — skip instead of firing a request that can only 404.
-        if !supportsProUpgrade(sa) {
-                out["success"] = false
-                out["skipped"] = true
-                out["reason"] = "unsupported"
-                out["message"] = "国际版暂无 Pro 升级活动"
-                return out
-        }
-        eligible, err := checkProUpgradeEligibility(sa)
+        // Intl skip / diagnostics / claim all live in claimProViaCampaigns
+        // so the flow semantics have exactly one home.
+        res, err := claimProViaCampaigns(sa)
         if err != nil {
-                if errors.Is(err, errProUpgradeRetired) {
-                        out["success"] = false
-                        out["skipped"] = true
-                        out["reason"] = "retired"
-                        out["message"] = "Pro 升级活动已下线或当前不可用"
-                        return out
-                }
-                out["error"] = "eligibility: " + err.Error()
-                return out
-        }
-        if !eligible {
-                out["success"] = false
-                out["message"] = "不可领取（已领或活动未开放）"
-                return out
-        }
-        res, err := claimProUpgrade(sa)
-        if err != nil {
-                out["error"] = "claim: " + err.Error()
+                out["error"] = "claim-pro: " + err.Error()
                 return out
         }
         for k, v := range res {

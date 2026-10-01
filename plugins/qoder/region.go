@@ -94,9 +94,10 @@ func endpointUserInfoForRegion(region string) string {
         return upstreamBaseForRegion(region) + "/api/v1/userinfo"
 }
 
-// endpointProUpgradeFor was retired in v0.8.33: the pro-upgrade claim now
-// probes both gateway prefixes inline (checkin.go claimProUpgrade) and rides
-// billingBaseFor so the test seam covers it.
+// endpointProUpgradeFor was removed in v0.8.34: the /sash/api/v1/me/pro-upgrade/*
+// endpoints do not exist upstream (zero matches in the official CN client
+// v0.4.3 app.asar) — the 领取Pro flow rides the campaigns channel now
+// (checkin.go claimProViaCampaigns, campaign.go claimCampaignByID).
 
 func endpointChatFor(sa *storedAuth) string {
         return gatewayBaseFor(sa) + "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"

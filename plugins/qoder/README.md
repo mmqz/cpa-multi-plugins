@@ -11,7 +11,7 @@
 | 能力 | 说明 |
 |---|---|
 | **双登录方式** | ① OAuth 设备授权（PKCE，浏览器授权，dt- 30 天 + drt- 1 年自动旋转）② PAT 导入（pt-，长期有效兜底）——两家族可共存于同一 auth 文件 |
-| **登录自动领包** | OAuth 登录成功后自动判断并领取一次性 Pro 升级包（eligibility → claim） |
+| **领取Pro** | 面板手动触发（每账号按钮）。v0.8.34：走 campaigns 通道领取 Pro 升级包——上游官方客户端（CN v0.4.3，sha256 a796a175…05084f5）二进制中不存在 `/me/pro-upgrade/*` 端点（v0.8.18-0.8.33 的 eligibility→claim 为误判，404 即"无此路由"）；资格即 campaigns 行的 claimStatus，活动行挂官方客户端会话（账号需在客户端内打开过一次活动页，否则列表为空并提示同步资格） |
 | **COSY 推理** | RSA 包 AES 会话密钥 + MD5 请求签名，按账号区域对接 gateway.qoder.com.cn（CN）/ api3.qoder.sh（Intl）SSE 流式 |
 | **动态模型** | COSY 拉取 `/algo/api/v2/model/list`（chat scene），10 静态模型兜底 |
 | **大上下文** | 客户端自带 system 时自动模板瘦身（省 ~10K token/请求）+ 消息逐字透传（tool_calls/多模态 content 保真）+ 客户端 tools 直通；上游判输入过大（413/过长文案）时给出明确指引，与账号积分问题严格区分 |
