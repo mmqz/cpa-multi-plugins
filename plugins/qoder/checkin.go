@@ -507,6 +507,32 @@ func campaignLooksLikeProUpgrade(c *campaign) bool {
 //   - pro-looking row already CLAIMED → success=false, 已领取 message
 //   - no pro-looking row → success=false + diagnostic listing of the rows
 //     the server actually returned (plus the client-session hint)
+// blindClaimCampaign (v0.8.37, config claim_unverified) attempts the verified
+// claim endpoint on a CLAIMABLE row whose reward face value could not be
+// verified. The claim response is the only ground-truth eligibility oracle —
+// the flag trades the face-value proof for that definitive answer. Returns
+// (res, handled, err): handled=true means res carries a final verdict (success
+// or an actionable non-success shape) and the caller must return it;
+// handled=false means scanning continues (probes gains the failure trail).
+func blindClaimCampaign(sa *storedAuth, c *campaign, probes *[]string) (map[string]any, bool, error) {
+        res, err := claimCampaignByID(sa, c)
+        if err != nil {
+                return nil, false, err
+        }
+        if success, _ := res["success"].(bool); success {
+                return res, true, nil
+        }
+        if _, ok := res["result"]; ok {
+                return res, true, nil
+        }
+        if m, ok := res["message"].(string); ok && m != "" {
+                *probes = append(*probes, c.CampaignKey+"(盲领未成功: "+truncateRedacted(m, 80)+")")
+        } else {
+                *probes = append(*probes, c.CampaignKey+"(盲领未成功)")
+        }
+        return res, false, nil
+}
+
 func claimProViaCampaigns(sa *storedAuth) (map[string]any, error) {
         // v0.8.18: Intl has no Pro-upgrade contract (capability fact, not a
         // transient failure) — skip without firing a request that can only 404.
@@ -556,6 +582,7 @@ func claimProViaCampaigns(sa *storedAuth) (map[string]any, error) {
                 proPackMinCredits = 1000
         )
         probes := make([]string, 0, rewardProbeCap)
+        hintUnverified := false
         for i := range status.Campaigns {
                 if len(probes) >= rewardProbeCap {
                         break
@@ -566,7 +593,21 @@ func claimProViaCampaigns(sa *storedAuth) (map[string]any, error) {
                 }
                 body, rerr := fetchCampaignReward(sa, c.CampaignID)
                 if rerr != nil {
-                        probes = append(probes, c.CampaignKey+"(面值不可读)")
+                        // v0.8.37: surface WHY the face value is unreadable — the
+                        // reward endpoint's own status/body is a server verdict
+                        // (404 = account not registered for the targeted pack,
+                        // 403 = identity filtering), not parser noise.
+                        probes = append(probes, fmt.Sprintf("%s(面值不可读: %s)", c.CampaignKey, truncateRedacted(rerr.Error(), 100)))
+                        hintUnverified = true
+                        if claimUnverifiedEnabled() {
+                                res, handled, cerr := blindClaimCampaign(sa, c, &probes)
+                                if cerr != nil {
+                                        return nil, cerr
+                                }
+                                if handled {
+                                        return res, nil
+                                }
+                        }
                         continue
                 }
                 kind, amount := rewardBenefit(body)
@@ -593,8 +634,20 @@ func claimProViaCampaigns(sa *storedAuth) (map[string]any, error) {
                 }
                 if amount > 0 {
                         probes = append(probes, fmt.Sprintf("%s(reward=+%d %s)", c.CampaignKey, amount, kind))
-                } else {
-                        probes = append(probes, c.CampaignKey+"(reward 无面值)")
+                        continue
+                }
+                // v0.8.37: a 200 reward with no readable benefit is the same
+                // cannot-verify bucket as an unreadable one.
+                probes = append(probes, c.CampaignKey+"(reward 无面值)")
+                hintUnverified = true
+                if claimUnverifiedEnabled() {
+                        res, handled, cerr := blindClaimCampaign(sa, c, &probes)
+                        if cerr != nil {
+                                return nil, cerr
+                        }
+                        if handled {
+                                return res, nil
+                        }
                 }
         }
         // No pro-looking row at all. Diagnose from the actual response instead
@@ -627,6 +680,9 @@ func claimProViaCampaigns(sa *storedAuth) (map[string]any, error) {
         msg, _ := out["message"].(string)
         if len(probes) > 0 {
                 msg += "；面值核对：" + strings.Join(probes, "、")
+        }
+        if hintUnverified && !claimUnverifiedEnabled() {
+                msg += "。面值不可核实的行默认不会自动领取——如需仍尝试领取，可配置 claim_unverified: true"
         }
         msg += machineIdentityHint(sa)
         out["message"] = msg

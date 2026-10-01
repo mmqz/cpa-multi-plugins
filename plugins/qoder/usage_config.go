@@ -56,6 +56,14 @@ var (
 	// plain failed request carrying a real HTTP status (see streamHeadGate).
 	streamHeadTimeoutSecs int
 	streamHeadTimeoutMu   sync.RWMutex
+
+	// claimUnverified: config_yaml claim_unverified, default false. When true
+	// the Pro-claim flow may claim a CLAIMABLE campaigns row whose reward
+	// face value could NOT be verified (unreadable or absent) instead of
+	// only reporting it. Rows that reveal a readable reward are never
+	// claimed here — the flag only covers the cannot-verify bucket.
+	claimUnverified   bool
+	claimUnverifiedMu sync.RWMutex
 )
 
 // Default URL tries localhost first (works for both bare-metal and Docker
@@ -86,6 +94,7 @@ func configure(raw []byte) {
 	nextLoginRegion := "" // sticky: empty = keep current (issue #24)
 	nextMgmtKey := ""
 	nextStreamHeadTimeout := 0
+	nextClaimUnverified := false
 
 	cfgURL, cfgKey := "", ""
 	if len(raw) > 0 {
@@ -128,6 +137,9 @@ func configure(raw []byte) {
 					if secs, errParse := strconv.Atoi(configScalarString(v)); errParse == nil {
 						nextStreamHeadTimeout = secs
 					}
+				}
+				if v, present := m["claim_unverified"]; present {
+					nextClaimUnverified = configScalarBool(v)
 				}
 			}
 			for _, line := range strings.Split(string(req.ConfigYAML), "\n") {
@@ -179,6 +191,10 @@ func configure(raw []byte) {
 						nextStreamHeadTimeout = secs
 					}
 				}
+				if strings.HasPrefix(line, "claim_unverified:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "claim_unverified:"))
+					nextClaimUnverified = v == "true" || v == "1" || v == "yes" || v == "on"
+				}
 			}
 		}
 	}
@@ -210,6 +226,10 @@ func configure(raw []byte) {
 		loginRegion = nextLoginRegion
 		loginRegionMu.Unlock()
 	}
+
+	claimUnverifiedMu.Lock()
+	claimUnverified = nextClaimUnverified
+	claimUnverifiedMu.Unlock()
 
 	setStreamHeadTimeout(nextStreamHeadTimeout)
 
@@ -248,6 +268,16 @@ func streamHeadTimeout() time.Duration {
 		return 0
 	}
 	return time.Duration(secs) * time.Second
+}
+
+// claimUnverifiedEnabled reports whether the Pro-claim flow may claim a
+// CLAIMABLE row whose reward face value could not be verified. Default
+// off — the face-value gate stays the safe default; this is an explicit
+// per-deployment opt-in.
+func claimUnverifiedEnabled() bool {
+	claimUnverifiedMu.RLock()
+	defer claimUnverifiedMu.RUnlock()
+	return claimUnverified
 }
 
 // resolveUsageReport fills usageReportURL/key from config → env → secret files.

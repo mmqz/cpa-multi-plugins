@@ -435,3 +435,108 @@ func TestFetchCampaignStatusDerivedIdentityNeverRetries(t *testing.T) {
                 t.Fatalf("campaigns GET count = %d, want 1 (derived identity must not retry)", calls)
         }
 }
+
+// setClaimUnverifiedForTest flips the claim_unverified flag for one test.
+func setClaimUnverifiedForTest(t *testing.T, on bool) {
+        t.Helper()
+        claimUnverifiedMu.Lock()
+        claimUnverified = on
+        claimUnverifiedMu.Unlock()
+        t.Cleanup(func() {
+                claimUnverifiedMu.Lock()
+                claimUnverified = false
+                claimUnverifiedMu.Unlock()
+        })
+}
+
+// TestClaimProProbeErrorDetailSurfaced (v0.8.37): the 面值不可读 annotation
+// must carry the reward endpoint's own verdict (http status + body) so the
+// panel shows whether the account is not registered (404) or identity-
+// filtered (403) instead of a bare annotation; with the flag still off the
+// message also names the opt-in.
+func TestClaimProProbeErrorDetailSurfaced(t *testing.T) {
+        t.Setenv("QD_NATIVE_IDENTITY", "0")
+        newBillingServer(t, "cn", map[string]func(r *http.Request) (int, string){
+                "/sash/api/v1/me/campaigns": func(r *http.Request) (int, string) {
+                        return http.StatusOK, `{"showCampaign":true,"campaigns":[{"campaignId":"act-20260901-922","campaignKey":"act-20260901-922","actionType":"VIEW_DETAILS","claimStatus":"CLAIMABLE"}]}`
+                },
+                "/sash/api/v1/me/campaigns/act-20260901-922/reward": func(r *http.Request) (int, string) {
+                        return http.StatusForbidden, `{"errorCode":"IDENTITY_FILTERED"}`
+                },
+        })
+
+        res, err := claimProViaCampaigns(cnAuth())
+        if err != nil {
+                t.Fatalf("claimProViaCampaigns: %v", err)
+        }
+        msg, _ := res["message"].(string)
+        for _, want := range []string{"面值不可读: reward http 403", "IDENTITY_FILTERED", "claim_unverified"} {
+                if !strings.Contains(msg, want) {
+                        t.Fatalf("diagnostic missing %q: %q", want, msg)
+                }
+        }
+}
+
+// TestClaimProUnverifiedBlindClaimOptIn (v0.8.37): with claim_unverified the
+// flow claims the cannot-verify row via the verified claim endpoint and the
+// claim response is final.
+func TestClaimProUnverifiedBlindClaimOptIn(t *testing.T) {
+        t.Setenv("QD_NATIVE_IDENTITY", "0")
+        setClaimUnverifiedForTest(t, true)
+
+        claims := 0
+        newBillingServer(t, "cn", map[string]func(r *http.Request) (int, string){
+                "/sash/api/v1/me/campaigns": func(r *http.Request) (int, string) {
+                        return http.StatusOK, `{"showCampaign":true,"campaigns":[{"campaignId":"act-20260901-922","campaignKey":"act-20260901-922","actionType":"VIEW_DETAILS","claimStatus":"CLAIMABLE"}]}`
+                },
+                // /reward unstubbed → 404 → cannot verify → blind claim.
+                "/sash/api/v1/me/campaigns/act-20260901-922/claim": func(r *http.Request) (int, string) {
+                        claims++
+                        return http.StatusOK, `{"data":{"status":"CLAIMED"}}`
+                },
+        })
+
+        res, err := claimProViaCampaigns(cnAuth())
+        if err != nil {
+                t.Fatalf("claimProViaCampaigns: %v", err)
+        }
+        if claims != 1 {
+                t.Fatalf("claim POST count = %d, want 1", claims)
+        }
+        if success, _ := res["success"].(bool); !success {
+                t.Fatalf("blind claim should surface success: %v", res)
+        }
+}
+
+// TestClaimProUnverifiedNeverClaimsReadableSmallReward (v0.8.37): a row that
+// DOES reveal a readable reward below the one-shot pack threshold is verified
+// small — the opt-in flag must not turn it into a blind claim.
+func TestClaimProUnverifiedNeverClaimsReadableSmallReward(t *testing.T) {
+        t.Setenv("QD_NATIVE_IDENTITY", "0")
+        setClaimUnverifiedForTest(t, true)
+
+        claims := 0
+        newBillingServer(t, "cn", map[string]func(r *http.Request) (int, string){
+                "/sash/api/v1/me/campaigns": func(r *http.Request) (int, string) {
+                        return http.StatusOK, `{"showCampaign":true,"campaigns":[{"campaignId":"act-20260901-922","campaignKey":"act-20260901-922","actionType":"VIEW_DETAILS","claimStatus":"CLAIMABLE"}]}`
+                },
+                "/sash/api/v1/me/campaigns/act-20260901-922/reward": func(r *http.Request) (int, string) {
+                        return http.StatusOK, `{"benefit":{"kind":"CREDITS","amount":100}}`
+                },
+                "/sash/api/v1/me/campaigns/act-20260901-922/claim": func(r *http.Request) (int, string) {
+                        claims++
+                        return http.StatusOK, `{"data":{"status":"CLAIMED"}}`
+                },
+        })
+
+        res, err := claimProViaCampaigns(cnAuth())
+        if err != nil {
+                t.Fatalf("claimProViaCampaigns: %v", err)
+        }
+        if claims != 0 {
+                t.Fatalf("claim POST count = %d, want 0 (verified small reward is not blind-claimed)", claims)
+        }
+        if success, _ := res["success"].(bool); success {
+                t.Fatalf("no claim should have succeeded: %v", res)
+        }
+}

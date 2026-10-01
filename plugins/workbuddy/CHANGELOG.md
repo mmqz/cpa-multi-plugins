@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.47
+
+### Billing 401/403 gateway pages are classified, no longer masked as JSON parse errors
+
+A credential whose upstream session is dead used to surface
+`parse failed: invalid character '<' looking for beginning of value (body:
+<html><head><title>401 Authorization Required</title>...` from the billing
+path: the gateway (APISIX/nginx) bounces the Bearer token with its HTML error
+page before the app layer speaks JSON, and the envelope parser choked on `<`.
+That message looked like a plugin bug and hid the real verdict.
+
+`billingCallOnce` now checks the HTTP status when the body fails to parse: a
+401/403 with a non-JSON body returns a `growthHTTPError` carrying the status
+("http 401: credential rejected by gateway (non-JSON response): ..."), so the
+growth-path session-dead discipline (`growthErrStatus` / `isGrowthSessionDead`)
+recognizes it and the message points at re-login instead of a parse failure.
+JSON 4xx envelopes keep their `code=... msg=...` shape, 2xx non-JSON bodies
+keep the historical "parse failed" contract, and 401/403 are never retried.
+
+
 ## 0.9.44
 
 ### Login success now carries its own persistence guarantee

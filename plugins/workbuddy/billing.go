@@ -259,15 +259,25 @@ func billingCallOnce(sa *storedAuth, path string, body any) (json.RawMessage, er
 	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
+		snippet := strings.TrimSpace(redactSecrets(string(raw)))
+		if len(snippet) > 120 {
+			snippet = snippet[:120]
+		}
+		// v0.9.47: a 401/403 whose body is not even JSON is the gateway
+		// bouncing the Bearer token before the app layer speaks JSON
+		// (APISIX/nginx "401 Authorization Required" HTML page). Classify it
+		// as the credential-level rejection it is — growthHTTPError carries
+		// the status so growthErrStatus / isGrowthSessionDead recognize it —
+		// instead of the misleading "parse failed: invalid character '<'"
+		// that hid a dead session behind a JSON parse error.
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, &growthHTTPError{status: resp.StatusCode, msg: "credential rejected by gateway (non-JSON response): " + snippet}
+		}
 		// parse failed usually means upstream returned a non-JSON error page
 		// (e.g. APISIX 401 HTML for session-dead). Include a redacted snippet
 		// so the panel / logs can surface the real cause instead of a bare
 		// "parse failed" (P0-2 UX: was impossible to distinguish session dead
 		// from a malformed response).
-		snippet := strings.TrimSpace(redactSecrets(string(raw)))
-		if len(snippet) > 120 {
-			snippet = snippet[:120]
-		}
 		return nil, fmt.Errorf("parse failed: %w (body: %s)", err, snippet)
 	}
 	if env.Code != 0 {
