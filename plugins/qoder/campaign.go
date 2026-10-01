@@ -24,6 +24,7 @@ import (
         "fmt"
         "net/http"
         "strings"
+        "sync"
         "time"
 )
 
@@ -112,6 +113,13 @@ func fetchCampaignStatus(sa *storedAuth) (*campaignStatusResponse, error) {
         if err != nil {
                 return nil, err
         }
+        // v0.8.38 (official client parity, Intl+CN desktop v0.4.3 asar): right
+        // after every campaigns status refresh the client also reads the
+        // client_launch_26 limited-number endpoint once (retry-once-when-empty).
+        // That pair IS the "launch sync" the desktop client performs at every
+        // sign-in — reproduce it best-effort so accounts hosted here see the
+        // same qualification signal as an installed client. Never fatal.
+        campaignLaunchSync(sa)
         // v0.8.36 self-heal (hub live pattern): showCampaign=false with a NATIVE
         // identity usually means the identity rotated past its acceptance window
         // — force a fresh one from the official bridge and retry exactly once.
@@ -167,6 +175,81 @@ func fetchCampaignStatusOnce(sa *storedAuth, forceIdentity bool) (*campaignStatu
                 return nil, mi.Source, hadFlag, fmt.Errorf("campaigns parse: %w", err)
         }
         return &out, mi.Source, hadFlag, nil
+}
+
+// clientLaunchCampaignKey is the campaign whose limited-number endpoint the
+// official desktop client reads at every sign-in/launch (asar string literal,
+// CampaignMainService.$Br — not a guessed id).
+const clientLaunchCampaignKey = "client_launch_26"
+
+// launchSyncWindow rate-limits the launch sync to once per account per window
+// (the official client fires it per sign-in; panel loads + check-in + claims
+// all ride fetchCampaignStatus here, so the guard keeps the extra GET rare).
+const launchSyncWindow = 6 * time.Hour
+
+var (
+        launchSyncMu   sync.Mutex
+        launchSyncLast = map[string]time.Time{}
+)
+
+// campaignLaunchSync mirrors the official client's launch step: after a
+// campaigns status refresh it GETs
+// /sash/api/v1/me/campaigns/client_launch_26/limited-number, and when the
+// server answers hasNumber=false it waits 750ms and re-reads exactly once
+// (CampaignMainService.resolveLimitedNumber: the first GET may allocate the
+// number, the retry confirms it). Best-effort by design: any error is
+// swallowed — the endpoint is a qualification signal, not a claim, and its
+// failure must never flip a campaign read into an error.
+func campaignLaunchSync(sa *storedAuth) {
+        key := authRegion(sa) + ":" + sa.Account.UID
+        launchSyncMu.Lock()
+        if t, ok := launchSyncLast[key]; ok && time.Since(t) < launchSyncWindow {
+                launchSyncMu.Unlock()
+                return
+        }
+        launchSyncLast[key] = time.Now()
+        launchSyncMu.Unlock()
+        for attempt := 0; attempt < 2; attempt++ {
+                if attempt > 0 {
+                        time.Sleep(750 * time.Millisecond)
+                }
+                if has, err := fetchLimitedNumber(sa); err == nil && has {
+                        return
+                }
+        }
+}
+
+// fetchLimitedNumber reads one limited-number endpoint. The official parser
+// accepts a bare {hasNumber:number, number:int, createdAt} payload (asar
+// function cwr); a {data:...} envelope is unwrapped defensively.
+func fetchLimitedNumber(sa *storedAuth) (bool, error) {
+        req, err := http.NewRequest(http.MethodGet,
+                billingBaseFor(sa)+"/sash/api/v1/me/campaigns/"+clientLaunchCampaignKey+"/limited-number", nil)
+        if err != nil {
+                return false, err
+        }
+        ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+        defer cancel()
+        req = req.WithContext(ctx)
+        billingHeaders(req, sa)
+        mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
+        attachMachineIdentityHeaders(req, &mi)
+        resp, err := hostHTTPDo(req)
+        if err != nil {
+                return false, err
+        }
+        if resp.StatusCode >= 400 {
+                return false, fmt.Errorf("limited-number http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 160))
+        }
+        var m map[string]any
+        if err := json.Unmarshal(resp.Body, &m); err != nil {
+                return false, err
+        }
+        if data, ok := m["data"].(map[string]any); ok {
+                m = data
+        }
+        has, _ := m["hasNumber"].(bool)
+        return has, nil
 }
 
 // fetchCampaignReward reads one campaign's grant state via
@@ -404,7 +487,15 @@ func claimCampaignByID(sa *storedAuth, c *campaign) (map[string]any, error) {
 
 // performCampaignCheckin claims one Intl campaign and normalizes the result
 // to the same shape as the CN daily-check-in claim ({"success":true,
-// "rewardCredits":N} / result=ALREADY_CLAIMED / success+message failure).
+// "rewardCredits":N} / result=ALREADY_CLAIMED / result=NOTHING_CLAIMABLE /
+// success+message failure).
+//
+// v0.12.109: "nothing claimable" used to answer a bare failure message that
+// the panel wrapped into 上游未确认签到成功 — an error toast for a NORMAL
+// state (field report u673e7fcc: the account's only row was a VIEW_DETAILS
+// newbie campaign, which this claimer correctly refuses to POST). It now
+// returns a typed result=NOTHING_CLAIMABLE with a row-level diagnosis, and
+// checkinOneAccount renders it as a skip.
 func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
         status, err := fetchCampaignStatus(sa)
         if err != nil {
@@ -415,7 +506,35 @@ func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
                 if claimedCampaign(status) != nil {
                         return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
                 }
-                return map[string]any{"success": false, "message": "当前没有可领取的活动"}, nil
+                return map[string]any{
+                        "success": false,
+                        "result":  "NOTHING_CLAIMABLE",
+                        "message": campaignIdleDiagnosis(status),
+                }, nil
         }
         return claimCampaignByID(sa, c)
+}
+
+// campaignIdleDiagnosis explains WHY no CLAIM_BENEFIT row is claimable, in
+// one panel-renderable line. Non-CLAIM_BENEFIT claimable rows (the official
+// newbie/Pro packs arrive as actionType=VIEW_DETAILS — the benefit hides
+// behind the activity page) are named explicitly, plus the current official
+// newbie reality: first-login grants 300+100 credits and the +1800 Pro pack
+// is no longer delivered (user field report 2026-10-01).
+func campaignIdleDiagnosis(status *campaignStatusResponse) string {
+        if status == nil || len(status.Campaigns) == 0 {
+                return "今日暂无可领取权益（活动列表为空）"
+        }
+        parts := make([]string, 0, 2)
+        for i := range status.Campaigns {
+                c := &status.Campaigns[i]
+                if strings.EqualFold(c.ActionType, "CLAIM_BENEFIT") || !strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
+                        continue
+                }
+                parts = append(parts, fmt.Sprintf("%s（%s，需在官方活动页完成领取）", c.CampaignKey, c.ActionType))
+        }
+        if len(parts) > 0 {
+                return "今日暂无可签权益；存在需活动页领取的活动行：" + strings.Join(parts, "、")
+        }
+        return "今日暂无可领取权益"
 }

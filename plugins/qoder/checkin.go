@@ -2,6 +2,16 @@
 // handleManualCheckin endpoint, the 09:00 / 21:00 auto scheduler, and the
 // per-account mutex that prevents duplicate check-ins from racing browser
 // tabs. CN accounts are excluded — they use one-shot trial claims instead.
+//
+// v0.12.109 context (official Intl+CN desktop v0.4.3 asar forensics + field
+// report): the legacy daily UI no longer exists in the client — benefits ride
+// the campaigns system, claimed INSIDE the server-delivered activity WebView
+// (qoder.campaign postMessage protocol, verdict kind=claim_succeeded), while
+// the host only injects Authorization + Cosy-* identity headers. The client's
+// own launch step (campaigns status + client_launch_26 limited-number) is
+// mirrored by campaignLaunchSync (campaign.go). Current official newbie
+// grants: first-login 300 + campaign 100 credits; the +1800 Pro pack is no
+// longer delivered (user field report 2026-10-01).
 package main
 
 import (
@@ -317,6 +327,23 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
                         out["reward_credits"] = int64(rc)
                 }
                 rememberCheckinMoment(f.ID)
+                return out
+        }
+        // v0.12.109: "nothing claimable" is a NORMAL state, not a failure — the
+        // summary's Active flag can be true while every row is already claimed
+        // or VIEW_DETAILS-gated (the official newbie/Pro packs hide behind the
+        // activity page and are correctly refused here). The old path surfaced
+        // performCampaignCheckin's diagnosis as 上游未确认签到成功：<msg>, an
+        // error toast for a healthy account (field report u673e7fcc). Render
+        // the row-level diagnosis as a neutral skip instead.
+        if result, _ := res["result"].(string); result == "NOTHING_CLAIMABLE" {
+                out["success"] = true
+                out["skipped"] = true
+                out["reason"] = "none"
+                out["message"] = "今日暂无可领取权益"
+                if msg, ok := res["message"].(string); ok && msg != "" {
+                        out["message"] = msg
+                }
                 return out
         }
         if success, _ := res["success"].(bool); success {
