@@ -467,9 +467,11 @@ func checkinLockFor(authIndex string) *sync.Mutex {
 // at all.
 
 // campaignLooksLikeProUpgrade reports whether a campaign row looks like the
-// one-time Pro upgrade pack. Upstream never published the exact key, so the
-// match is a deliberately broad, case-insensitive substring over the row's
-// visible identity fields (campaignKey/actionType). It never fabricates a
+// one-time Pro upgrade pack. Upstream never published the exact key (live
+// keys observed in the act-YYYYMMDD-NNN form, which no name substring can
+// match), so the match combines two evidence sources: a pro/upgrade-looking
+// key or actionType, or a big one-shot CREDITS benefit (the Pro pack's
+// verified face value is +1800 — qoder2api-hub). It never fabricates a
 // campaign id, and unmatched rows are surfaced in the diagnostics instead of
 // being claimed blind.
 func campaignLooksLikeProUpgrade(c *campaign) bool {
@@ -478,6 +480,9 @@ func campaignLooksLikeProUpgrade(c *campaign) bool {
                 if strings.Contains(l, "pro") || strings.Contains(l, "upgrade") {
                         return true
                 }
+        }
+        if c.Benefit != nil && strings.EqualFold(c.Benefit.Kind, "CREDITS") && c.Benefit.Amount >= 1000 {
+                return true
         }
         return false
 }
@@ -535,7 +540,20 @@ func claimProViaCampaigns(sa *storedAuth) (map[string]any, error) {
         keys := make([]string, 0, len(status.Campaigns))
         for i := range status.Campaigns {
                 c := &status.Campaigns[i]
-                keys = append(keys, fmt.Sprintf("%s(%s/%s)", c.CampaignKey, c.ActionType, c.ClaimStatus))
+                k := fmt.Sprintf("%s(%s/%s", c.CampaignKey, c.ActionType, c.ClaimStatus)
+                // v0.8.35: surface the upstream's own "why not" verdicts —
+                // achievement-gated rows and device-targeted filtering are the
+                // two live reasons a healthy account sees no claimable Pro row.
+                if c.UnavailableReason != "" {
+                        k += ", reason=" + c.UnavailableReason
+                }
+                if c.RequiredAchievementKey != "" && !c.AchievementCompleted {
+                        k += ", achievement=" + c.RequiredAchievementKey + " 未完成"
+                }
+                if c.Benefit != nil && c.Benefit.Amount > 0 {
+                        k += fmt.Sprintf(", +%d", c.Benefit.Amount)
+                }
+                keys = append(keys, k+")")
         }
         out["message"] = "此账号活动列表暂无 Pro 升级项（现有：" + strings.Join(keys, "、") + "）。若刚注册，请先在官方客户端打开一次活动页同步资格后再试"
         return out, nil

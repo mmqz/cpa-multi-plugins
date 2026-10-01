@@ -90,6 +90,16 @@ type campaign struct {
         EndAt       int64        `json:"endAt"`
         ClaimStatus string       `json:"claimStatus"` // CLAIMABLE | CLAIMED | ...
         Benefit     *campaignBen `json:"benefit,omitempty"`
+        // v0.8.35 fields — reverse-engineered from the official
+        // growth-page/activity-iframe JS (cross-verified against the
+        // qoder2api-hub capture). They explain WHY a row is not claimable:
+        // task campaigns gate on achievements, device-targeted rows are
+        // filtered server-side, and the reason string carries the upstream's
+        // own verdict (e.g. ACHIEVEMENT_NOT_COMPLETED).
+        RequiredAchievementKey string `json:"requiredAchievementKey,omitempty"`
+        AchievementCompleted   bool   `json:"achievementCompleted,omitempty"`
+        UnavailableReason      string `json:"unavailableReason,omitempty"`
+        Placements             []any  `json:"placements,omitempty"`
 }
 
 type campaignBen struct {
@@ -234,6 +244,18 @@ func claimCampaignByID(sa *storedAuth, c *campaign) (map[string]any, error) {
                 return map[string]any{"success": false, "message": err.Error()}, nil
         }
         if resp.StatusCode >= 400 {
+                // v0.8.35: upstream also delivers the idempotent replay as an
+                // HTTP 409 carrying errorCode=ALREADY_CLAIMED/REPLAYED (hub
+                // capture) — normalize it like the 200 replayed body instead of
+                // surfacing a raw http error.
+                if resp.StatusCode == http.StatusConflict {
+                        var e map[string]any
+                        if json.Unmarshal(resp.Body, &e) == nil {
+                                if ec, _ := e["errorCode"].(string); strings.Contains(strings.ToUpper(ec), "ALREADY") || strings.EqualFold(ec, "REPLAYED") {
+                                        return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
+                                }
+                        }
+                }
                 return map[string]any{"success": false, "message": fmt.Sprintf("http %d: %s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))}, nil
         }
         var m map[string]any
@@ -246,11 +268,23 @@ func claimCampaignByID(sa *storedAuth, c *campaign) (map[string]any, error) {
         // landed earlier today — qoder2api capture): surface it as
         // ALREADY_CLAIMED so the panel shows 今日已签 instead of a fresh
         // success toast that would invite the user to claim again.
+        //
+        // v0.8.35: two more upstream verdicts, both live-verified by the
+        // qoder2api-hub capture:
+        //   - HTTP 409 with errorCode ALREADY_CLAIMED/REPLAYED → the same
+        //     idempotent replay, delivered as an error status instead of a
+        //     200 body;
+        //   - status=BLOCKED / failureCode=SAME_PERSON_ALREADY_CLAIMED →
+        //     upstream dedupes by PERSON, not by account: a second account
+        //     on the same machine identity already took this round's grant.
+        //     The row even disappears from that account's list afterwards.
         body := m
         if data, ok := m["data"].(map[string]any); ok {
                 body = data
         }
-        if statusValue, _ := body["status"].(string); strings.EqualFold(statusValue, "CLAIMED") {
+        statusValue, _ := body["status"].(string)
+        failureCode, _ := body["failureCode"].(string)
+        if strings.EqualFold(statusValue, "CLAIMED") {
                 if replayed, _ := body["replayed"].(bool); replayed {
                         return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
                 }
@@ -261,6 +295,14 @@ func claimCampaignByID(sa *storedAuth, c *campaign) (map[string]any, error) {
                         "campaign_id":    c.CampaignID,
                         "campaign_key":   c.CampaignKey,
                         "campaign_title": c.CampaignKey,
+                }, nil
+        }
+        if strings.EqualFold(statusValue, "BLOCKED") || strings.EqualFold(failureCode, "SAME_PERSON_ALREADY_CLAIMED") {
+                return map[string]any{
+                        "success":      false,
+                        "result":       "BLOCKED",
+                        "failure_code": failureCode,
+                        "message":      "同人已领取（同一设备身份下的其他账号本轮已领，服务端按人去重）",
                 }, nil
         }
         return map[string]any{"success": false, "upstream": m}, nil
