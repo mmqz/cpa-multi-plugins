@@ -8,31 +8,31 @@
 package main
 
 import (
-	"strings"
-	"sync"
+        "strings"
+        "sync"
 )
 
 const (
-	regionCN   = "cn"
-	regionIntl = "intl"
+        regionCN   = "cn"
+        regionIntl = "intl"
 
-	domainCN   = "qoder.com.cn"
-	domainIntl = "qoder.com"
+        domainCN   = "qoder.com.cn"
+        domainIntl = "qoder.com"
 )
 
 var (
-	loginRegionMu sync.RWMutex
-	loginRegion   = regionCN // region for NEW logins (config login_region)
+        loginRegionMu sync.RWMutex
+        loginRegion   = regionCN // region for NEW logins (config login_region)
 )
 
 // normalizeRegion maps any stored region hint onto cn/intl (default cn).
 func normalizeRegion(v string) string {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case regionIntl, "global":
-		return regionIntl
-	default:
-		return regionCN
-	}
+        switch strings.ToLower(strings.TrimSpace(v)) {
+        case regionIntl, "global":
+                return regionIntl
+        default:
+                return regionCN
+        }
 }
 
 // authRegion resolves the region of one stored account:
@@ -40,40 +40,40 @@ func normalizeRegion(v string) string {
 //  2. legacy fallback: domain sniff (qoder.sh / qoder.com without .cn → intl),
 //  3. default cn.
 func authRegion(sa *storedAuth) string {
-	if sa != nil {
-		if r := normalizeRegion(sa.Auth.Region); r == regionIntl {
-			return regionIntl
-		}
-		d := strings.ToLower(sa.Auth.Domain)
-		if strings.Contains(d, "qoder.sh") ||
-			(strings.Contains(d, "qoder.com") && !strings.Contains(d, "qoder.com.cn")) {
-			return regionIntl
-		}
-	}
-	return regionCN
+        if sa != nil {
+                if r := normalizeRegion(sa.Auth.Region); r == regionIntl {
+                        return regionIntl
+                }
+                d := strings.ToLower(sa.Auth.Domain)
+                if strings.Contains(d, "qoder.sh") ||
+                        (strings.Contains(d, "qoder.com") && !strings.Contains(d, "qoder.com.cn")) {
+                        return regionIntl
+                }
+        }
+        return regionCN
 }
 
 // domainForRegion returns the realm string stored in auth.domain.
 func domainForRegion(region string) string {
-	if region == regionIntl {
-		return domainIntl
-	}
-	return domainCN
+        if region == regionIntl {
+                return domainIntl
+        }
+        return domainCN
 }
 
 // upstreamBaseForRegion / gatewayBaseForRegion route by login/account region.
 func upstreamBaseForRegion(region string) string {
-	if region == regionIntl {
-		return upstreamBaseIntl
-	}
-	return upstreamBaseCN
+        if region == regionIntl {
+                return upstreamBaseIntl
+        }
+        return upstreamBaseCN
 }
 
 func gatewayBaseForRegion(region string) string {
-	if region == regionIntl {
-		return gatewayBaseIntl
-	}
-	return gatewayBaseCN
+        if region == regionIntl {
+                return gatewayBaseIntl
+        }
+        return gatewayBaseCN
 }
 
 // upstreamBaseFor / gatewayBaseFor route by the account's region.
@@ -83,61 +83,61 @@ func gatewayBaseFor(sa *storedAuth) string  { return gatewayBaseForRegion(authRe
 // Region-aware endpoint builders. The package-level endpoint* constants stay
 // as the CN defaults; all request sites use the For/ForRegion variants.
 func endpointJobTokenExchangeFor(sa *storedAuth) string {
-	return upstreamBaseFor(sa) + "/api/v1/jobToken/exchange"
+        return upstreamBaseFor(sa) + "/api/v1/jobToken/exchange"
 }
 
 func endpointJobTokenRefreshFor(sa *storedAuth) string {
-	return upstreamBaseFor(sa) + "/api/v1/jobToken/refresh"
+        return upstreamBaseFor(sa) + "/api/v1/jobToken/refresh"
 }
 
 func endpointUserInfoForRegion(region string) string {
-	return upstreamBaseForRegion(region) + "/api/v1/userinfo"
+        return upstreamBaseForRegion(region) + "/api/v1/userinfo"
 }
 
-func endpointProUpgradeFor(sa *storedAuth) string {
-	return upstreamBaseFor(sa) + "/sash/api/v1/me/pro-upgrade/claim"
-}
+// endpointProUpgradeFor was retired in v0.8.33: the pro-upgrade claim now
+// probes both gateway prefixes inline (checkin.go claimProUpgrade) and rides
+// billingBaseFor so the test seam covers it.
 
 func endpointChatFor(sa *storedAuth) string {
-	return gatewayBaseFor(sa) + "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
+        return gatewayBaseFor(sa) + "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
 }
 
 func endpointModelsFor(sa *storedAuth) string {
-	return gatewayBaseFor(sa) + "/algo/api/v2/model/list?Encode=1"
+        return gatewayBaseFor(sa) + "/algo/api/v2/model/list?Encode=1"
 }
 
 // Login-region config accessors (parsed from login_region in configure()).
 func loadedLoginRegion() string {
-	loginRegionMu.RLock()
-	defer loginRegionMu.RUnlock()
-	return loginRegion
+        loginRegionMu.RLock()
+        defer loginRegionMu.RUnlock()
+        return loginRegion
 }
 
 func setLoginRegion(r string) {
-	loginRegionMu.Lock()
-	loginRegion = r
-	loginRegionMu.Unlock()
+        loginRegionMu.Lock()
+        loginRegion = r
+        loginRegionMu.Unlock()
 }
 
 // qoderWebsiteFor / qoderClientIDFor / qoderRedirectURIFor select the
 // device-authorization entry point per region (was hardcoded per plugin).
 func qoderWebsiteFor(region string) string {
-	if region == regionIntl {
-		return qoderWebsiteIntl
-	}
-	return qoderWebsiteCN
+        if region == regionIntl {
+                return qoderWebsiteIntl
+        }
+        return qoderWebsiteCN
 }
 
 func qoderClientIDFor(region string) string {
-	if region == regionIntl {
-		return qoderClientIDIntl
-	}
-	return qoderClientIDCN
+        if region == regionIntl {
+                return qoderClientIDIntl
+        }
+        return qoderClientIDCN
 }
 
 func qoderRedirectURIFor(region string) string {
-	if region == regionIntl {
-		return qoderRedirectURIIntl
-	}
-	return qoderRedirectURICN
+        if region == regionIntl {
+                return qoderRedirectURIIntl
+        }
+        return qoderRedirectURICN
 }
