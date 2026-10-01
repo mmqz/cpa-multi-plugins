@@ -1,109 +1,13 @@
-# Qoder CPA 插件（CN + Intl 合并版）
+# qoder
 
-[CLIProxyAPI (CPA)](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder 统一 Provider 插件：**一个插件同时覆盖 CN（qoder.com.cn）与 Intl（qoder.com）双区**，多账号 OAuth/PAT 双登录、动态模型、COSY 签名推理、每日签到、积分面板、token 自动保活。
+A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) provider plugin for the Qoder family. The CN and Intl variants share one plugin and one identifier; accounts are routed by the region recorded in each auth file, and legacy per-region auth files are adopted on startup.
 
-> v0.10.0 合并说明：原 `qoder-cn` 与 `qoder-intl` 两个插件逻辑完全一致（仅 host/client-id 常量不同），已合并为本插件。每个账号按 auth 文件内的 `region` 字段路由（`qoder-cn-<uid>.json` → CN，`qoder-intl-<uid>.json` → Intl），旧文件启动时自动收养（重写 type/provider，文件名保持不变）。新增账号的登录区域由插件配置 `login_region`（cn | intl，默认 cn）决定。
-
-## 功能
-
-## 功能
-
-| 能力 | 说明 |
-|---|---|
-| **双登录方式** | ① OAuth 设备授权（PKCE，浏览器授权，dt- 30 天 + drt- 1 年自动旋转）② PAT 导入（pt-，长期有效兜底）——两家族可共存于同一 auth 文件 |
-| **领取Pro** | 面板手动触发（每账号按钮）。v0.8.34：走 campaigns 通道领取 Pro 升级包——上游官方客户端（CN v0.4.3，sha256 a796a175…05084f5）二进制中不存在 `/me/pro-upgrade/*` 端点（v0.8.18-0.8.33 的 eligibility→claim 为误判，404 即"无此路由"）；资格即 campaigns 行的 claimStatus。v0.8.36：补齐 campaigns 的机器身份层（"打开客户端同步资格"的真身）——服务端按 `Cosy-Machine*` 请求头过滤设备定向活动（每日 100 / +1800 Pro 包），真值来自官方客户端原生风控桥 `<install>/resources/umid/runtime-info.exe prod --account-stdin`；插件优先调同一官方二进制取真身份（30 分钟缓存，机器级），未装官方客户端时回退 hub 同款稳定派生值并在诊断里如实标注（定向行可能被服务端过滤、虚拟机不参与，VBS/HVCI 实体机可能被误报）；另增只读 `GET /me/campaigns/{id}/reward` 面值探测——无面值的 VIEW_DETAILS 行（实测账号 ud2d62d72 的 live 形态）也能按验证过的 +1800 面值认领 |
-| **COSY 推理** | RSA 包 AES 会话密钥 + MD5 请求签名，按账号区域对接 gateway.qoder.com.cn（CN）/ api3.qoder.sh（Intl）SSE 流式 |
-| **动态模型** | COSY 拉取 `/algo/api/v2/model/list`（chat scene），10 静态模型兜底 |
-| **大上下文** | 客户端自带 system 时自动模板瘦身（省 ~10K token/请求）+ 消息逐字透传（tool_calls/多模态 content 保真）+ 客户端 tools 直通；上游判输入过大（413/过长文案）时给出明确指引，与账号积分问题严格区分 |
-| **每日签到** | 面板手动签到（单账号/批量）+ 10:00/21:00 定时自动签到（上游每日权益 10:00 UTC+8 刷新），签到后返回最新积分快照。v0.8.21：CN/Intl 统一走 campaigns 领取系统——上游已全局禁用 legacy CN daily-check-in（claim 恒 409 且不发积分，2026-09-21 实测）；legacy status 仅作 CN 只读统计补充。v0.8.22：billing 面全量携带桌面端 Cosy 身份头（User-Agent: Qoder / Cosy-ClientType: 10 / Cosy-Version: 0.4.3，v0.8.35 对齐官方客户端实装版本）——上游按该头门控 campaigns 响应，裸请求可能返回 showCampaign:false 导致当日权益静默漏签（bfSan 实测 2026-09-21）。v0.8.35：claim 幂等语义补齐（409+errorCode=ALREADY_CLAIMED 与 status=BLOCKED/failureCode=SAME_PERSON_ALREADY_CLAIMED 分别归一化为「已领取/同人已领取」——上游按人去重，同机多号共享每轮额度）|
-| **流式首包门** | 可选（v0.8.23，默认关）：`stream_head_timeout: <秒>` 开启后，异步流式在移交前先等首包判决——上游把账号级错误发成 HTTP 200 + 帧内 `statusCodeValue>=400`/`body.error` 时，移交前失败直接按普通失败返回并带上帧里的真实状态（缺失/越界落 502，不编造 401/403 之类会误导冷却的码），宿主得以换号/冷却而不是收到"成功的空回答"；真正开始吐内容后保持原样（含 in-band 错误），静默/超时等价于关闭态。0 = 逐字节沿用旧行为 |
-| **积分面板** | 账号卡片：昵称/积分/计划/签到状态/操作（签到/刷新/选用） |
-| **token 保活** | 22:00 定时刷新；按 token 前缀路由（drt- → deviceToken/refresh，jrt- → jobToken/refresh），PAT 永不劫持 OAuth 刷新 |
-| **auth 隔离** | 文件名前缀 `qoder-` 过滤（含收养的 `qoder-cn-`/`qoder-intl-` 旧文件），与 workbuddy 等其他插件互不干扰 |
-
-## 安装
-
-### 从 Release（推荐）
-
-```bash
-# 按你的平台下载（示例 linux/arm64）
-unzip qoderwork_0.2.6_linux_arm64.zip
-cp qoderwork.so /path/to/cliproxyapi/plugins/qoderwork.so
-```
-
-### 从源码
-
-```bash
-cd qoderwork
-CGO_ENABLED=1 go build -buildmode=c-shared -ldflags "-X main.version=0.2.6" -o qoderwork.so .
-cp qoderwork.so /path/to/cliproxyapi/plugins/
-```
-
-### config.yaml
-
-```yaml
-plugins:
-  enabled: true
-  dir: "plugins"
-  configs:
-    qoderwork:
-      enabled: true
-
-# 模型别名（可选）
-oauth-model-alias:
-  qoderwork:
-    - name: qmodel_preview
-      alias: qoder/qwen3.8-max
-    - name: qmodel_latest
-      alias: qoder/qwen3.7-max
-```
-
-## 使用
-
-### 方式一：OAuth 登录（推荐）
-
-1. CPA 管理面板 → Auth 文件 → QoderWork OAuth 登录卡片
-2. 浏览器打开授权链接 → 登录 qoder.com.cn（阿里云 SSO）→ 点 Continue 授权
-3. 插件自动轮询拿 token 落盘（dt-/drt-）。Pro 升级包（+1800）请在面板账号卡片点「领取Pro」手动领取（v0.8.34 起；登录不再自动触发，见上方能力表）
-
-### 方式二：PAT 导入
-
-1. qoder.com.cn → 设置 → Personal Access Token → 创建（pt- 开头）
-2. 插件面板（`/v0/resource/plugins/qoderwork/panel`）→ 右上角「导入 QoderWork 凭证」→ 粘贴 PAT → 导入
-3. 插件自动换 jobToken（jt-/jrt-）落盘
-
-### 面板
-
-`/v0/resource/plugins/qoderwork/panel`（需 management key）
-
-- 账号卡片：积分余额 / 计划 / 签到按钮（签到后返回最新积分）
-- 「全部签到」批量签到；自动签到开关（09:00/21:00）
-
-## 凭证家族与刷新
-
-```
-auth 文件字段（可共存）：
-  accessToken:   dt- (OAuth, ~30d) 或 jt- (PAT 交换, 24h)
-  refreshToken:  drt- (~1y, 旋转)   或 jrt- (48h)
-  personalToken: pt- (长期兜底，导入即永久)
-```
-
-- 刷新路由按 `refreshToken` 前缀：`drt-` → `deviceToken/refresh`；`jrt-` → `jobToken/refresh` → 失败 fallback PAT re-exchange
-- `personalToken` 永不主动覆盖活跃 token，只做最终兜底
-- host 15 分钟 auto-refresh + 插件 22:00 keepalive 均按此规则
-
-## 模型
-
-11 个静态模型（`qmodel_preview`、`qfmodel` 等）+ COSY 动态拉取。CPA 侧别名示例：`qoder/qwen3.8-max` → `qmodel_preview`。
-
-思考模式：2026-09-19 起对齐上游——所有请求统一 `is_reasoning: true` + `source: "system"`（不支持思考的模型上游自动忽略）；客户端可传 OpenAI 风格 `reasoning_effort`（`low`/`medium`/`xhigh`），非法值/缺省走上游默认（medium）。`Qwen3.8-Flash`（`qfmodel`）为官方限时免费模型（2026-10 前），动态发现与静态目录均已收录。
-
-## 参考文档
-
-- [KNOWLEDGE.md](../KNOWLEDGE.md) — QoderWork API 逆向全记录（COSY 签名/编码/端点）
-- [analysis/api-endpoints-scan.md](../analysis/api-endpoints-scan.md) — 客户端全端点扫描
-- [analysis/qoderwork-real-oauth.md](../analysis/qoderwork-real-oauth.md) — OAuth 设备授权流程 + 本地测试证据
+Built with Go (CGO, c-shared). Release artifacts for all supported platforms are produced by CI from tagged commits — see the repository root README for the version matrix and the disclaimer.
 
 ## License
 
-MIT（based on workbuddy by lovingfish，见 [LICENSE](LICENSE)）
+MIT — see [LICENSE](LICENSE).
+
+## Disclaimer
+
+The code originates from the upstream reference repository and is provided for mirroring purposes only.
