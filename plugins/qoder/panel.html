@@ -181,7 +181,7 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
 <body>
 <div class="wrap">
   <h1>QoderWork 账号面板</h1>
-  <div class="sub">积分余额 · CN 每日签到（09:00/21:00）· 耗尽自动关</div>
+  <div class="sub">积分余额 · 每日权益（CN/Intl · 09:00/21:00）· 耗尽自动关</div>
   <div id="authBox" class="card" style="display:none;margin-bottom:16px">
     <div style="margin-bottom:8px;color:var(--mut)">需要管理密钥（management key）才能访问账号数据。从 CPA 主面板嵌入时会自动获取，无需输入。错误密钥请勿连点，避免 IP 封禁。</div>
     <div style="display:flex;gap:8px">
@@ -195,13 +195,13 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     <button class="sec" onclick="checkinAll(this)">全部签到</button>
     <button class="sec" onclick="modelCtlToggle(this)" title="按渠道勾选启用/禁用模型（写入 oauth-excluded-models 子键）">模型禁用</button>
     
-    <label class="toggle" title="仅 CN 账号 09:00 / 21:00"><input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)"> 自动签到(CN)</label>
+    <label class="toggle" title="全部账号 09:00 / 21:00 · campaigns 权益通道，CN 与 Intl 均生效"><input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)"> 自动签到</label>
     <span class="toggle" id="svtime"></span>
   </div>
   <div class="filter-bar" id="filterBar">
     <button type="button" class="ftag active" data-region="all" onclick="filterRegion('all',this)">全部 <span class="cnt" id="cntAll">0</span></button>
     <button type="button" class="ftag" data-region="cn" onclick="filterRegion('cn',this)">CN <span class="cnt" id="cntCn">0</span></button>
-    
+    <button type="button" class="ftag" data-region="intl" onclick="filterRegion('intl',this)">Intl <span class="cnt" id="cntIntl">0</span></button>
     <button type="button" class="ftag" data-region="exhausted" onclick="filterRegion('exhausted',this)">耗尽 <span class="cnt" id="cntExhausted">0</span></button>
   </div>
   <div class="summary card" id="summaryBox" style="display:none"></div>
@@ -325,10 +325,20 @@ function esc(s){return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">
 // (error/message objects) must never reach "a"+b concatenation — that is
 // exactly how "u345ee231：[object Object]" toasts happened (v0.8.15).
 function asText(v){if(v==null)return "";if(typeof v==="string")return v;if(typeof v==="object"){try{return JSON.stringify(v)}catch(e){return String(v)}}return String(v)}
-function progressHTML(c){
+function progressHTML(c, disabled){
   // total uses size when known; remain = spendable, used = cycle spend.
   // Check-in adds packs → size/remain go UP (grant). Chat spend → used goes UP, remain DOWN.
-  if(!c||(!(c.total_remain||0)&&!(c.total_used||0)&&!(c.total_size||0)))return '<div class="pb"><div class="pb-label"><span>可用积分</span><span class="spin"></span>加载中…</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
+  // v0.8.32 (#26): the spinner guard now also considers packages — an Intl
+  // Free account whose credits live entirely in a (fully used) campaign pack
+  // reports all-scalar zero with packages present; the old guard treated that
+  // real snapshot as "not loaded yet" and spun forever. Same predicate as the
+  // backend isCreditsExhausted / creditOf known test.
+  // Disabled accounts are skipped by lazyLoadCredits, so without a cached
+  // snapshot they would spin forever too — show an explicit neutral line.
+  if(!c||(!(c.total_remain||0)&&!(c.total_used||0)&&!(c.total_size||0)&&!(c.packages&&c.packages.length))){
+    if(disabled) return '<div class="pb"><div class="pb-label"><span>可用积分</span><span>已禁用 · 积分未知</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
+    return '<div class="pb"><div class="pb-label"><span>可用积分</span><span class="spin"></span>加载中…</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
+  }
   const remain=c.total_remain||0, used=c.total_used||0;
   const size=c.total_size||(remain+used);
   const total=size>0?size:(remain+used);
@@ -394,7 +404,7 @@ function card(a){
   <h2>${esc(nick)} <span style="display:flex;gap:6px;align-items:center">${badges}</span></h2>
   <div class="uid">${esc(a.uid||"")} · ${esc(a.name||"")}</div>
   ${coolingHTML}
-  ${progressHTML(cr)}
+  ${progressHTML(cr, disabled)}
   ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
   <div class="actions">${selectBtn}${refreshBtn}${actionHTML}</div>
   </div>`;
@@ -500,16 +510,20 @@ function filterRegion(region, btn){
   renderSummary(lastAccounts);
 }
 function updateFilterCounts(accounts){
-  let cn=0, ex=0;
+  // v0.8.32 (#26): count by the card's actual region — the old code
+  // incremented cn unconditionally, so Intl accounts inflated the CN tag.
+  let cn=0, intl=0, ex=0;
   (accounts||[]).forEach(a=>{
-    cn++;
+    if((a.region||"cn")==="intl") intl++; else cn++;
     if(a.exhausted||(a.credits&&a.credits.total_remain===0&&(a.credits.total_used>0||(a.credits.packages&&a.credits.packages.length)))) ex++;
   });
   const elAll=document.getElementById("cntAll");
   const elCn=document.getElementById("cntCn");
+  const elIntl=document.getElementById("cntIntl");
   const elEx=document.getElementById("cntExhausted");
   if(elAll) elAll.textContent=String((accounts||[]).length);
   if(elCn) elCn.textContent=String(cn);
+  if(elIntl) elIntl.textContent=String(intl);
   if(elEx) elEx.textContent=String(ex);
 }
 function accountsForFilter(accounts){
@@ -541,7 +555,7 @@ function renderSummary(accounts){
   }
   const scoped=accountsForFilter(all);
   let remain=0, used=0, size=0, knownN=0, disabledN=0, exhaustedN=0;
-  let cnRemain=0, cnUsed=0;
+  let cnRemain=0, cnUsed=0, intlRemain=0, intlUsed=0;
   scoped.forEach(a=>{
     const c=creditOf(a);
     if(c.known){ remain+=c.remain; used+=c.used; size+=c.size; knownN++; }
@@ -553,8 +567,10 @@ function renderSummary(accounts){
     const c=creditOf(a);
     if(!c.known) return;
     allRemain+=c.remain; allUsed+=c.used; allSize+=c.size;
-    
-    cnRemain+=c.remain; cnUsed+=c.used;
+    // v0.8.32 (#26): split the per-region rollup by the account's actual
+    // region — Intl credits used to be folded into the CN line.
+    if((a.region||"cn")==="intl"){ intlRemain+=c.remain; intlUsed+=c.used; }
+    else { cnRemain+=c.remain; cnUsed+=c.used; }
   });
   const total=size>0?size:(remain+used);
   const pct=total>0?Math.round(used/total*100):0;
@@ -579,7 +595,7 @@ function renderSummary(accounts){
       <div class="pb-meta">可用 ${remain} · 已用 ${used} · 池 ${total||0}（签到加包会抬高池和可用，不等于没消耗）</div>
     </div>
     ${currentFilter==="all"?`
-    <div class="pb-meta" style="margin-top:10px">CN 可用 ${cnRemain} / 已用 ${cnUsed}</div>
+    <div class="pb-meta" style="margin-top:10px">CN 可用 ${cnRemain} / 已用 ${cnUsed} · Intl 可用 ${intlRemain} / 已用 ${intlUsed}</div>
     `:`
     <div class="pb-meta" style="margin-top:10px">全部账号池：可用 ${allRemain} · 已用 ${allUsed} · 池 ${allTotal||0}</div>
     `}
