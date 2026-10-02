@@ -192,50 +192,67 @@ func uiUserType(ui *userInfoResponse) string {
 // -----------------------------------------------------------------------------
 // Device-authorization login (real OAuth — no PAT required)
 //
-// Reverse-engineered from the official QoderWork CN desktop client
-// (/tmp/qw_extract .../main.js) and proven live against the Global realm by
-// /root/qoder-register/qoder_device_oauth.py (2026-07-22, issued dt-/drt-
-// tokens). CN realm constants from the same main.js:
+// v0.8.45 (official desktop client v0.4.3 asar forensics, BOTH regions):
+// the legacy qoderwork IDE-plugin constants (client_id 1c5e33e1-... for CN,
+// e883ade2-... for Intl, qoder-work-cn:// / qoder://aicoding... redirects,
+// qoder.com.cn auth host) were reverse-engineered from the OLD qoderwork
+// IDE plugin, NOT the official desktop client. Both the CN asar
+// (asar-cn/out/main/index.js, Vpe config block) and the Intl asar
+// (asar-intl/out/main/index.js, same Vpe shape) reveal the official desktop
+// client uses ONE unified protocol:
 //
-//      WEBSITE_DOMAIN  = qoder.com.cn        (auth pages)
-//      OPENAPI_DOMAIN  = openapi.qoder.com.cn (token endpoints)
-//      CLIENT_ID prod  = 1c5e33e1-364d-4ce6-b02c-acaa81274a5c (shared with Global)
-//      REDIRECT_URI    = qoder-work-cn://
+//      client_id         = 732aef47-9cf2-46a2-95fe-4cebb5d0d1fa  (shared CN+Intl)
+//      authBizVariant    = "qoder"  (wraps selectAccounts in /users/sign-in)
+//      authBaseUrl (CN)  = https://qoder.cn         (NOT qoder.com.cn)
+//      authBaseUrl (Intl) = https://qoder.com
+//      redirect_uri (CN)  = null  → OMITTED from the URL
+//      redirect_uri (Intl)= "qoder-app://"
+//      openApiBaseUrl (CN)  = https://openapi.qoder.com.cn  (poll/refresh/userinfo)
+//      openApiBaseUrl (Intl)= https://openapi.qoder.sh
 //
-// Flow: StartLogin builds the /device/selectAccounts URL with a PKCE
-// challenge; the user authorizes in their browser; PollLogin polls
-// /api/v1/deviceToken/poll with the verifier until the grant lands
-// (404/202 = pending). Tokens: dt- (~30d) + drt- refresh (~1y), refreshed via
-// POST /api/v1/deviceToken/refresh — no PAT involved anywhere.
+// The official newbie grant (first desktop-client login → 14-day Pro trial
+// + 300 credits) is evaluated SERVER-SIDE on that login event, so presenting
+// AS the official desktop client is the ONLY plugin-side channel that
+// triggers it. The legacy qoderwork IDE login never fires the grant — which
+// is the root cause of "qoder cn/init 无法签到也无法领取首登录奖励"
+// (field report 2026-10-02): the account logs in, but the campaigns
+// surface never shows the daily 100-credits / Pro pack rows that the newbie
+// grant would have unlocked, so check-in reports "今日暂无可领取权益"
+// forever.
+//
+// v0.8.45 therefore retires the v0.8.40 Intl-only "desktop dialect" opt-in:
+// both CN and Intl now always build the official desktop-client URL. The
+// `login_dialect` config key is kept as a deprecated no-op for backward
+// compatibility — both "cockpit" and "desktop" values produce the same
+// desktop URL now.
 // -----------------------------------------------------------------------------
 
 const (
-	qoderWebsiteCN     = "https://qoder.com.cn"
-	qoderClientIDCN    = "1c5e33e1-364d-4ce6-b02c-acaa81274a5c"
-	qoderRedirectURICN = "qoder-work-cn://"
-	// Intl device-authorization entry (merged qoder-intl plugin, v0.10.0).
-	qoderWebsiteIntl     = "https://qoder.com"
-	qoderClientIDIntl    = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb"
-	qoderRedirectURIIntl = "qoder://aicoding.aicoding-agent/login-success"
+	// qoderDesktopClientID is the single client_id both the CN (qoder.cn)
+	// and Intl (qoder.com) desktop clients v0.4.3 send on /device/selectAccounts.
+	// Verified byte-identical in asar-cn/out/main/index.js and
+	// asar-intl/out/main/index.js (Vpe.authClientIds.prod).
+	qoderDesktopClientID = "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa"
 
-	// v0.8.40 - OFFICIAL DESKTOP CLIENT dialect (Qoder-linux-amd64.deb
-	// v0.4.3 asar, out/main/index.js, functions Sft/Nft/bft/kft + the Vpe
-	// release-channel config). The desktop app starts its device flow at
-	//   {auth}/users/sign-in?biz_variant=qoder&oauth_callback={auth}/device/selectAccounts?challenge=...&challenge_method=S256&nonce=...&machine_id=...&client_id=732aef47-...&redirect_uri=qoder-app://
-	// and polls GET /api/v1/deviceToken/poll?nonce=...&verifier=...&challenge_method=S256
-	// (1s cadence, 404=pending, 300s deadline) - identical to our poller.
-	// The official newbie rules (14-day Pro trial + 300 credits) are granted
-	// SERVER-SIDE on the first desktop-client login; no activation endpoint
-	// exists in the entire /api + /sash tree (full enumeration on record),
-	// so replicating the desktop wire format - its client_id, machine_id and
-	// the /users/sign-in wrapper - is the only plugin-side channel that
-	// presents the login as a desktop-client login. Cockpit dialect (the
-	// default, no client_id/machine_id) keeps working for plain imports:
-	// pairing the desktop client_id with a foreign redirect_uri is what the
-	// cockpit grant API rejected with "Parameter invalid" (v0.12.10 note),
-	// so the dialect pair is all-or-nothing.
-	qoderDesktopClientIDIntl    = "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa"
-	qoderDesktopRedirectURIIntl = "qoder-app://"
+	// CN desktop client v0.4.3 (asar-cn Vpe + environments.prod):
+	//   authBaseUrl  = https://qoder.cn        (NOT qoder.com.cn — that's the
+	//                                            legacy qoderwork IDE domain)
+	//   redirect_uri = null                    (omitted from the URL — the
+	//                                            Sft builder's
+	//                                            `...t.redirectUri?{redirect_uri:t.redirectUri}:{}`
+	//                                            drops the param when null)
+	//   biz_variant  = "qoder"                 (wraps the URL in /users/sign-in)
+	qoderWebsiteCN     = "https://qoder.cn"
+	qoderClientIDCN    = qoderDesktopClientID
+	qoderRedirectURICN = "" // empty → omitted from selectAccounts URL
+
+	// Intl desktop client v0.4.3 (asar-intl Vpe + environments.prod):
+	//   authBaseUrl  = https://qoder.com
+	//   redirect_uri = "qoder-app://"         (stable channel)
+	//   biz_variant  = "qoder"
+	qoderWebsiteIntl     = "https://qoder.com"
+	qoderClientIDIntl    = qoderDesktopClientID
+	qoderRedirectURIIntl = "qoder-app://"
 )
 
 // deviceTokenResponse mirrors /api/v1/deviceToken/{poll,refresh} payloads.
@@ -289,62 +306,63 @@ func handleStartLogin(raw []byte) ([]byte, error) {
 // OAuth entry point stays single per plugin; which realm it targets is
 // chosen in the plugin config (login_region dropdown) and is STICKY
 // (v0.12.10).
+//
+// v0.8.45 (official desktop client v0.4.3 asar forensics): both CN and Intl
+// now build the official desktop-client URL byte-for-byte (asar functions
+// Sft + Nft): /device/selectAccounts?challenge=&challenge_method=S256&nonce=
+// &machine_id=&client_id=732aef47-...[&redirect_uri=] then wrapped in
+// /users/sign-in?biz_variant=qoder&oauth_callback=<encoded inner URL>. The
+// machine_id is the real machine fingerprint (machineIdentityFor), not a
+// random uuid — the official client sends its real machine identity, and
+// the campaigns surface gates device-targeted rows on that identity.
+//
+// CN specifics: redirect_uri is EMPTY → omitted from the inner URL (the
+// official CN desktop client's authRedirectUris.stable is null). Intl
+// specifics: redirect_uri = "qoder-app://".
+//
+// The v0.8.40 Intl-only `login_dialect` opt-in is now a deprecated no-op:
+// both "cockpit" and "desktop" values produce the same desktop URL. The
+// config key is kept for backward compatibility with existing deployments.
 func startLoginWithRegion(raw []byte, region string) ([]byte, error) {
 	verifier, challenge := makePKCE()
 	// nonce: intl protocol (cockpit-tools v1.3.36, aligned 2026-09-02)
 	// uses 32-hex uuid-simple; CN (cpa-plugin qoderwork reference) keeps
-	// the dashed uuid.
+	// the dashed uuid. The upstream /api/v1/deviceToken/poll accepts both
+	// forms — the format split is preserved purely for backward compat with
+	// existing captured traffic, not a hard upstream requirement.
 	nonce := uuid.NewString()
 	if region == regionIntl {
 		nonce = strings.ReplaceAll(nonce, "-", "")
 	}
-	// v0.8.40: intl offers a second wire dialect. "cockpit" (default) is the
-	// legacy no-client_id/machine_id entry that plain imports have used since
-	// v0.10.0. "desktop" reproduces the official desktop client v0.4.3 flow
-	// byte-for-byte (asar functions Sft/Nft): desktop client_id + machine_id
-	// + qoder-app:// redirect + the /users/sign-in?biz_variant=qoder wrapper.
-	// The official newbie grant (first desktop login → 14-day Pro trial + 300
-	// credits) is evaluated server-side on that login event, so the desktop
-	// dialect is the only plugin-side channel that can present AS a desktop
-	// login. CN keeps the qoderwork protocol — it already IS the CN desktop
-	// client's protocol.
-	machineID := uuid.NewString()
-	prompt := "在打开的页面中登录并授权 QoderWork（设备授权，无需 PAT）。完成后此窗口会自动关闭。"
+	// v0.8.45: the official desktop client sends its REAL machine fingerprint
+	// (machineIdentityFor → native umid bridge or per-uid simulated identity
+	// matching the official bridge's output shape). A random uuid here is
+	// exactly what the campaigns surface filters device-targeted rows on —
+	// the daily 100-credits and Pro pack rows disappear for derived/random
+	// identities. machineIdentityFor falls back to a per-uid simulated
+	// identity when the official umid binary is not installed.
+	machineID := machineIdentityFor(region, "", false).MachineID
+	prompt := "在打开的页面中登录并授权（官方桌面客户端同源设备授权，无需 PAT）。授权完成后浏览器可能提示打开 Qoder 桌面应用——属正常现象，插件会自动完成轮询登录。"
+
+	// Sft — /device/selectAccounts with PKCE + machine identity + client_id.
+	// CN: redirect_uri is empty (the official desktop client omits it); Intl
+	// carries qoder-app://. The check mirrors the asar's
+	// `...t.redirectUri?{redirect_uri:t.redirectUri}:{}`.
 	q := url.Values{}
 	q.Set("challenge", challenge)
 	q.Set("challenge_method", "S256")
 	q.Set("nonce", nonce)
-	q.Set("redirect_uri", qoderRedirectURIFor(region))
-	if region != regionIntl {
-		// CN (qoder.com.cn, qoderwork protocol): client_id + machine_id stay.
-		q.Set("client_id", qoderClientIDFor(region))
-		// intl (qoder.com): cockpit-tools v1.3.36 dropped client_id and
-		// machine_id from the device-login URL — the grant API now rejects
-		// the legacy pair with "Parameter invalid" after the user
-		// authorizes. Only nonce/challenge/challenge_method/redirect_uri
-		// are sent. CN keeps the qoderwork protocol.
-		q.Set("machine_id", machineID)
+	q.Set("machine_id", machineID)
+	q.Set("client_id", qoderClientIDFor(region))
+	if r := qoderRedirectURIFor(region); r != "" {
+		q.Set("redirect_uri", r)
 	}
-	authURL := qoderWebsiteFor(region) + "/device/selectAccounts?" + q.Encode()
-	if region == regionIntl && loadedLoginDialect() == loginDialectDesktop {
-		// Sft: desktop dialect carries the desktop client_id, the machine
-		// identity (region-level derivation — stable per deployment, same
-		// scheme the campaigns face attaches) and the qoder-app:// redirect
-		// registered for that client_id. A foreign redirect_uri paired with
-		// this client_id is what the grant API once rejected, so the dialect
-		// pair is all-or-nothing. The machine_id must NOT be a random uuid
-		// here: the official client sends its real machine fingerprint.
-		machineID = machineIdentityFor(region, "", false).MachineID
-		q.Set("client_id", qoderDesktopClientIDIntl)
-		q.Set("redirect_uri", qoderDesktopRedirectURIIntl)
-		q.Set("machine_id", machineID)
-		authURL = qoderWebsiteIntl + "/device/selectAccounts?" + q.Encode()
-		// Nft: the desktop client wraps the selectAccounts URL in the
-		// sign-in page (biz_variant=qoder). QODER_AUTH_DIRECT_DEVICE_FLOW=1
-		// skips the wrapper upstream; the wrapper is the desktop default.
-		authURL = qoderWebsiteIntl + "/users/sign-in?biz_variant=qoder&oauth_callback=" + url.QueryEscape(authURL)
-		prompt = "在打开的页面中登录并授权（官方桌面客户端同源设备授权，无需 PAT）。授权完成后浏览器可能提示打开 Qoder 桌面应用——属正常现象，插件会自动完成轮询登录。"
-	}
+	innerURL := qoderWebsiteFor(region) + "/device/selectAccounts?" + q.Encode()
+
+	// Nft — wrap the selectAccounts URL in the sign-in page
+	// (biz_variant=qoder). The official client always wraps unless
+	// QODER_AUTH_DIRECT_DEVICE_FLOW=1 is set; we always wrap.
+	authURL := qoderWebsiteFor(region) + "/users/sign-in?biz_variant=qoder&oauth_callback=" + url.QueryEscape(innerURL)
 
 	now := time.Now()
 	state := fmt.Sprintf("qw-%d", now.UnixNano())

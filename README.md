@@ -6,7 +6,7 @@ Provider plugins for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
 | --- | --- |
 | workbuddy | 0.9.47 |
 | trae | 0.12.70 |
-| qoder | 0.8.41 |
+| qoder | 0.8.45 |
 | zcode | 0.2.0 |
 | mimo | 0.2.17 |
 
@@ -85,13 +85,23 @@ The code in this repository is adapted and organized from the upstream reference
 - **COSY signing**: `qoderwork/sign.go` (220 lines) + `encoding.go` (53 lines)
 - **Check-in**: `qoderwork/checkin.go` (`openapi.qoder.com.cn/sash/api/v1/me/daily-check-in/{status,claim}`)
 - **PAT import**: `qoderwork/oauth.go` (`openapi.qoder.com.cn/api/v1/jobToken/exchange`)
+- **v0.8.45 (official desktop client v0.4.3 asar forensics)**: the legacy qoderwork IDE-plugin constants (client_id `1c5e33e1-...` for CN, `e883ade2-...` for Intl, `qoder-work-cn://` / `qoder://aicoding...` redirects, `qoder.com.cn` auth host) were reverse-engineered from the OLD qoderwork IDE plugin, NOT the official desktop client. Both the CN RPM (`Qoder-CN-linux-x86_64.rpm`, asar `out/main/index.js` Vpe config block) and the Intl RPM (`Qoder-linux-x86_64.rpm`, same Vpe shape) reveal the official v0.4.3 desktop client uses ONE unified protocol across both regions:
+  - **client_id** = `732aef47-9cf2-46a2-95fe-4cebb5d0d1fa` (shared CN+Intl)
+  - **biz_variant** = `qoder` (wraps the `selectAccounts` URL in `/users/sign-in?biz_variant=qoder&oauth_callback=...`)
+  - **authBaseUrl (CN)** = `https://qoder.cn` (NOT `qoder.com.cn` — that's the legacy qoderwork IDE domain)
+  - **authBaseUrl (Intl)** = `https://qoder.com`
+  - **redirect_uri (CN)** = null → OMITTED from the URL (the Sft builder's `...t.redirectUri?{redirect_uri:t.redirectUri}:{}` drops the param)
+  - **redirect_uri (Intl)** = `qoder-app://`
+  - The official newbie grant (14-day Pro trial + 300 credits) fires SERVER-SIDE on the desktop-client login event; the legacy qoderwork IDE login never triggers it — root cause of "qoder cn/init 无法签到也无法领取首登录奖励"
+  - Both CN and Intl now build the desktop URL by default; the v0.8.40 Intl-only `login_dialect=desktop` opt-in is a deprecated no-op
 
 #### `plugins/qoder-intl` (adapted from qoderwork)
 - Same as qoder-cn
-- **host**: `openapi.qoder.sh` / `api3.qoder.sh` (vs CN `openapi.qoder.com.cn` / `gateway.qoder.com.cn`)
-- **client_id**: `e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb` (vs CN `1c5e33e1-...`)
-- **redirect_uri**: `qoder://aicoding.aicoding-agent/login-success` (vs CN `qoder-work-cn://`)
-- **no check-in** (the Intl platform has no check-in surface)
+- **host**: `openapi.qoder.sh` / `api3.qoder.sh` (vs CN `openapi.qoder.com.cn` / `gateway.qoder.com.cn`); auth base `qoder.com` (vs CN `qoder.cn`)
+- **client_id**: `732aef47-9cf2-46a2-95fe-4cebb5d0d1fa` (shared with CN since v0.8.45 — both regions present as the official desktop client v0.4.3)
+- **redirect_uri**: `qoder-app://` (vs CN `""` — omitted from URL)
+- **biz_variant wrapper**: `/users/sign-in?biz_variant=qoder&oauth_callback=<selectAccounts URL>` (same as CN since v0.8.45)
+- **check-in**: ✅ via campaigns system (the v0.8.18 "Intl has no check-in surface" note was retired in v0.12.80 when CN joined Intl on the campaigns dialect)
 
 #### `plugins/zcode` (clean-room from TriDefender/zcode-api + zai-org/ZCode)
 - **Behavior baseline (closed-source imitation)**: `TriDefender/zcode-api/src/{auth/oauth.ts, proxy/identity.ts, proxy/client-signing.ts, proxy/upstream.ts, server/routes-quota.ts}` (OAuth relay login / g6n+TV identity headers / full V4 signing / billing plane)
