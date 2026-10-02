@@ -217,6 +217,25 @@ const (
 	qoderWebsiteIntl     = "https://qoder.com"
 	qoderClientIDIntl    = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb"
 	qoderRedirectURIIntl = "qoder://aicoding.aicoding-agent/login-success"
+
+	// v0.8.40 - OFFICIAL DESKTOP CLIENT dialect (Qoder-linux-amd64.deb
+	// v0.4.3 asar, out/main/index.js, functions Sft/Nft/bft/kft + the Vpe
+	// release-channel config). The desktop app starts its device flow at
+	//   {auth}/users/sign-in?biz_variant=qoder&oauth_callback={auth}/device/selectAccounts?challenge=...&challenge_method=S256&nonce=...&machine_id=...&client_id=732aef47-...&redirect_uri=qoder-app://
+	// and polls GET /api/v1/deviceToken/poll?nonce=...&verifier=...&challenge_method=S256
+	// (1s cadence, 404=pending, 300s deadline) - identical to our poller.
+	// The official newbie rules (14-day Pro trial + 300 credits) are granted
+	// SERVER-SIDE on the first desktop-client login; no activation endpoint
+	// exists in the entire /api + /sash tree (full enumeration on record),
+	// so replicating the desktop wire format - its client_id, machine_id and
+	// the /users/sign-in wrapper - is the only plugin-side channel that
+	// presents the login as a desktop-client login. Cockpit dialect (the
+	// default, no client_id/machine_id) keeps working for plain imports:
+	// pairing the desktop client_id with a foreign redirect_uri is what the
+	// cockpit grant API rejected with "Parameter invalid" (v0.12.10 note),
+	// so the dialect pair is all-or-nothing.
+	qoderDesktopClientIDIntl    = "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa"
+	qoderDesktopRedirectURIIntl = "qoder-app://"
 )
 
 // deviceTokenResponse mirrors /api/v1/deviceToken/{poll,refresh} payloads.
@@ -279,8 +298,18 @@ func startLoginWithRegion(raw []byte, region string) ([]byte, error) {
 	if region == regionIntl {
 		nonce = strings.ReplaceAll(nonce, "-", "")
 	}
+	// v0.8.40: intl offers a second wire dialect. "cockpit" (default) is the
+	// legacy no-client_id/machine_id entry that plain imports have used since
+	// v0.10.0. "desktop" reproduces the official desktop client v0.4.3 flow
+	// byte-for-byte (asar functions Sft/Nft): desktop client_id + machine_id
+	// + qoder-app:// redirect + the /users/sign-in?biz_variant=qoder wrapper.
+	// The official newbie grant (first desktop login → 14-day Pro trial + 300
+	// credits) is evaluated server-side on that login event, so the desktop
+	// dialect is the only plugin-side channel that can present AS a desktop
+	// login. CN keeps the qoderwork protocol — it already IS the CN desktop
+	// client's protocol.
 	machineID := uuid.NewString()
-
+	prompt := "在打开的页面中登录并授权 QoderWork（设备授权，无需 PAT）。完成后此窗口会自动关闭。"
 	q := url.Values{}
 	q.Set("challenge", challenge)
 	q.Set("challenge_method", "S256")
@@ -297,6 +326,25 @@ func startLoginWithRegion(raw []byte, region string) ([]byte, error) {
 		q.Set("machine_id", machineID)
 	}
 	authURL := qoderWebsiteFor(region) + "/device/selectAccounts?" + q.Encode()
+	if region == regionIntl && loadedLoginDialect() == loginDialectDesktop {
+		// Sft: desktop dialect carries the desktop client_id, the machine
+		// identity (region-level derivation — stable per deployment, same
+		// scheme the campaigns face attaches) and the qoder-app:// redirect
+		// registered for that client_id. A foreign redirect_uri paired with
+		// this client_id is what the grant API once rejected, so the dialect
+		// pair is all-or-nothing. The machine_id must NOT be a random uuid
+		// here: the official client sends its real machine fingerprint.
+		machineID = machineIdentityFor(region, "", false).MachineID
+		q.Set("client_id", qoderDesktopClientIDIntl)
+		q.Set("redirect_uri", qoderDesktopRedirectURIIntl)
+		q.Set("machine_id", machineID)
+		authURL = qoderWebsiteIntl + "/device/selectAccounts?" + q.Encode()
+		// Nft: the desktop client wraps the selectAccounts URL in the
+		// sign-in page (biz_variant=qoder). QODER_AUTH_DIRECT_DEVICE_FLOW=1
+		// skips the wrapper upstream; the wrapper is the desktop default.
+		authURL = qoderWebsiteIntl + "/users/sign-in?biz_variant=qoder&oauth_callback=" + url.QueryEscape(authURL)
+		prompt = "在打开的页面中登录并授权（官方桌面客户端同源设备授权，无需 PAT）。授权完成后浏览器可能提示打开 Qoder 桌面应用——属正常现象，插件会自动完成轮询登录。"
+	}
 
 	now := time.Now()
 	state := fmt.Sprintf("qw-%d", now.UnixNano())
@@ -308,7 +356,7 @@ func startLoginWithRegion(raw []byte, region string) ([]byte, error) {
 		ExpiresAt: now.Add(loginTTL).UTC(),
 		Metadata: map[string]any{
 			"logo":   pluginLogoURL,
-			"prompt": "在打开的页面中登录并授权 QoderWork（设备授权，无需 PAT）。完成后此窗口会自动关闭。",
+			"prompt": prompt,
 		},
 	})
 }

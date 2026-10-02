@@ -92,6 +92,7 @@ func configure(raw []byte) {
 	nextSchedulerMode := schedulerModeOff // reset to default on reconfigure
 	nextKeepaliveAuto := true
 	nextLoginRegion := "" // sticky: empty = keep current (issue #24)
+	nextLoginDialect := "" // sticky: empty = keep current (v0.8.40)
 	nextMgmtKey := ""
 	nextStreamHeadTimeout := 0
 	nextClaimUnverified := false
@@ -111,6 +112,11 @@ func configure(raw []byte) {
 			if m, ok := decodePluginConfigYAML(req.ConfigYAML); ok {
 				if v, present := m["login_region"]; present {
 					nextLoginRegion = normalizeRegion(configScalarString(v))
+				}
+				if v, present := m["login_dialect"]; present {
+					if d := strings.ToLower(configScalarString(v)); d == loginDialectCockpit || d == loginDialectDesktop {
+						nextLoginDialect = d
+					}
 				}
 				if v, present := m["checkin_auto"]; present {
 					nextCheckinAuto = configScalarBool(v)
@@ -182,6 +188,13 @@ func configure(raw []byte) {
 					v = strings.Trim(v, "\"'")
 					nextLoginRegion = normalizeRegion(v)
 				}
+				if strings.HasPrefix(line, "login_dialect:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "login_dialect:"))
+					v = strings.Trim(v, "\"'")
+					if d := strings.ToLower(v); d == loginDialectCockpit || d == loginDialectDesktop {
+						nextLoginDialect = d
+					}
+				}
 				if strings.HasPrefix(line, "stream_head_timeout:") {
 					v := strings.TrimSpace(strings.TrimPrefix(line, "stream_head_timeout:"))
 					v = strings.TrimSpace(strings.Trim(v, "\"'"))
@@ -225,6 +238,16 @@ func configure(raw []byte) {
 		}
 		loginRegion = nextLoginRegion
 		loginRegionMu.Unlock()
+	}
+
+	// Sticky (v0.8.40): only an explicit login_dialect key moves the pointer.
+	if nextLoginDialect != "" {
+		loginDialectMu.Lock()
+		if loginDialect != nextLoginDialect {
+			log.Printf("qoder: login_dialect=%s applied (new intl logins use the %s wire dialect)", nextLoginDialect, nextLoginDialect)
+		}
+		loginDialect = nextLoginDialect
+		loginDialectMu.Unlock()
 	}
 
 	claimUnverifiedMu.Lock()

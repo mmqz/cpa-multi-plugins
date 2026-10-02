@@ -23,6 +23,17 @@ const (
 var (
         loginRegionMu sync.RWMutex
         loginRegion   = regionCN // region for NEW logins (config login_region)
+
+        // v0.8.40: wire dialect for NEW intl logins — "" / "cockpit" = legacy
+        // no-client_id entry; "desktop" = official desktop-client flow
+        // (client_id 732aef47 + machine identity + qoder-app:// redirect +
+        // /users/sign-in?biz_variant=qoder wrapper). The official newbie
+        // grant (first desktop login → 14-day Pro trial + 300 credits) is
+        // evaluated server-side on that login event, so "desktop" is the
+        // plugin-side channel that presents AS the official client. Sticky
+        // like login_region: only an explicit login_dialect key moves it.
+        loginDialectMu sync.RWMutex
+        loginDialect   = ""
 )
 
 // normalizeRegion maps any stored region hint onto cn/intl (default cn).
@@ -112,6 +123,27 @@ func loadedLoginRegion() string {
         loginRegionMu.RLock()
         defer loginRegionMu.RUnlock()
         return loginRegion
+}
+
+// v0.8.40 dialect accessors (parsed from login_dialect in configure()).
+const (
+        loginDialectCockpit = "cockpit"
+        loginDialectDesktop = "desktop"
+)
+
+func loadedLoginDialect() string {
+        loginDialectMu.RLock()
+        defer loginDialectMu.RUnlock()
+        if loginDialect == "" {
+                return loginDialectCockpit
+        }
+        return loginDialect
+}
+
+func setLoginDialect(d string) {
+        loginDialectMu.Lock()
+        loginDialect = d
+        loginDialectMu.Unlock()
 }
 
 func setLoginRegion(r string) {

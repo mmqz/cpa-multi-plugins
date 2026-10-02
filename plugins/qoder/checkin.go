@@ -307,6 +307,15 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
         // performCampaignCheckin now owns every no-op verdict; this flow just
         // renders them.
 
+        // v0.8.40 (field report "成功后积分无变化"): snapshot the credits
+        // pools BEFORE the claim so the panel can show the real delta. The
+        // old flow reported 签到成功 +100 with the post-claim balance only —
+        // when the claimed row was a coupon (redemptionCode, no credits) or
+        // the grant lagged, the user had no way to see WHY nothing moved.
+        var creditsBefore *creditsSummary
+        if cr, err := fetchUserResource(sa); err == nil {
+                creditsBefore = cr
+        }
         // Step 2: POST claim (5s budget).
         res, err := performCheckinCall(sa)
         if err != nil {
@@ -345,7 +354,7 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
                 }
                 return out
         }
-        // v0.8.39: the bypass probe surfaces the dedup verdict — a sibling
+        // v0.8.40: the bypass probe surfaces the dedup verdict — a sibling
         // account on this machine identity already took the round's grant.
         // That is a normal multi-account state (hub buckets it separately),
         // never an error toast.
@@ -359,17 +368,67 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
                 }
                 return out
         }
+        // v0.8.40 (hub taxonomy, field report "概率性不成功"): eligibility
+        // verdicts — out-of-stock (daily rounds are 先到先得, refresh
+        // 10:00 UTC+8), achievement-gated new-user rows, inactive rounds,
+        // risk-control holds. Normal, retryable upstream states, not claim
+        // failures: render as typed informational skips instead of the old
+        // 上游未确认签到成功 error toast.
+        if result, _ := res["result"].(string); result == "NOT_ELIGIBLE" {
+                out["success"] = true
+                out["skipped"] = true
+                out["reason"] = "not_eligible"
+                fc, _ := res["failure_code"].(string)
+                out["failure_code"] = fc
+                msg, _ := res["message"].(string)
+                if msg == "" {
+                        msg = "暂不可领取：" + fc
+                }
+                out["message"] = msg
+                return out
+        }
         if success, _ := res["success"].(bool); success {
                 out["success"] = true
                 if rc, ok := res["rewardCredits"].(float64); ok {
                         out["reward_credits"] = int64(rc)
                 }
-                out["message"] = "签到成功"
-                // Refresh the credits snapshot so the panel shows the post-checkin
-                // balance immediately (check-in grants new credits). Best-effort:
-                // a failure here must not flip the check-in result to error.
+                // v0.8.40: coupon rows answer CLAIMED with a redemptionCode and
+                // zero credits. Surface the code verbatim and an honest
+                // message — "积分无变化" reports start when a non-credits
+                // grant renders as a plain 签到成功 +100.
+                if code, ok := res["redemption_code"].(string); ok && strings.TrimSpace(code) != "" {
+                        out["redemption_code"] = code
+                }
+                if msg, ok := res["message"].(string); ok && strings.TrimSpace(msg) != "" {
+                        out["message"] = msg
+                } else {
+                        out["message"] = "签到成功"
+                }
+                // v0.8.40 (field report "成功后积分无变化"): verify the grant
+                // against the credits pools. Delta = TotalRemain(after) −
+                // TotalRemain(before), from the same /api/v2/quota/usage fold
+                // the panel renders — so a coupon claim (delta 0) and a lagging
+                // grant (delta 0 seconds after the POST) are both VISIBLE
+                // instead of silent. Best-effort: a snapshot failure must not
+                // flip the check-in result.
                 if cr, crErr := fetchUserResource(sa); crErr == nil && cr != nil {
                         out["credits"] = cr
+                        if creditsBefore != nil {
+                                delta := cr.TotalRemain - creditsBefore.TotalRemain
+                                out["credits_before"] = creditsBefore.TotalRemain
+                                out["credits_after"] = cr.TotalRemain
+                                out["credits_delta"] = delta
+                                if delta <= 0 {
+                                        msg, _ := out["message"].(string)
+                                        if rc, _ := res["rewardCredits"].(float64); rc > 0 {
+                                                out["message"] = msg + "（上游已确认领取，但积分池暂未变动：发放可能有秒级延迟）"
+                                        } else if _, isCoupon := res["redemption_code"].(string); !isCoupon {
+                                                if kind, _ := res["benefit_kind"].(string); !strings.EqualFold(kind, "REDEMPTION_CODE") {
+                                                        out["message"] = msg + "（本次奖励非积分或面值未下发）"
+                                                }
+                                        }
+                                }
+                        }
                 }
                 // v0.8.8: 记录签到时刻 —— reconcile 的 lifecycle 在宽限窗口内
                 // 不做 disable，防止签到后积分池刷新延迟时被误禁用。
