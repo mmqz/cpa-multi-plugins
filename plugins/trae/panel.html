@@ -306,6 +306,15 @@ function progressHTML(cr, acct){
   // v0.12.70: 积分条统一改画「剩余」比例（旧版 basic/fast 画"已用"——
   // 剩得多条却空，与左侧"剩余 X"文案对不上，用户当显示 bug 报），
   // 配色同步反转（剩 <15% 红 / <40% 黄）；禁用账号不再永远转圈。
+  // v0.12.71: 积分池分支解除 solo 专属门控 —— Trae CN 已全面转积分计费
+  // （is_credits_billing=true，签到奖励入池、模型调用扣池），CN 变体
+  // 积分制账户的 ent_usage 不带 basic_usage_limit → usage_model=unknown，
+  // 旧门控把这些账户打进"剩余：--"，而汇总 creditOf 却照常计入池子
+  // （用户实测：汇总有数、单凭证积分条空白——同一份数据两处口径）。
+  // 现 credits_pool_known 即渲染池子（任意变体）；快请求/月分支对池子
+  // 已知账户同样跳过（同 v0.12.30 solo 噪音判定）。上游 cockpit-tools
+  // 无积分池实现（全仓库零命中），此处维持我们 v0.12.34 的官方 cashier
+  // 同口径扩展，不再假装对齐上游的 "--"。
   if(!cr || (cr.total_remain==null && !cr.plan)){
     // v0.12.70: 已禁用账号不做懒加载（lazyLoadCredits 过滤掉 disabled），
     // 占位符别再永远显示"加载中…"——如实标注未查询。
@@ -338,9 +347,11 @@ function progressHTML(cr, acct){
   // pack 里没有 quota，这是仅有的真实剩余维度，绝不能再渲染成 "--"。
   // v0.12.30: SOLO 已转积分制（模型调用扣签到钱包积分，与快通道无关），
   // 快通道: 0/月 对 solo 是误导性噪音 —— solo 跳过此分支，直接用钱包展示。
+  // v0.12.71: 积分池已知（积分计费）的账户同理跳过——真实可花是池子，
+  // 快请求/月把积分条占成空灰条，池子数字反而看不见。
   const fpm=(cr.fast_request_per!=null)?Number(cr.fast_request_per):null;
   const solo=(cr.solo_parallel!=null)?Number(cr.solo_parallel):null;
-  if(fpm!=null&&fpm>0&&!isSoloAcct){
+  if(fpm!=null&&fpm>0&&!isSoloAcct&&!cr.credits_pool_known){
     return `<div class="pb"><div class="pb-label"><span>快请求/月：${fpm}</span><span></span></div><div class="pb-track"><div class="pb-bar" style="width:0%;background:var(--mut)"></div></div><div class="pb-meta">快通道: ${fpm}/月${solo!=null?` · Solo 并发 ${solo}`:""} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
   }
   if(model==="basic" && cr.remain_known){
@@ -358,13 +369,17 @@ function progressHTML(cr, acct){
     // v0.12.29: Free 判定补中文"免费"+ plan_type（上游 isFreePlan 的
     // .includes('free') 对 CN display_desc"免费"漏判 → 错显示"剩余次数：--"）。
     // v0.12.30: SOLO 已转积分制，模型调用消耗签到钱包积分——钱包余额就是
-    // 该账户的真实剩余，直接展示；非 SOLO 保持"免费剩余：--"不猜测。
+    // 该账户的真实剩余，直接展示；v0.12.71 起积分计费不分变体走池子分支，
+    // 真正落到这里的只剩无池证据的 Free/未知套餐 —— 保持"剩余：--"不猜测。
     const ptype=String(cr.plan_type||"");
     const isFree=plan.includes("free")||plan.includes("免费")||ptype.toLowerCase().includes("free");
     // v0.12.34: SOLO 积分池 = 官方 cashier 同口径（Σ max(credits_limit-usage,0)），
     // 模型调用真正扣减的池子；签到奖励（v0.12.40 定案：credits=每日奖励数额，
     // 非钱包）放 meta 单独展示，标注"不叠加"防误读成余额翻倍/显示 bug。
-    if(isSoloAcct&&cr.credits_pool_known){
+    // v0.12.71: 门控 isSoloAcct 删除 —— CN 积分计费账户（variant=cn）池子
+    // 同样已知且是唯一真实剩余，不能落 "--"；汇总早就不分变体计入
+    // （creditOf 只看 credits_pool_known），卡片必须同口径。
+    if(cr.credits_pool_known){
       const wm=(wallet!=null)?` · 签到奖励 ${wallet} 积分（签到成功后入池，不计入当前剩余）`:"";
       if(cr.credits_pool_unlimited){
         return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>不限</span></div><div class="pb-track"><div class="pb-bar" style="width:100%;background:var(--ok)"></div></div><div class="pb-meta">积分池不限量${wm} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
@@ -372,7 +387,7 @@ function progressHTML(cr, acct){
       const pr=Number(cr.credits_pool_remain)||0;
       let color=pr>0?'var(--ok)':'var(--err)';
       // v0.12.70: 右标签显示数值（旧版正数时是空串，视觉上像缺了一块）。
-      return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>${pr>0?pr:"0%"}</span></div><div class="pb-track"><div class="pb-bar" style="width:${pr>0?100:0}%;background:${color}"></div></div><div class="pb-meta">剩余 ${pr} 积分 · SOLO 积分池（模型调用扣减，与官方一致）${wm} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
+      return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>${pr>0?pr:"0%"}</span></div><div class="pb-track"><div class="pb-bar" style="width:${pr>0?100:0}%;background:${color}"></div></div><div class="pb-meta">剩余 ${pr} 积分 · 积分池（模型调用扣减，与官方一致）${wm} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
     }
     // v0.12.70: 删除「SOLO 无池时把签到奖励数额当剩余积分画满条」的分支 —
     // v0.12.40 已定案 credits=每日奖励数额（非钱包/非可花），把它渲染成
