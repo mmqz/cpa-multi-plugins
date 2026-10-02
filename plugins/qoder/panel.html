@@ -714,19 +714,32 @@ function checkinResultToast(res, who){
   if(res.reason==="global"||(/国际版|不支持/.test(asText(res.message)))){
     toast(name+"：国际版无需签到","warn",asText(res.message)||"请用领取专家加油包");return;
   }
-  if(res.reason==="already"||(res.skipped&&/already|已签|今日/.test(asText(res.message)))){
+  // v0.8.41: key on the structured reason. The old /今日/ text match
+  // rendered "今日暂无可直接签领的权益…" and "今日名额已发完…" — both
+  // NOTHING-claimable states — as a green 今日已签到 toast, the exact
+  // "显示已签但积分不动" confusion from the field report.
+  if(res.reason==="already"||(res.skipped&&/already|已签/.test(asText(res.message)))){
     toast(name+"：今日已签到","ok",asText(res.message));return;
   }
-  if(res.success){toast(name+"：签到成功","ok","+"+(res.credit??res.daily_credit??"")+" 积分 · 连续 "+(res.streak_days??"?")+" 天");return}
+  if(res.reason==="none"){toast(name+"：今日无可签领权益","warn",asText(res.message));return}
+  if(res.reason==="not_eligible"){toast(name+"：暂不可领取","warn",asText(res.message));return}
+  if(res.reason==="blocked"){toast(name+"：同人已领取","warn",asText(res.message));return}
+  if(res.success){toast(name+"：签到成功","ok","+"+(res.credit??res.daily_credit??res.reward_credits??"")+" 积分 · 连续 "+(res.streak_days??"?")+" 天");return}
   toast(name+"："+(asText(res.message)||"未知结果"),"warn");
 }
 function isCheckinDoneResult(res){
   if(!res||res.error) return false;
   if(res.reason==="global") return false;
+  // v0.8.41: structured reasons first — "none/not_eligible/blocked" are NOT
+  // done states (the button must stay 签到 so the 10:00 round can be
+  // retried); the old /今日/ text match marked them done, freezing the card
+  // on a signed-in look while upstream had granted nothing.
+  if(res.reason==="already") return true;
+  if(res.reason==="none"||res.reason==="not_eligible"||res.reason==="blocked") return false;
   if(res.success) return true;
   const msg=asText(res.message);
   // already checked in today (backend) — treat as done, not failure
-  if(/already|已签|今日/.test(msg) && !/国际版|不支持/.test(msg)) return true;
+  if(/already|已签/.test(msg) && !/暂无可|名额已发完|不可领取|同人已领取/.test(msg) && !/国际版|不支持/.test(msg)) return true;
   return false;
 }
 async function checkin(idx, btn){

@@ -948,18 +948,53 @@ func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
                 // hand down its verdict (probeHiddenRound's doc block). Only a
                 // conclusive verdict short-circuits; inconclusive results
                 // fall through to the list-based diagnosis.
-                if res := probeHiddenRound(sa); res != nil {
-                        if success, _ := res["success"].(bool); success {
-                                return res, nil
+                //
+                // v0.8.41 (issue #27 finding-3 parity, field report
+                // act-20260901-922 / act-20260901-493): before probing, attempt the
+                // CLAIMABLE VIEW_DETAILS rows themselves — the official client does
+                // not stop at CLAIM_BENEFIT rows, the captured launch flow POSTs the
+                // same claim on a VIEW_DETAILS (bogo) row and gets 200 CLAIMED. The
+                // old code only wrote 需在官方活动页完成领取 next to those rows,
+                // stranding the account's one visible benefit behind a manual chore.
+                landed, notes := attemptViewDetailsClaims(sa, status)
+                if landed != nil {
+                        return landed, nil
+                }
+                probeRes := probeHiddenRound(sa)
+                if probeRes != nil {
+                        if success, _ := probeRes["success"].(bool); success {
+                                mergeVerdictNotes(probeRes, notes)
+                                return probeRes, nil
                         }
-                        if r, _ := res["result"].(string); r == "ALREADY_CLAIMED" || r == "BLOCKED" {
-                                return res, nil
+                        switch r, _ := probeRes["result"].(string); r {
+                        case "ALREADY_CLAIMED", "BLOCKED":
+                                mergeVerdictNotes(probeRes, notes)
+                                return probeRes, nil
+                        case "NOT_ELIGIBLE":
+                                // v0.8.41: this typed verdict used to be discarded here —
+                                // the user saw the generic idle line while upstream had
+                                // just answered the real reason (round ended / out of
+                                // stock). Return it typed, with the VIEW_DETAILS verdicts
+                                // and the list diagnosis folded into the message.
+                                msg, _ := probeRes["message"].(string)
+                                all := make([]string, 0, 4)
+                                if strings.TrimSpace(msg) != "" {
+                                        all = append(all, msg)
+                                }
+                                all = append(all, notes...)
+                                all = append(all, campaignIdleDiagnosis(status, sa))
+                                probeRes["message"] = strings.Join(all, "；")
+                                return probeRes, nil
                         }
+                }
+                diag := campaignIdleDiagnosis(status, sa)
+                if len(notes) > 0 {
+                        diag += "；" + strings.Join(notes, "；")
                 }
                 return map[string]any{
                         "success": false,
                         "result":  "NOTHING_CLAIMABLE",
-                        "message": campaignIdleDiagnosis(status, sa),
+                        "message": diag,
                 }, nil
         }
         earned := float64(0)
@@ -996,7 +1031,7 @@ func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
                                 notes = append(notes, msg)
                         }
                         if fc, ok := res["failure_code"].(string); ok && fc != "" && failureCode == "" {
-                        	failureCode = fc
+                                failureCode = fc
                         }
                 default:
                         if msg, ok := res["message"].(string); ok && msg != "" {
@@ -1060,6 +1095,163 @@ func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
                 "result":  "NOTHING_CLAIMABLE",
                 "message": campaignIdleDiagnosis(status, sa),
         }, nil
+}
+
+// isRedemptionKind reports whether a benefit kind is a coupon/redemption
+// family reward (claimable from check-in; moves no credits — the caller must
+// surface the code, see the v0.8.40 coupon verdicts).
+func isRedemptionKind(kind string) bool {
+        switch strings.ToUpper(strings.TrimSpace(kind)) {
+        case "REDEMPTION_CODE", "REDEMPTION_COUPON", "COUPON":
+                return true
+        }
+        return false
+}
+
+// mergeVerdictNotes appends per-row verdict notes to a result's message
+// without clobbering an existing one (probe results may already carry an
+// upstream message).
+func mergeVerdictNotes(res map[string]any, notes []string) {
+        if res == nil || len(notes) == 0 {
+                return
+        }
+        m, _ := res["message"].(string)
+        m = strings.TrimSpace(m)
+        if m == "" {
+                res["message"] = strings.Join(notes, "；")
+                return
+        }
+        res["message"] = m + "；" + strings.Join(notes, "；")
+}
+
+// attemptViewDetailsClaims (v0.8.41) claims the CLAIMABLE VIEW_DETAILS rows
+// the strict pass (claimableCampaigns) skips. Evidence: the official client's
+// captured launch flow POSTs the same claim endpoint on a VIEW_DETAILS row
+// (issue #27 finding 3: the bogo promo answered 200 CLAIMED) — a VIEW_DETAILS
+// row is a claim the client performs, not a page-only chore. The claim
+// response stays the authoritative eligibility oracle: whatever the upstream
+// answers (grant / replay / dedup / typed refusal) is surfaced verbatim
+// instead of the old passive "需在官方活动页完成领取" note.
+//
+// Policy per row (cap 5, mirroring the Pro flow's rewardProbeCap):
+//   - GET .../reward reveals CREDITS / redemption-family / bare-amount
+//     face value → claim it; grants aggregate like the multi-claim pass.
+//   - reward reveals any other readable kind (subscription-shaped) → NOT
+//     claimed from check-in (the Pro-upgrade flow owns those); noted.
+//   - reward unreadable / face-value-less → claim only when the
+//     claim_unverified opt-in is on (same consent gate as the Pro flow,
+//     blindClaimCampaign semantics).
+//
+// Returns (landed, notes): landed is a performCampaignCheckin-shaped success
+// aggregate when a claim actually granted credits or produced a code, nil
+// otherwise; notes carry one verdict per attempted row for the diagnosis.
+func attemptViewDetailsClaims(sa *storedAuth, status *campaignStatusResponse) (map[string]any, []string) {
+        if status == nil {
+                return nil, nil
+        }
+        const maxRows = 5
+        notes := make([]string, 0, 2)
+        earned := float64(0)
+        creditsClaimed := false
+        codes := make([]string, 0, 2)
+        attempted := 0
+        now := time.Now().Unix()
+        for i := range status.Campaigns {
+                if attempted >= maxRows {
+                        break
+                }
+                c := &status.Campaigns[i]
+                if !strings.EqualFold(strings.ToUpper(strings.TrimSpace(c.ActionType)), "VIEW_DETAILS") {
+                        continue
+                }
+                if !strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
+                        continue
+                }
+                if (c.StartAt > 0 && now < c.StartAt) || (c.EndAt > 0 && now > c.EndAt) {
+                        continue
+                }
+                attempted++
+                kind, amount := "", int64(0)
+                body, rerr := fetchCampaignReward(sa, c.CampaignID)
+                if rerr == nil {
+                        kind, amount = rewardBenefit(body)
+                }
+                kUpper := strings.ToUpper(strings.TrimSpace(kind))
+                readable := rerr == nil && (kUpper == "CREDITS" || isRedemptionKind(kUpper) || (kUpper == "" && amount > 0))
+                if rerr == nil && !readable && kUpper != "" {
+                        // Subscription/other-shaped reward — the Pro flow owns
+                        // these; check-in must not ride a subscription claim.
+                        notes = append(notes, fmt.Sprintf("%s（奖励类型 %s，归 Pro/订阅流程，签到不代领）", c.CampaignKey, kind))
+                        continue
+                }
+                if !readable && !claimUnverifiedEnabled() {
+                        if rerr != nil {
+                                notes = append(notes, fmt.Sprintf("%s（面值不可读：%s；配置 claim_unverified 后签到可代领）", c.CampaignKey, truncateRedacted(rerr.Error(), 80)))
+                        } else {
+                                notes = append(notes, fmt.Sprintf("%s（reward 无面值；配置 claim_unverified 后签到可代领）", c.CampaignKey))
+                        }
+                        continue
+                }
+                res, err := claimCampaignByID(sa, c)
+                if err != nil {
+                        notes = append(notes, campaignTitle(c)+": "+err.Error())
+                        continue
+                }
+                if success, _ := res["success"].(bool); success {
+                        rc, _ := res["reward_credits"].(float64)
+                        if rc > 0 {
+                                earned += rc
+                                creditsClaimed = true
+                        } else if amount > 0 && (kUpper == "CREDITS" || kUpper == "") {
+                                // The reward probe knew the face value but the
+                                // claim body carried none (v0.8.39 synthetic-row
+                                // case) — trust the read-only probe.
+                                earned += float64(amount)
+                                creditsClaimed = true
+                        }
+                        if code, ok := res["redemption_code"].(string); ok && strings.TrimSpace(code) != "" {
+                                codes = append(codes, code)
+                        }
+                        continue
+                }
+                switch r, _ := res["result"].(string); r {
+                case "ALREADY_CLAIMED":
+                        notes = append(notes, campaignTitle(c)+"：已领取过")
+                case "BLOCKED":
+                        notes = append(notes, campaignTitle(c)+"：同人已领取（服务端按人去重）")
+                case "NOT_ELIGIBLE":
+                        if m, ok := res["message"].(string); ok && m != "" {
+                                notes = append(notes, campaignTitle(c)+"："+m)
+                        } else if fc, ok := res["failure_code"].(string); ok && fc != "" {
+                                notes = append(notes, campaignTitle(c)+"：暂不可领取（"+fc+"）")
+                        }
+                default:
+                        if m, ok := res["message"].(string); ok && m != "" {
+                                notes = append(notes, campaignTitle(c)+": "+truncateRedacted(m, 100))
+                        } else {
+                                notes = append(notes, campaignTitle(c)+"：领取未成功")
+                        }
+                }
+        }
+        if !creditsClaimed && len(codes) == 0 {
+                return nil, notes
+        }
+        out := map[string]any{
+                "success":        true,
+                "result":         "CLAIMED",
+                "reward_credits": earned,
+                "rewardCredits":  earned,
+        }
+        if len(codes) > 0 {
+                out["redemption_code"] = codes[0]
+                out["redemption_codes"] = codes
+                out["benefit_kind"] = "REDEMPTION_CODE"
+                out["message"] = "已领取兑换券：" + strings.Join(codes, "、") + "（非积分奖励，请到官方活动页兑换）"
+        }
+        if len(notes) > 0 {
+                mergeVerdictNotes(out, notes)
+        }
+        return out, notes
 }
 
 // campaignIdleDiagnosis explains WHY no claimable row is visible, in one

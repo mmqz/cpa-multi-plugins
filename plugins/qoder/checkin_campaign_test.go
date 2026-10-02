@@ -222,11 +222,20 @@ func TestCNCheckinNoCampaignIsNoOp(t *testing.T) {
 
 // v0.12.109 (field report u673e7fcc "上游未确认签到成功：message=当前没有可
 // 领取的活动"): a VIEW_DETAILS-only claimable list is a NORMAL state — the
-// official newbie/Pro packs hide behind the activity page and the check-in
-// claimer must refuse to POST them. The claim endpoint must never be hit and
-// the result must carry the typed NOTHING_CLAIMABLE verdict with the row
-// diagnosis, which checkinOneAccount renders as a skip (reason=none).
-func TestCheckinNothingClaimableViewDetailsIsTypedSkip(t *testing.T) {
+// official newbie/Pro packs hide behind the activity page; v0.8.41 refines
+// this — VIEW_DETAILS rows with a READABLE credits/redemption face value are
+// claimed (official-client parity), while an unreadable-face-value row stays
+// unclaimed unless claim_unverified is on. The claim endpoint must not be
+// hit in that state and the result must carry the typed NOTHING_CLAIMABLE
+// verdict with the row diagnosis, which checkinOneAccount renders as a skip
+// (reason=none).
+// v0.8.41 rename (was TestCheckinNothingClaimableViewDetailsIsTypedSkip):
+// the check-in now ATTEMPTS CLAIMABLE VIEW_DETAILS rows (issue #27 finding
+// 3 — the official client claims them too). What stays unclaimed is the
+// unreadable-face-value row while the claim_unverified opt-in is off: the
+// reward probe 404s, no blind claim happens, and the row's verdict rides
+// the diagnosis message (typed NOTHING_CLAIMABLE skip, reason=none).
+func TestCheckinViewDetailsUnreadableRewardStaysUnclaimed(t *testing.T) {
         claimHit := false
         newBillingServer(t, "cn", map[string]func(r *http.Request) (int, string){
                 "/sash/api/v1/me/campaigns": func(r *http.Request) (int, string) {
@@ -255,7 +264,7 @@ func TestCheckinNothingClaimableViewDetailsIsTypedSkip(t *testing.T) {
                 t.Fatalf("performCheckinCall: %v", err)
         }
         if claimHit {
-                t.Fatal("VIEW_DETAILS row must never be claimed by the check-in path")
+                t.Fatal("unreadable-face-value VIEW_DETAILS row must stay unclaimed while claim_unverified is off")
         }
         if result, _ := res["result"].(string); result != "NOTHING_CLAIMABLE" {
                 t.Fatalf("result = %v, want NOTHING_CLAIMABLE", res["result"])
@@ -263,6 +272,9 @@ func TestCheckinNothingClaimableViewDetailsIsTypedSkip(t *testing.T) {
         msg, _ := res["message"].(string)
         if !strings.Contains(msg, "act-20260901-922") || !strings.Contains(msg, "VIEW_DETAILS") {
                 t.Fatalf("diagnosis must name the blocking row, got %q", msg)
+        }
+        if !strings.Contains(msg, "面值不可读") {
+                t.Fatalf("diagnosis must carry the unreadable-reward verdict, got %q", msg)
         }
 }
 
