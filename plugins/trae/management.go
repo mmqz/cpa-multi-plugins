@@ -860,6 +860,9 @@ func quotaExhaustedKnown(sum upstream.UsageSummary) bool {
 // handleCreditsQuery fetches live credits from upstream for one (auth_index)
 // or all accounts. Updates the cache so the next /accounts reflects the new
 // numbers.
+// v0.12.70: per-account body extracted into refreshAccountCredits —
+// handleRefresh (top-bar 刷新) runs the same live path so the returned
+// dashboard carries fresh numbers instead of a stale cache projection.
 func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 	// Read auth_index from query string (?auth_index=xxx) first, then body JSON.
 	// panel.html uses GET /credits?auth_index=xxx, so req.Query is the primary source.
@@ -884,178 +887,13 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 		if authIndex != "" && f.AuthIndex != authIndex {
 			continue
 		}
-		entry := map[string]any{"auth_index": f.AuthIndex, "uid": "", "nickname": ""}
 		sa, err := hostAuthGet(f.AuthIndex)
 		if err != nil {
-			entry["error"] = "load auth: " + err.Error()
-			results = append(results, entry)
+			results = append(results, map[string]any{"auth_index": f.AuthIndex, "uid": "", "nickname": "", "error": "load auth: " + err.Error()})
 			continue
 		}
-		entry["uid"] = sa.Account.UID
-		entry["nickname"] = sa.Account.Nickname
 		a := hostAuthAsUpstream(sa)
-		usage, err := upstreamClient.UserEntUsage(a)
-		if err != nil {
-			entry["error"] = "ent_usage: " + err.Error()
-			results = append(results, entry)
-			continue
-		}
-		// v0.12.28: 套餐剩余对齐 cockpit-tools 的用量模型（trae.ts）：
-		//   fast  → 速通可用次数（-1 无限）
-		//   basic → 选中包 basic_usage_limit - basic_usage_amount（含 bonus）
-		//   unknown → 剩余不可知（面板显示 "--"；旧代码读不存在的
-		//             credits_limit 字段把这里渲染成"剩余 0 积分 · 00%"）。
-		sum := upstream.SummarizeUsage(usage.UserEntitlementPackList, true)
-		// v0.12.34: 官方 cashier 同口径积分池（Σ max(credits_limit-usage,0)，
-		// -1 不限）。这是模型调用真正扣减的池子——此前把签到钱包当
-		// "剩余积分"展示，与官方数字对不上（用户实测反馈）。
-		sum.CreditsPool = upstream.CreditsPoolUsage(usage.UserEntitlementPackList, usage.IsCreditsBilling)
-		selected := upstream.SelectActivePack(usage.UserEntitlementPackList, true)
-		plan := "Unknown"
-		if selected != nil {
-			// 上游 identityStr 优先取选中包 display_desc，回退 product_type 映射。
-			if d := strings.TrimSpace(selected.DisplayDesc); d != "" {
-				plan = d
-			} else {
-				plan = upstream.ProductTypeIdentity(selected.EntitlementBaseInfo.ProductType, true)
-			}
-		}
-		// v0.12.29: ide_user_pay_status —— 上游刷新链路的第二个数据源
-		// （trae_account_core_refresh.rs 先 pay_status 再 ent_usage）。Free CN/SOLO
-		// 的 ent_usage pack 里没有可解析 quota，剩余维度（快请求/月、SOLO 并发）
-		// 只在 pay_status 的 detail/quota 里。best-effort：失败不阻塞 credits。
-		if ps, psErr := upstreamClient.PayStatus(a); psErr == nil && ps.Code == 0 {
-			sum.FastRequestPer = ps.FastRequestPer()
-			sum.SoloParallel = ps.SoloParallelLimit()
-			sum.SoloPackage = ps.HasSoloPackage()
-			sum.PlanType = ps.PlanIdentity()
-			// 选中包缺失时回退 user_pay_identity_str 作为计划显示
-			// （上游 account.plan_type 即来自这里）。
-			if selected == nil {
-				if id := ps.PlanIdentity(); id != "" {
-					plan = id
-				}
-			}
-		}
-		// v0.12.44: CheckLogin —— 登录态 + 服务端绑定设备探测（best-effort，
-		// cockpit-tools 刷新链路同款，trae_account_core_refresh.rs:1035-1045）。
-		// BoundDeviceID 与本账号 deviceId 不一致 / DeviceBindStatus != BOUND /
-		// IsLogin=false → 签到风控高危（9074 高危画像），日志告警 + 面板亮标。
-		bind := &bindStatus{}
-		if cl, clErr := upstreamClient.CheckLogin(a); clErr == nil && cl != nil {
-			bind.Known = true
-			bind.IsLogin = cl.IsLogin
-			bind.BoundDeviceID = cl.BoundDeviceID
-			bind.DeviceBindStatus = cl.DeviceBindStatus
-			bind.DeviceMatch = cl.BoundDeviceID != "" && cl.BoundDeviceID == a.DeviceID
-			entry["is_login"] = cl.IsLogin
-			if cl.BoundDeviceID != "" {
-				entry["bound_device_id"] = cl.BoundDeviceID
-				entry["device_bind_status"] = cl.DeviceBindStatus
-				entry["device_match"] = bind.DeviceMatch
-			}
-			if !cl.IsLogin || (cl.DeviceBindStatus != "" && cl.DeviceBindStatus != "BOUND") || (cl.BoundDeviceID != "" && cl.BoundDeviceID != a.DeviceID) {
-				log.Printf("checkin device-bind warning uid=%s: isLogin=%v bindStatus=%q bound=%q local=%q — 绑定不一致为 9074 风控高危，建议面板退出重新登录以重绑设备", sa.Account.UID, cl.IsLogin, cl.DeviceBindStatus, cl.BoundDeviceID, a.DeviceID)
-			}
-		} else if clErr != nil {
-			entry["checklogin_error"] = clErr.Error()
-		}
-		entry["usage_model"] = sum.UsageModel
-		entry["remain_known"] = sum.RemainKnown
-		if sum.RemainKnown {
-			entry["total_remain"] = sum.Remain
-		} else {
-			entry["total_remain"] = 0 // 向后兼容；remain_known=false 时面板显示 "--"
-		}
-		entry["plan"] = plan
-		// v0.12.34: 积分池透出（面板"剩余积分"对齐官方口径）。
-		entry["credits_pool_known"] = sum.CreditsPool.Known
-		if sum.CreditsPool.Known {
-			entry["credits_pool_remain"] = sum.CreditsPool.Remain
-			entry["credits_pool_unlimited"] = sum.CreditsPool.Unlimited
-		}
-		if sum.UsageModel == "basic" {
-			entry["used"] = sum.Used
-			entry["total"] = sum.Total
-		}
-		if sum.UsageModel == "fast" {
-			entry["fast_limit"] = sum.FastLimit
-			entry["fast_used"] = sum.FastUsed
-		}
-		// v0.12.29: pay_status 补充维度透传（面板"快请求/月 / Solo 并发"）。
-		if sum.FastRequestPer != nil {
-			entry["fast_request_per"] = *sum.FastRequestPer
-		}
-		if sum.SoloParallel != nil {
-			entry["solo_parallel"] = *sum.SoloParallel
-		}
-		if sum.SoloPackage {
-			entry["solo_package"] = true
-		}
-		if sum.PlanType != "" {
-			entry["plan_type"] = sum.PlanType
-		}
-		// v0.12.25: also fetch the CHECK-IN status. v0.12.40: credits 语义
-		// 修正——它是签到奖励数额（非钱包），仅作展示与"已签"判定，不再
-		// 计入池子评分/可花余额。
-		wallet := int64(-1)
-		checkedIn, enable := false, false
-		if st, stErr := upstreamClient.CheckinStatus(a); stErr == nil {
-			wallet = st.Credits
-			checkedIn, enable = st.CheckedIn || st.DidCheckedIn, st.Enable
-		} else {
-			entry["checkin_status_error"] = stErr.Error()
-		}
-		if wallet >= 0 {
-			entry["checkin_credits"] = wallet
-			entry["checked_in"] = checkedIn
-		}
-		// Update cache + pool. e.credits stays pack-only (legacy field); the
-		// reward lives in e.checkin.Credits. v0.12.40: pool score = usage
-		// remain / credits pool only — the reward config is not spendable.
-		scoreRemain := int64(0)
-		if sum.RemainKnown {
-			scoreRemain = sum.Remain
-			if scoreRemain < 0 { // unlimited
-				scoreRemain = 1 << 30
-			}
-		}
-		if sum.CreditsPool.Known { // v0.12.34: 积分池参与池子评分
-			pr := sum.CreditsPool.Remain
-			if pr < 0 {
-				pr = 1 << 30
-			}
-			if pr > scoreRemain {
-				scoreRemain = pr
-			}
-		}
-		accountCache.Store(f.AuthIndex, &accountCacheEntry{
-			credits:     scoreRemain,
-			checkin:     &checkinStatus{CheckedIn: checkedIn, Credits: wallet, Enable: enable},
-			fetched:     time.Now(),
-			usage:       sum,
-			usageFilled: true,
-			plan:        plan,
-			bind:        bind,
-		})
-		// v0.12.64: fold the pool snapshot into the usage ledger so the
-		// credential-card usage note reports 标准额度 without upstream calls.
-		// trae exposes no reset-window bounds → the note shows the no-window
-		// fallback until one can be parsed.
-		usageQuotaStampFromSummary(f.AuthIndex, sum)
-		if accountPool != nil {
-			// v0.12.40: 不再叠加奖励配置（wallet 变量名保留为历史语义，
-			// 现含义 = 签到奖励数额）。
-			accountPool.SetCredits(sa.Account.UID, scoreRemain)
-			// v0.12.66: 已知来源全为 0（至少一个已知）→ 主动冷却到
-			// 次日 0 点，不再等下一次调用撞 402/4008 才被动冷却。
-			if quotaExhaustedKnown(sum) {
-				accountPool.Cooldown(sa.Account.UID, pool.CoolPlan,
-					pool.UntilNextMidnight(),
-					"credits exhausted (0) — resumes at local midnight")
-			}
-		}
-		results = append(results, entry)
+		results = append(results, refreshAccountCredits(f, sa, a))
 	}
 	return map[string]any{
 		"provider":    providerName,
@@ -1064,6 +902,182 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 	}
 }
 
+// refreshAccountCredits performs the live per-account credits query
+// (ent_usage + credits pool + pay_status + CheckLogin + checkin status),
+// stores the snapshot into accountCache / accountPool and returns the
+// result entry for the caller's results array.
+//
+// v0.12.70: extracted from handleCreditsQuery so handleRefresh can run the
+// exact same live path. The top-bar 刷新 used to swap tokens only and then
+// render buildDashboard() from the stale accountCache snapshot — the panel
+// toast said 数据已刷新 while the credit bar kept showing old numbers
+// (user-reported as 刷新显示有 bug). Callers pass the already-loaded
+// storedAuth/upstream auth; token-refresh failures are the caller's
+// decision to skip (same dead token would just fail upstream again).
+func refreshAccountCredits(f pluginapi.HostAuthFileEntry, sa *storedAuth, a *auth.Auth) map[string]any {
+	entry := map[string]any{"auth_index": f.AuthIndex, "uid": sa.Account.UID, "nickname": sa.Account.Nickname}
+	usage, err := upstreamClient.UserEntUsage(a)
+	if err != nil {
+		entry["error"] = "ent_usage: " + err.Error()
+		return entry
+	}
+	// v0.12.28: 套餐剩余对齐 cockpit-tools 的用量模型（trae.ts）：
+	//   fast  → 速通可用次数（-1 无限）
+	//   basic → 选中包 basic_usage_limit - basic_usage_amount（含 bonus）
+	//   unknown → 剩余不可知（面板显示 "--"；旧代码读不存在的
+	//             credits_limit 字段把这里渲染成"剩余 0 积分 · 00%"）。
+	sum := upstream.SummarizeUsage(usage.UserEntitlementPackList, true)
+	// v0.12.34: 官方 cashier 同口径积分池（Σ max(credits_limit-usage,0)，
+	// -1 不限）。这是模型调用真正扣减的池子——此前把签到钱包当
+	// "剩余积分"展示，与官方数字对不上（用户实测反馈）。
+	sum.CreditsPool = upstream.CreditsPoolUsage(usage.UserEntitlementPackList, usage.IsCreditsBilling)
+	selected := upstream.SelectActivePack(usage.UserEntitlementPackList, true)
+	plan := "Unknown"
+	if selected != nil {
+		// 上游 identityStr 优先取选中包 display_desc，回退 product_type 映射。
+		if d := strings.TrimSpace(selected.DisplayDesc); d != "" {
+			plan = d
+		} else {
+			plan = upstream.ProductTypeIdentity(selected.EntitlementBaseInfo.ProductType, true)
+		}
+	}
+	// v0.12.29: ide_user_pay_status —— 上游刷新链路的第二个数据源
+	// （trae_account_core_refresh.rs 先 pay_status 再 ent_usage）。Free CN/SOLO
+	// 的 ent_usage pack 里没有可解析 quota，剩余维度（快请求/月、SOLO 并发）
+	// 只在 pay_status 的 detail/quota 里。best-effort：失败不阻塞 credits。
+	if ps, psErr := upstreamClient.PayStatus(a); psErr == nil && ps.Code == 0 {
+		sum.FastRequestPer = ps.FastRequestPer()
+		sum.SoloParallel = ps.SoloParallelLimit()
+		sum.SoloPackage = ps.HasSoloPackage()
+		sum.PlanType = ps.PlanIdentity()
+		// 选中包缺失时回退 user_pay_identity_str 作为计划显示
+		// （上游 account.plan_type 即来自这里）。
+		if selected == nil {
+			if id := ps.PlanIdentity(); id != "" {
+				plan = id
+			}
+		}
+	}
+	// v0.12.44: CheckLogin —— 登录态 + 服务端绑定设备探测（best-effort，
+	// cockpit-tools 刷新链路同款，trae_account_core_refresh.rs:1035-1045）。
+	// BoundDeviceID 与本账号 deviceId 不一致 / DeviceBindStatus != BOUND /
+	// IsLogin=false → 签到风控高危（9074 高危画像），日志告警 + 面板亮标。
+	bind := &bindStatus{}
+	if cl, clErr := upstreamClient.CheckLogin(a); clErr == nil && cl != nil {
+		bind.Known = true
+		bind.IsLogin = cl.IsLogin
+		bind.BoundDeviceID = cl.BoundDeviceID
+		bind.DeviceBindStatus = cl.DeviceBindStatus
+		bind.DeviceMatch = cl.BoundDeviceID != "" && cl.BoundDeviceID == a.DeviceID
+		entry["is_login"] = cl.IsLogin
+		if cl.BoundDeviceID != "" {
+			entry["bound_device_id"] = cl.BoundDeviceID
+			entry["device_bind_status"] = cl.DeviceBindStatus
+			entry["device_match"] = bind.DeviceMatch
+		}
+		if !cl.IsLogin || (cl.DeviceBindStatus != "" && cl.DeviceBindStatus != "BOUND") || (cl.BoundDeviceID != "" && cl.BoundDeviceID != a.DeviceID) {
+			log.Printf("checkin device-bind warning uid=%s: isLogin=%v bindStatus=%q bound=%q local=%q — 绑定不一致为 9074 风控高危，建议面板退出重新登录以重绑设备", sa.Account.UID, cl.IsLogin, cl.DeviceBindStatus, cl.BoundDeviceID, a.DeviceID)
+		}
+	} else if clErr != nil {
+		entry["checklogin_error"] = clErr.Error()
+	}
+	entry["usage_model"] = sum.UsageModel
+	entry["remain_known"] = sum.RemainKnown
+	if sum.RemainKnown {
+		entry["total_remain"] = sum.Remain
+	} else {
+		entry["total_remain"] = 0 // 向后兼容；remain_known=false 时面板显示 "--"
+	}
+	entry["plan"] = plan
+	// v0.12.34: 积分池透出（面板"剩余积分"对齐官方口径）。
+	entry["credits_pool_known"] = sum.CreditsPool.Known
+	if sum.CreditsPool.Known {
+		entry["credits_pool_remain"] = sum.CreditsPool.Remain
+		entry["credits_pool_unlimited"] = sum.CreditsPool.Unlimited
+	}
+	if sum.UsageModel == "basic" {
+		entry["used"] = sum.Used
+		entry["total"] = sum.Total
+	}
+	if sum.UsageModel == "fast" {
+		entry["fast_limit"] = sum.FastLimit
+		entry["fast_used"] = sum.FastUsed
+	}
+	// v0.12.29: pay_status 补充维度透传（面板"快请求/月 / Solo 并发"）。
+	if sum.FastRequestPer != nil {
+		entry["fast_request_per"] = *sum.FastRequestPer
+	}
+	if sum.SoloParallel != nil {
+		entry["solo_parallel"] = *sum.SoloParallel
+	}
+	if sum.SoloPackage {
+		entry["solo_package"] = true
+	}
+	if sum.PlanType != "" {
+		entry["plan_type"] = sum.PlanType
+	}
+	// v0.12.25: also fetch the CHECK-IN status. v0.12.40: credits 语义
+	// 修正——它是签到奖励数额（非钱包），仅作展示与"已签"判定，不再
+	// 计入池子评分/可花余额。
+	wallet := int64(-1)
+	checkedIn, enable := false, false
+	if st, stErr := upstreamClient.CheckinStatus(a); stErr == nil {
+		wallet = st.Credits
+		checkedIn, enable = st.CheckedIn || st.DidCheckedIn, st.Enable
+	} else {
+		entry["checkin_status_error"] = stErr.Error()
+	}
+	if wallet >= 0 {
+		entry["checkin_credits"] = wallet
+		entry["checked_in"] = checkedIn
+	}
+	// Update cache + pool. e.credits stays pack-only (legacy field); the
+	// reward lives in e.checkin.Credits. v0.12.40: pool score = usage
+	// remain / credits pool only — the reward config is not spendable.
+	scoreRemain := int64(0)
+	if sum.RemainKnown {
+		scoreRemain = sum.Remain
+		if scoreRemain < 0 { // unlimited
+			scoreRemain = 1 << 30
+		}
+	}
+	if sum.CreditsPool.Known { // v0.12.34: 积分池参与池子评分
+		pr := sum.CreditsPool.Remain
+		if pr < 0 {
+			pr = 1 << 30
+		}
+		if pr > scoreRemain {
+			scoreRemain = pr
+		}
+	}
+	accountCache.Store(f.AuthIndex, &accountCacheEntry{
+		credits:     scoreRemain,
+		checkin:     &checkinStatus{CheckedIn: checkedIn, Credits: wallet, Enable: enable},
+		fetched:     time.Now(),
+		usage:       sum,
+		usageFilled: true,
+		plan:        plan,
+		bind:        bind,
+	})
+	// v0.12.64: fold the pool snapshot into the usage ledger so the
+	// credential-card usage note reports 标准额度 without upstream calls.
+	// trae exposes no reset-window bounds → the note shows the no-window
+	// fallback until one can be parsed.
+	usageQuotaStampFromSummary(f.AuthIndex, sum)
+	if accountPool != nil {
+		// v0.12.40: 不再叠加奖励配置（wallet 变量名保留为历史语义，
+		// 现含义 = 签到奖励数额）。
+		accountPool.SetCredits(sa.Account.UID, scoreRemain)
+		// v0.12.66: 已知来源全为 0（至少一个已知）→ 主动冷却到
+		// 次日 0 点，不再等下一次调用撞 402/4008 才被动冷却。
+		if quotaExhaustedKnown(sum) {
+			accountPool.Cooldown(sa.Account.UID, pool.CoolPlan,
+				pool.UntilNextMidnight(),
+				"credits exhausted (0) — resumes at local midnight")
+		}
+	}
+	return entry
+}
 func max64(a, b int64) int64 {
 	if a > b {
 		return a
@@ -1099,6 +1113,22 @@ func handleRefresh() map[string]any {
 			continue
 		}
 		entry["refreshed"] = refreshed
+		// v0.12.70: 顶部「刷新」此前只刷 token，返回的 dashboard 仍从
+		// accountCache 投影 —— toast 报「数据已刷新」而积分条纹丝不动
+		// （用户报告的刷新显示 bug）。token 刷新成功后走 /credits 同款实拉
+		// 链路（refreshAccountCredits），快照与结果一并保鲜；实拉失败不
+		// 掩盖 token 刷新结果，单独落 credits_error 诊断字段。
+		ce := refreshAccountCredits(f, sa, a)
+		for ck, cv := range ce {
+			switch ck {
+			case "auth_index", "uid", "nickname":
+				// entry 已带，保持不变
+			case "error":
+				entry["credits_error"] = cv
+			default:
+				entry[ck] = cv
+			}
+		}
 		results = append(results, entry)
 	}
 	return map[string]any{

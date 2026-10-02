@@ -301,9 +301,17 @@ function progressHTML(cr, acct){
   //   unknown（Free 等） → "免费剩余：--"，进度条不猜测（旧代码把未知渲染成
   //   "剩余 0 积分 · 00%"，即用户截图中的显示异常）；meta 附 pay_status
   //   真实维度（快通道/Solo 并发），有数就不只给 "--"。
-  // v0.12.30: SOLO 已转积分制——模型调用消耗签到钱包积分，unknown 模型下
-  // 直接把钱包余额作为"剩余积分"展示；快通道: 0/月 是噪音，只在 >0 时显示。
+  // v0.12.70: SOLO 语境（积分制）与签到奖励数额，供积分池分支使用；
+  // 奖励数额不再被当作"剩余积分"渲染（见下方 v0.12.70 分支删除说明）。
+  // v0.12.70: 积分条统一改画「剩余」比例（旧版 basic/fast 画"已用"——
+  // 剩得多条却空，与左侧"剩余 X"文案对不上，用户当显示 bug 报），
+  // 配色同步反转（剩 <15% 红 / <40% 黄）；禁用账号不再永远转圈。
   if(!cr || (cr.total_remain==null && !cr.plan)){
+    // v0.12.70: 已禁用账号不做懒加载（lazyLoadCredits 过滤掉 disabled），
+    // 占位符别再永远显示"加载中…"——如实标注未查询。
+    if(acct&&acct.disabled){
+      return '<div class="pb"><div class="pb-label"><span>剩余积分</span><span>未查询</span></div><div class="pb-track"><div class="pb-bar" style="width:0%;background:var(--mut)"></div></div><div class="pb-meta">账号已禁用，积分未查询</div></div>';
+    }
     return '<div class="pb"><div class="pb-label"><span>剩余积分</span><span class="spin"></span>加载中…</span></div><div class="pb-track"><div class="pb-bar" style="width:0%"></div></div></div>';
   }
   const plan=String(cr.plan||"").toLowerCase();
@@ -317,10 +325,13 @@ function progressHTML(cr, acct){
     const isUnl=avail<0;
     const fl=(cr.fast_limit!=null)?Number(cr.fast_limit):null;
     const fu=(cr.fast_used!=null)?Number(cr.fast_used):0;
-    const pct=(fl!=null&&fl>0&&!isUnl)?Math.max(0,Math.min(100,Math.round((fu/fl)*100))):(isUnl?0:null);
-    const bar=pct==null?'':`<div class="pb-track"><div class="pb-bar" style="width:${pct}%;background:${pct>85?'var(--err)':(pct>60?'var(--warn)':'var(--ok)')}"></div></div>`;
+    // v0.12.70: 条画剩余比例（avail/fl），无限次画满条；右标签同步。
+    // 旧版画 used%：剩 50 次（未用）条是空的，看起来像没有量。
+    const pct=(fl!=null&&fl>0&&!isUnl)?Math.max(0,Math.min(100,Math.round((avail/fl)*100))):(isUnl?100:null);
+    const color=(pct!=null&&pct<15)?'var(--err)':((pct!=null&&pct<40)?'var(--warn)':'var(--ok)');
+    const bar=pct==null?'':`<div class="pb-track"><div class="pb-bar" style="width:${pct}%;background:${color}"></div></div>`;
     const meta=(fl!=null&&!isUnl)?`速通已用 ${fu} / ${fl} 次${when}`:(isUnl?`速通无限次 · 已用 ${fu}${when}`:'');
-    return `<div class="pb"><div class="pb-label"><span>速通可用 ${isUnl?"无限次":avail+" 次"}</span><span>${pct==null?"":pct+"%"}</span></div>${bar}<div class="pb-meta">${meta}</div></div>`;
+    return `<div class="pb"><div class="pb-label"><span>速通可用 ${isUnl?"无限次":avail+" 次"}</span><span>${pct==null?"":(isUnl?"不限":pct+"%")}</span></div>${bar}<div class="pb-meta">${meta}</div></div>`;
   }
   // v0.12.29: pay_status detail.fast_request_per —— 上游 CN 卡片第 2 分支
   // （TraeAccountsPage.tsx "快请求/月：{{count}}"）。Free CN 账户的 ent_usage
@@ -336,8 +347,10 @@ function progressHTML(cr, acct){
     const remain=Number(cr.total_remain)||0;
     const used=(cr.used!=null)?Number(cr.used):0;
     const total=(cr.total!=null)?Number(cr.total):(remain+used);
-    const pct=total>0?Math.max(0,Math.min(100,Math.round(used/total*100))):0;
-    let color='var(--ok)'; if(pct>60)color='var(--warn)'; if(pct>85||remain===0)color='var(--err)';
+    // v0.12.70: 条画剩余比例（remain/total）；旧版画 used%——剩 499
+    // 显示空条+0%，被用户当显示 bug。配色反转：剩 <15% 红、<40% 黄。
+    const pct=total>0?Math.max(0,Math.min(100,Math.round(remain/total*100))):0;
+    let color='var(--ok)'; if(pct<40)color='var(--warn)'; if(pct<15||remain===0)color='var(--err)';
     return `<div class="pb"><div class="pb-label"><span>剩余 ${remain}</span><span>${pct}%</span></div><div class="pb-track"><div class="pb-bar" style="width:${pct}%;background:${color}"></div></div><div class="pb-meta">剩余 ${remain} · 已用 ${used} · 额度池 ${total} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
   }
   if(cr.remain_known===false || (model==="unknown")){
@@ -358,12 +371,12 @@ function progressHTML(cr, acct){
       }
       const pr=Number(cr.credits_pool_remain)||0;
       let color=pr>0?'var(--ok)':'var(--err)';
-      return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>${pr>0?"":"0%"}</span></div><div class="pb-track"><div class="pb-bar" style="width:${pr>0?100:0}%;background:${color}"></div></div><div class="pb-meta">剩余 ${pr} 积分 · SOLO 积分池（模型调用扣减，与官方一致）${wm} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
+      // v0.12.70: 右标签显示数值（旧版正数时是空串，视觉上像缺了一块）。
+      return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>${pr>0?pr:"0%"}</span></div><div class="pb-track"><div class="pb-bar" style="width:${pr>0?100:0}%;background:${color}"></div></div><div class="pb-meta">剩余 ${pr} 积分 · SOLO 积分池（模型调用扣减，与官方一致）${wm} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
     }
-    if(isSoloAcct&&wallet!=null){
-      let color=wallet>0?'var(--ok)':'var(--err)';
-      return `<div class="pb"><div class="pb-label"><span>剩余积分</span><span>${wallet>0?"":"0%"}</span></div><div class="pb-track"><div class="pb-bar" style="width:${wallet>0?100:0}%;background:${color}"></div></div><div class="pb-meta">签到奖励 ${wallet} 积分（签到成功后入池，模型调用扣积分池） · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
-    }
+    // v0.12.70: 删除「SOLO 无池时把签到奖励数额当剩余积分画满条」的分支 —
+    // v0.12.40 已定案 credits=每日奖励数额（非钱包/非可花），把它渲染成
+    // "剩余积分 X" 是自相矛盾的显示 bug。奖励走卡片独立的"签到奖励"行。
     // 快通道 0/月是噪音：只在有量时展示（对齐上游 >0 分支）。
     const extras=(fpm!=null&&fpm>0?` · 快通道: ${fpm}/月`:"")+(solo!=null?` · Solo 并发 ${solo}`:"")+(cr.solo_package?" · 权益包: Solo":"");
     return `<div class="pb"><div class="pb-label"><span>${isFree?"免费剩余":"剩余"}</span><span>--</span></div><div class="pb-track"><div class="pb-bar" style="width:0%;background:var(--mut)"></div></div><div class="pb-meta">${isFree?"免费剩余：--":"剩余次数：--"}${extras} · 计划 ${esc(cr.plan||"-")}${when}</div></div>`;
@@ -941,7 +954,7 @@ async function refreshCredits(idx, btn){
     }else{
       detail=who+" · 套餐 "+(res.total_remain!=null?res.total_remain:"?");
     }
-    if(res.checkin_credits!=null) detail+=" · 签到钱包余额 "+res.checkin_credits;
+    if(res.checkin_credits!=null) detail+=" · 签到奖励 "+res.checkin_credits;
     toast("积分已刷新","ok",detail);
   }catch(e){
     toast("刷新失败","err",e.message||String(e));
