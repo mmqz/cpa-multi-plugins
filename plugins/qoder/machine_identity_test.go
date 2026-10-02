@@ -1,19 +1,20 @@
-// machine_identity_test.go — v0.8.36: the campaigns platform filters
+// machine_identity_test.go — v0.8.44: the campaigns platform filters
 // device-targeted rows (daily 100 Credits, the +1800 Pro pack) on the
-// Cosy-Machine* headers, and the real values come from the official
-// client's native bridge runtime-info.exe (qoder2api-hub capture). These
-// tests pin the derived fallback's exact hub-parity scheme (stable per-uid,
-// no random values that would trip risk control) and the header wiring.
+// Cosy-Machine* headers. The simulated identity replays the exact shape
+// the official runtime-info bridge emits (extracted from the official CN
+// CLI 1.1.65 bundle, container-run verified): "P1gA"-prefixed 88-char
+// base64url token (3f 58 00 header + 63 body bytes), 18-hex machineType
+// with the "91" marker, 18-hex machineCode with the "00" marker — stable
+// per uid, distinct across uids. These tests pin that format iron-law and
+// the header wiring.
 package main
 
 import (
-        "crypto/md5"
-        "crypto/sha512"
         "encoding/base64"
-        "fmt"
         "net/http"
         "os"
         "path/filepath"
+        "regexp"
         "runtime"
         "strings"
         "testing"
@@ -32,35 +33,57 @@ func derivedTestHeaders(t *testing.T) *machineIdentity {
         return &id
 }
 
-// TestDerivedIdentityHubParityValues: the derivation must stay byte-identical
-// with the qoder2api-hub capture's scheme (salted md5 / sha512-b64url) —
-// same account, same pseudo-device, forever.
-func TestDerivedIdentityHubParityValues(t *testing.T) {
+// TestSimulatedIdentityOfficialFormat (v0.8.44): every field of the derived
+// identity must match the official bridge's observed output shape exactly —
+// these are the format iron-laws the server filters on.
+func TestSimulatedIdentityOfficialFormat(t *testing.T) {
         id := derivedTestHeaders(t)
-        wantID := fmt.Sprintf("%x", md5.Sum([]byte("machine:")))
-        if id.MachineID != wantID {
-                t.Fatalf("MachineID = %q, want %q (hub md5(salt:uid))", id.MachineID, wantID)
+        // machineToken: exactly 88 base64url chars, "P1gA" prefix (fixed
+        // 3f 58 00 header), decoding back to 66 bytes starting 3f 58 00.
+        if len(id.MachineToken) != 88 {
+                t.Fatalf("MachineToken length = %d, want 88 (official shape)", len(id.MachineToken))
         }
-        wantType := fmt.Sprintf("%x", md5.Sum([]byte("machinetype:")))[:18]
-        if id.MachineType != wantType {
-                t.Fatalf("MachineType = %q, want %q (hub machinetype[:18])", id.MachineType, wantType)
+        if !strings.HasPrefix(id.MachineToken, "P1gA") {
+                t.Fatalf("MachineToken = %q, want P1gA prefix (3f5800 header)", id.MachineToken)
         }
-        wantCode := fmt.Sprintf("%x", md5.Sum([]byte("machinecode:")))
-        if id.MachineCode != wantCode {
-                t.Fatalf("MachineCode = %q, want %q", id.MachineCode, wantCode)
+        raw, err := base64.RawURLEncoding.DecodeString(id.MachineToken)
+        if err != nil {
+                t.Fatalf("MachineToken not base64url: %v", err)
         }
-        sum := sha512.Sum512([]byte("machinetoken:"))
-        wantToken := base64.RawURLEncoding.EncodeToString(sum[:])[:43]
-        if id.MachineToken != wantToken {
-                t.Fatalf("MachineToken = %q, want %q (hub sha512-b64url[:43])", id.MachineToken, wantToken)
+        if len(raw) != 66 || raw[0] != 0x3f || raw[1] != 0x58 || raw[2] != 0x00 {
+                t.Fatalf("MachineToken body = %d bytes starting %x, want 66 bytes starting 3f5800", len(raw), raw[:3])
+        }
+        // machineType: 18 hex, 8hex + "91" + 8hex.
+        if len(id.MachineType) != 18 || !regexp.MustCompile(`^[0-9a-f]{8}91[0-9a-f]{8}$`).MatchString(id.MachineType) {
+                t.Fatalf("MachineType = %q, want 8hex+91+8hex (18 chars)", id.MachineType)
+        }
+        // machineCode: 18 hex, 8hex + "00" + 8hex.
+        if len(id.MachineCode) != 18 || !regexp.MustCompile(`^[0-9a-f]{8}00[0-9a-f]{8}$`).MatchString(id.MachineCode) {
+                t.Fatalf("MachineCode = %q, want 8hex+00+8hex (18 chars)", id.MachineCode)
         }
         if id.MachineOS == "" || id.MachineHostname == "" {
                 t.Fatalf("os/hostname must never be empty: %q / %q", id.MachineOS, id.MachineHostname)
         }
-        // Stability: the same uid derives the same identity (no randomness).
-        again := derivedMachineIdentity("")
-        if again != *id {
-                t.Fatalf("derivation is not stable: %+v vs %+v", again, *id)
+}
+
+// TestSimulatedIdentityPerUIDStableAndIsolated (v0.8.44): the same uid
+// always derives the same identity (no per-call rotation); distinct uids
+// never share a pseudo-device (upstream per-person dedup would otherwise
+// hide the daily row from the losing accounts).
+func TestSimulatedIdentityPerUIDStableAndIsolated(t *testing.T) {
+        a1 := derivedMachineIdentity("u-alice")
+        a2 := derivedMachineIdentity("u-alice")
+        b := derivedMachineIdentity("u-bob")
+        if a1 != a2 {
+                t.Fatalf("derivation not stable per uid: %+v vs %+v", a1, a2)
+        }
+        if a1.MachineToken == b.MachineToken || a1.MachineType == b.MachineType || a1.MachineCode == b.MachineCode {
+                t.Fatalf("identity collides across uids: alice=%+v bob=%+v", a1, b)
+        }
+        // Empty uid stays deterministic too (single-account convenience).
+        e1, e2 := derivedMachineIdentity(""), derivedMachineIdentity("")
+        if e1 != e2 {
+                t.Fatalf("empty-uid derivation not stable")
         }
 }
 
@@ -107,12 +130,15 @@ func TestMachineIdentityOverrideShortCircuits(t *testing.T) {
         }
 }
 
-// TestMachineIdentityHintDerivedDisclosesFilteringRisk: the derived hint
-// must say the official bridge was not found and what that costs.
-func TestMachineIdentityHintDerivedDisclosesFilteringRisk(t *testing.T) {
+// TestMachineIdentityHintDerivedDisclosesSimulatedSource (v0.8.44): the
+// simulated-identity hint must name the source honestly (官方格式模拟身份),
+// carry the format credentials (P1gA / 91/00 markers) and keep the real
+// bridge escape hatch (QD_UMID_BIN) visible for operators who can drop
+// the official binary.
+func TestMachineIdentityHintDerivedDisclosesSimulatedSource(t *testing.T) {
         _ = derivedTestHeaders(t)
         hint := machineIdentityHint(&storedAuth{Auth: storedTokens{Region: "cn"}, Account: storedAccount{UID: "u"}})
-        for _, want := range []string{"runtime-info.exe", "设备定向活动", "过滤"} {
+        for _, want := range []string{"模拟身份", "P1gA", "QD_UMID_BIN"} {
                 if !strings.Contains(hint, want) {
                         t.Fatalf("derived hint missing %q: %q", want, hint)
                 }
@@ -187,16 +213,56 @@ func TestQDUmidBinNativeBridgeEndToEnd(t *testing.T) {
         machineIdentityCache.Delete(region)
 }
 
-// TestMachineIdentityHintDerivedMentionsLinuxEscapeHatch (v0.8.43): the
-// derived-identity hint must carry the official Linux bridge path and the
-// QD_UMID_BIN override so container operators know how to get a real
-// identity instead of the filtered pseudo-device.
-func TestMachineIdentityHintDerivedMentionsLinuxEscapeHatch(t *testing.T) {
+// TestMachineIdentityHintDerivedMentionsEscapeHatch (v0.8.44): the
+// simulated-identity hint keeps the QD_UMID_BIN override and the official
+// bridge artifact name visible so container operators can still opt into a
+// real machine identity when one is available.
+func TestMachineIdentityHintDerivedMentionsEscapeHatch(t *testing.T) {
         _ = derivedTestHeaders(t)
         hint := machineIdentityHint(&storedAuth{Auth: storedTokens{Region: "cn"}, Account: storedAccount{UID: "u"}})
-        for _, want := range []string{"QD_UMID_BIN", "/opt/Qoder", "runtime-info"} {
+        for _, want := range []string{"QD_UMID_BIN", "runtime-info"} {
                 if !strings.Contains(hint, want) {
                         t.Fatalf("derived hint missing %q: %q", want, hint)
                 }
+        }
+}
+
+// TestOfficialBridgeGoldenSamples (v0.8.44): the format iron-laws are not
+// invented — they were read off nine live runs of the official bridge
+// (extracted from the official CN CLI 1.1.65 bundle; sha256 e30b307e...,
+// byte-identical to the IDE deb's runtime-info). The samples below are the
+// exact observed machineToken/machineType/machineCode values with their
+// random bodies kept verbatim: this test re-pins the simulator's shape
+// against the official reality whenever the format test above changes.
+func TestOfficialBridgeGoldenSamples(t *testing.T) {
+        type sample struct{ token, mtype, code string }
+        samples := []sample{
+                {"P1gAyx0-JzEkqouxxfjI9eXMW906sx9fDiFDdvMsL02lD07MjoaafK-QhBp5yaRUaARDuvFs0XLo8xTmMejXj-WE", "c5233f7091a5566047", "ac2b4cba0028649952"},
+                {"P1gAiQvKVNlSwvoHGJsIeFULqT6GYj-7mdb2AtwKNiu8liWYAUr01eTmCgikqbcceg0tYdAM-ndEOI8aTGdKYhGr", "189d27fb915b08d163", "af8825110054463a72"},
+                {"P1gA-ZdWWaXf-10_9bQ6m7EC-FEHoRerwzj183jZEFZYgwLg-T3E6Hj60uPA3X4_hZO_6Thauwpd8I-s9r3RXNmC", "cb71c2be915cdf6939", "3444cffd0070dd58b4"},
+                {"P1gASXhSGOrYR_xEAXhMA4v0K_MOu95-jBM2N6ZGJEIILyP0Y_jKGLDR7r2vYlYytmYzZjajf7ItK435kiLYlvb5", "55f2c19b913284ab54", "2189ac6000c41c4316"},
+                {"P1gADW8JamdjLtbF3gghQvB526Xo5itY2_5hOc5Mknrcrg9285MicRHzUVbiSMKAhwUGbiJaqffdbob2KvewwRU1", "f3aba522915256b72e", "8c091c81003c80b0bb"},
+                {"P1gA8SH5Ph0YaUcMqK_me2ZrKfWf-ykDPp_w94B5bXpi6bCokJUO7NYLKSAmwhu3FuFLITW32YKpTnL7VsN-OXRW", "87d2c61491e98d6686", "a2870d1600d7bdfb07"},
+                {"P1gAx55X-hXeqGY_J3tqKcvC_eDZf6Y_dj3_IUZqA3Ezge8gO9mcrHIkYKl1Wz9GvsQUQT6HZgRSMVBT8ectgpeB", "eaa927a291988d10c2", "1f7541a5000b51c0eb"},
+                {"P1gA2WPbVevTTyS8ThOFao6B6Uc1cgv6kjjhHTv6kEAnkTgwtDAF-AHBaYViBCG2-vovw-BOKqV0z0W51kHvsJEc", "2d894e019189ca8910", "0818377300b0dd913b"},
+                {"P1gAbKUEUrpMTSMQEgfixiI-FTwbveDcmDY7PowA2WrpA4xD4UqLTjqgcT_kP4q2c4IRgjr72AedOhLFx2DcN8c1", "12c9a38591cfb03c19", "8ea2e9ce0047c18a94"},
+        }
+        for i, s := range samples {
+                if len(s.token) != 88 || !strings.HasPrefix(s.token, "P1gA") {
+                        t.Fatalf("sample %d token shape drift: %q", i, s.token)
+                }
+                if len(s.mtype) != 18 || s.mtype[8:10] != "91" {
+                        t.Fatalf("sample %d machineType shape drift: %q", i, s.mtype)
+                }
+                if len(s.code) != 18 || s.code[8:10] != "00" {
+                        t.Fatalf("sample %d machineCode shape drift: %q", i, s.code)
+                }
+        }
+        // The simulated values must be shape-identical to every golden sample.
+        sim := derivedMachineIdentity("golden-uid")
+        if len(sim.MachineToken) != 88 || !strings.HasPrefix(sim.MachineToken, "P1gA") ||
+                len(sim.MachineType) != 18 || sim.MachineType[8:10] != "91" ||
+                len(sim.MachineCode) != 18 || sim.MachineCode[8:10] != "00" {
+                t.Fatalf("simulated identity shape drifts from official samples: %+v", sim)
         }
 }

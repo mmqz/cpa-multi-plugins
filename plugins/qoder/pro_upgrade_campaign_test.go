@@ -366,8 +366,7 @@ func TestClaimProDiagnosticsCarryIdentityAndProbeLines(t *testing.T) {
         for _, want := range []string{
                 "act-20260901-922(VIEW_DETAILS/CLAIMABLE",
                 "面值不可读",
-                "runtime-info.exe",
-                "设备定向活动",
+                "模拟身份",
         } {
                 if !strings.Contains(msg, want) {
                         t.Fatalf("diagnostic message missing %q: %q", want, msg)

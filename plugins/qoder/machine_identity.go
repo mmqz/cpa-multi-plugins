@@ -36,31 +36,43 @@
 // identity falls back to a per-uid stable derivation with the same shape —
 // honest in the diagnostics about the filtering risk that fallback carries.
 //
-// v0.8.43 (official-package forensics, both packages sha256 on file): until
-// now the native bridge was Windows-only — runtimeInfoExePath returned ""
-// for any other GOOS, so every Linux/macOS deployment silently lived on the
-// derived fallback even though BOTH official packages ship the bridge for
-// it:
+// v0.8.44 (SIMULATED identity — the container answer, per maintainer ruling:
+// a container deployment can never present a real machine identity and must
+// not try; it must SIMULATE one, in the exact shape the official bridge
+// emits). The generation logic was extracted from the official artifacts:
 //
-//   - Qoder-linux-amd64.deb ships resources/umid/runtime-info (ELF x86-64,
-//     manifest qoderCliVersion 1.1.64, sha256 e30b307e...f7d7478) and the
-//     binary runs standalone on stock Linux (container-verified).
-//   - The client bundle (out/main/index.js, identical in CN v0.4.3 exe and
-//     the intl deb) spawns it per platform (function IUt):
-//       win32/darwin: runtime-info <env> --account-stdin, stdin {"account":...}
-//       linux:        runtime-info <env>                (stdin ignored)
-//     env is the release channel ("prod"), stdout's FIRST line is one JSON
-//     object {machineToken, machineType, machineCode} (vmInfo parsed then
-//     dropped by the official EUt mapper).
-//   - The output is cached per active account for 1h ± 5min and any spawn
-//     failure just sends the request without the machine headers — identity
-//     is best-effort by design upstream.
+//   - runtime-info itself, extracted from the official CN CLI 1.1.65 bundle
+//     (qoderclicn embeds all five platform builds as base64 Buffer literals;
+//     the linux-x64 one decodes to sha256 e30b307e...f7d7478 — byte-identical
+//     to the IDE deb's resources/umid/runtime-info). It is the Alibaba UMID
+//     SDK's Rust bridge: it phones home to pum.m.taobao.com / *.alibabachengdun.com
+//     "repPc.json" collectors and caches its state AES-encrypted in
+//     ~/.config/.locale_cfg (random 16-char keys + a millis timestamp).
+//   - Container-verified output format (9 runs, all observed values):
+//       machineToken  88 chars base64url, ALWAYS prefixed "P1gA"
+//                     = raw 66 bytes: fixed header 3f 58 00 + 63 random bytes
+//       machineType   18 hex chars, ALWAYS 8hex + "91" + 8hex
+//       machineCode   18 hex chars, ALWAYS 8hex + "00" + 8hex
+//       vmInfo        {"isVm":false,"brand":"None","percentage":0,"vmTypeCode":91}
+//                     (isVm is machine-local and dropped by the client's EUt
+//                     mapper — it never reaches the server as a header)
+//   - Generation semantics: with the cache unreadable the bridge mints a FRESH
+//     random identity per run (verified: every run differs, even with a
+//     writable HOME; stability only comes from .locale_cfg decrypting). The
+//     official desktop client keeps it stable via that cache plus its own 1h
+//     spawn cache; the server demonstrably accepts fresh AND reused values
+//     (hub live test: reused identity still answered showCampaign=true 25s+).
+//     What the server does NOT accept is a MALFORMED value: the old derived
+//     scheme (43-char token without the 3f5800 header, 18-hex type without
+//     the 91 marker, 32-hex code without the 00 marker) was silently filtered
+//     from device-targeted rows — that was the entire "派生身份被过滤" mystery.
 //
-// This release extends the bridge discovery to Linux (the deb's official
-// install root /opt/Qoder) and macOS (Electron default layout), and adds a
-// QD_UMID_BIN env override so container deployments can drop the official
-// binary anywhere and point the plugin at it. The per-platform spawn dialect
-// is byte-parity with the client.
+// The simulated identity therefore replays the exact official shape:
+// "P1gA" + 63 stable per-uid derived bytes (88 chars), 8hex+"91"+8hex,
+// 8hex+"00"+8hex — per-UID, not per-machine, so accounts never collide into
+// upstream's per-person dedup (SAME_PERSON_ALREADY_CLAIMED hides the daily
+// row from every account sharing one identity). The QD_UMID_BIN escape hatch
+// (a real official bridge on disk) still wins when present.
 package main
 
 import (
@@ -222,15 +234,19 @@ func nativeMachineIdentityFrom(exe, uid string) *machineIdentity {
         return id
 }
 
-// derivedMachineIdentity builds the per-uid stable fallback (hub-parity
-// scheme: salted md5/sha512 one-way derivations, so the same account always
-// presents the same pseudo-device and accounts never collide).
+// derivedMachineIdentity builds the per-uid SIMULATED identity (v0.8.44):
+// the exact shape the official runtime-info bridge emits — "P1gA"-prefixed
+// 88-char base64url token (fixed 3f 58 00 header + 63 body bytes), 18-hex
+// machineType with the "91" type marker, 18-hex machineCode with the "00"
+// marker — with every random body byte stably derived per uid, so the same
+// account always presents the same well-formed pseudo-device and accounts
+// never collide (hub: 多账号之间天然隔离，阻断跨账号关联风控).
 func derivedMachineIdentity(uid string) machineIdentity {
         return machineIdentity{
                 MachineID:       derivedMachineID(uid, "machine"),
-                MachineToken:    derivedMachineToken(uid),
-                MachineType:     derivedMachineID(uid, "machinetype")[:18],
-                MachineCode:     derivedMachineID(uid, "machinecode"),
+                MachineToken:    simulatedMachineToken(uid),
+                MachineType:     simulatedMachineType(uid),
+                MachineCode:     simulatedMachineCode(uid),
                 MachineOS:       machineOSString(),
                 MachineHostname: machineHostname(),
                 Source:          "derived",
@@ -242,9 +258,41 @@ func derivedMachineID(uid, salt string) string {
         return fmt.Sprintf("%x", sum)
 }
 
-func derivedMachineToken(uid string) string {
-        sum := sha512.Sum512([]byte("machinetoken:" + uid))
-        return base64.RawURLEncoding.EncodeToString(sum[:])[:43]
+// simulatedKeystream derives n stable pseudo-random bytes from uid+salt
+// (sha512 in counter mode — enough entropy for the token body without any
+// shared state between accounts).
+func simulatedKeystream(uid, salt string, n int) []byte {
+        out := make([]byte, 0, n+64)
+        for counter := 0; len(out) < n; counter++ {
+                sum := sha512.Sum512([]byte(fmt.Sprintf("%s:%s:%d", salt, uid, counter)))
+                out = append(out, sum[:]...)
+        }
+        return out[:n]
+}
+
+// simulatedMachineToken replays the official token shape: base64url of
+// 66 bytes = the fixed 3f 58 00 header (whose base64 rendering is always
+// the literal prefix "P1gA" — verified against 9 live official-bridge runs)
+// followed by 63 per-uid derived bytes. Output is exactly 88 chars.
+func simulatedMachineToken(uid string) string {
+        raw := make([]byte, 66)
+        raw[0], raw[1], raw[2] = 0x3f, 0x58, 0x00
+        copy(raw[3:], simulatedKeystream(uid, "qd-sim-token", 63))
+        return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+// simulatedMachineType replays 18 hex chars: 8 hex + the official "91"
+// marker + 8 hex (observed unchanged across every live official run).
+func simulatedMachineType(uid string) string {
+        ks := simulatedKeystream(uid, "qd-sim-type", 9)
+        return fmt.Sprintf("%x", ks[:4]) + "91" + fmt.Sprintf("%x", ks[4:])[:8]
+}
+
+// simulatedMachineCode replays 18 hex chars: 8 hex + the official "00"
+// marker + 8 hex.
+func simulatedMachineCode(uid string) string {
+        ks := simulatedKeystream(uid, "qd-sim-code", 9)
+        return fmt.Sprintf("%x", ks[:4]) + "00" + fmt.Sprintf("%x", ks[4:])[:8]
 }
 
 // machineOSString mirrors the official desktop's os string on Windows
@@ -473,5 +521,5 @@ func machineIdentityHint(sa *storedAuth) string {
                 }
                 return "。本机身份来源：官方 runtime-info.exe（真实机器身份，定向活动可见性最优）"
         }
-        return "。本机未取得官方机器身份（未找到官方客户端的 runtime-info.exe/runtime-info，使用派生身份）——设备定向活动（含 Pro 升级包）可能被服务端过滤；在装有官方客户端的机器上执行可取回真身份，Linux/容器部署也可将官方安装包内 resources/umid/runtime-info 放到 /opt/Qoder 下，或以 QD_UMID_BIN 环境变量指定其路径"
+        return "。本机身份来源：官方格式模拟身份（88 位 P1gA 令牌 + 91/00 型机器码，逐字段复刻官方 runtime-info 输出形态，随账号稳定且跨账号隔离）——容器部署的推荐形态；如需真机身份可放置官方安装包内 resources/umid/runtime-info 并以 QD_UMID_BIN 指定其路径"
 }
