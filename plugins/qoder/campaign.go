@@ -1100,6 +1100,22 @@ func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
 // isRedemptionKind reports whether a benefit kind is a coupon/redemption
 // family reward (claimable from check-in; moves no credits — the caller must
 // surface the code, see the v0.8.40 coupon verdicts).
+// rewardReadDead reports whether a /reward read error carries the upstream's
+// GRANT_NOT_FOUND verdict — the definitive server answer that this account
+// has NO grant record for the campaign (a dead/expired round), not an
+// unreadable face value. v0.8.43 (official-package forensics): the
+// errorCode exists server-side only — neither official bundle (CN v0.4.3
+// exe nor the intl deb's out/main/index.js) contains the string, the client
+// renders whatever the server answers — so the verdict is matched from the
+// captured body, and the panel names it as a closed campaign instead of
+// offering the claim_unverified opt-in on a guaranteed no.
+func rewardReadDead(err error) bool {
+        if err == nil {
+                return false
+        }
+        return strings.Contains(err.Error(), "GRANT_NOT_FOUND")
+}
+
 func isRedemptionKind(kind string) bool {
         switch strings.ToUpper(strings.TrimSpace(kind)) {
         case "REDEMPTION_CODE", "REDEMPTION_COUPON", "COUPON":
@@ -1184,13 +1200,23 @@ func attemptViewDetailsClaims(sa *storedAuth, status *campaignStatusResponse) (m
                         notes = append(notes, fmt.Sprintf("%s（奖励类型 %s，归 Pro/订阅流程，签到不代领）", c.CampaignKey, kind))
                         continue
                 }
-                if !readable && !claimUnverifiedEnabled() {
-                        if rerr != nil {
-                                notes = append(notes, fmt.Sprintf("%s（面值不可读：%s；配置 claim_unverified 后签到可代领）", c.CampaignKey, truncateRedacted(rerr.Error(), 80)))
-                        } else {
-                                notes = append(notes, fmt.Sprintf("%s（reward 无面值；配置 claim_unverified 后签到可代领）", c.CampaignKey))
+                if !readable {
+                        // v0.8.43: GRANT_NOT_FOUND is the upstream's authoritative
+                        // "no grant record for this account" — a dead round, not a
+                        // face-value problem. Name it and move on; the opt-in hint
+                        // would only promise a claim the server already refused.
+                        if rerr != nil && rewardReadDead(rerr) {
+                                notes = append(notes, fmt.Sprintf("%s（活动已失效：上游 GRANT_NOT_FOUND，本账号无此活动的发放记录）", c.CampaignKey))
+                                continue
                         }
-                        continue
+                        if !claimUnverifiedEnabled() {
+                                if rerr != nil {
+                                        notes = append(notes, fmt.Sprintf("%s（面值不可读：%s；配置 claim_unverified 后签到可代领）", c.CampaignKey, truncateRedacted(rerr.Error(), 80)))
+                                } else {
+                                        notes = append(notes, fmt.Sprintf("%s（reward 无面值；配置 claim_unverified 后签到可代领）", c.CampaignKey))
+                                }
+                                continue
+                        }
                 }
                 res, err := claimCampaignByID(sa, c)
                 if err != nil {

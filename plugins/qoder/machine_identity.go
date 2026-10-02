@@ -35,6 +35,32 @@
 // When the official client is not installed (or QD_NATIVE_IDENTITY=0), the
 // identity falls back to a per-uid stable derivation with the same shape —
 // honest in the diagnostics about the filtering risk that fallback carries.
+//
+// v0.8.43 (official-package forensics, both packages sha256 on file): until
+// now the native bridge was Windows-only — runtimeInfoExePath returned ""
+// for any other GOOS, so every Linux/macOS deployment silently lived on the
+// derived fallback even though BOTH official packages ship the bridge for
+// it:
+//
+//   - Qoder-linux-amd64.deb ships resources/umid/runtime-info (ELF x86-64,
+//     manifest qoderCliVersion 1.1.64, sha256 e30b307e...f7d7478) and the
+//     binary runs standalone on stock Linux (container-verified).
+//   - The client bundle (out/main/index.js, identical in CN v0.4.3 exe and
+//     the intl deb) spawns it per platform (function IUt):
+//       win32/darwin: runtime-info <env> --account-stdin, stdin {"account":...}
+//       linux:        runtime-info <env>                (stdin ignored)
+//     env is the release channel ("prod"), stdout's FIRST line is one JSON
+//     object {machineToken, machineType, machineCode} (vmInfo parsed then
+//     dropped by the official EUt mapper).
+//   - The output is cached per active account for 1h ± 5min and any spawn
+//     failure just sends the request without the machine headers — identity
+//     is best-effort by design upstream.
+//
+// This release extends the bridge discovery to Linux (the deb's official
+// install root /opt/Qoder) and macOS (Electron default layout), and adds a
+// QD_UMID_BIN env override so container deployments can drop the official
+// binary anywhere and point the plugin at it. The per-platform spawn dialect
+// is byte-parity with the client.
 package main
 
 import (
@@ -81,6 +107,17 @@ const machineIdentityTTL = 30 * time.Minute
 // runtimeInfoTimeout bounds one native bridge run. The official binary
 // takes ~3.7s in the hub capture; 25s leaves generous headroom.
 const runtimeInfoTimeout = 25 * time.Second
+
+// runtimeInfoArgs returns the official spawn dialect for one GOOS (client
+// bundle, function IUt): win32/darwin get [env, --account-stdin] plus the
+// account JSON on stdin; linux gets [env] and stdin is ignored. The bool
+// reports whether stdin carries the account payload.
+func runtimeInfoArgs(goos string) ([]string, bool) {
+        if goos == "windows" || goos == "darwin" {
+                return []string{"prod", "--account-stdin"}, true
+        }
+        return []string{"prod"}, false
+}
 
 // identitySourceNative is the Source value the official bridge produces.
 // The cache split (v0.8.39) keys on it: native identities are machine-level
@@ -236,16 +273,22 @@ func strField(m map[string]any, key string) string {
         return s
 }
 
-// runRuntimeInfo spawns the official bridge exactly the way the desktop
-// client does: `runtime-info.exe prod --account-stdin`, one JSON object on
-// stdin (trailing space, hub parity), first stdout line is the answer.
+// runRuntimeInfo spawns the official bridge with the client's per-platform
+// dialect (IUt): win32/darwin `runtime-info[.exe] prod --account-stdin` with
+// one JSON object on stdin, linux `runtime-info prod` with stdin closed —
+// first stdout line is the answer either way.
 func runRuntimeInfo(exe, uid string) map[string]any {
         ctx, cancel := context.WithTimeout(context.Background(), runtimeInfoTimeout)
         defer cancel()
-        cmd := exec.CommandContext(ctx, exe, "prod", "--account-stdin")
+        args, withStdin := runtimeInfoArgs(runtime.GOOS)
+        cmd := exec.CommandContext(ctx, exe, args...)
         cmd.Dir = filepath.Dir(exe)
-        payload, _ := json.Marshal(map[string]any{"account": uid})
-        cmd.Stdin = bytes.NewReader(append(payload, ' '))
+        if withStdin {
+                payload, _ := json.Marshal(map[string]any{"account": uid})
+                cmd.Stdin = bytes.NewReader(append(payload, ' '))
+        } else {
+                cmd.Stdin = nil // official linux dialect: stdio ignore
+        }
         var out bytes.Buffer
         cmd.Stdout = &out
         cmd.Stderr = nil
@@ -267,18 +310,47 @@ func runRuntimeInfo(exe, uid string) map[string]any {
 }
 
 // runtimeInfoExePath locates the official bridge, or "" when this host
-// cannot have one (non-Windows, disabled, client not installed).
+// cannot have one (disabled, client not installed).
 //
-// Layout (hub capture): the launcher records the real install dir in
-// %LOCALAPPDATA%\<Qoder...>\<...Launcher>\state.ini (installDir=...);
+// Windows layout (hub capture): the launcher records the real install dir
+// in %LOCALAPPDATA%\<Qoder...>\<...Launcher>\state.ini (installDir=...);
 // %LOCALAPPDATA%\Programs\<name> is the fallback layout.
+//
+// Linux layout (v0.8.43, official deb extracted): the package installs to
+// /opt/Qoder with the bridge at /opt/Qoder/resources/umid/runtime-info.
+// macOS layout: Electron default bundle path (best-effort — QD_UMID_BIN is
+// the authoritative override there; no official dmg was dissected).
+//
+// QD_UMID_BIN (any platform) wins over all discovery: container
+// deployments drop the official binary anywhere and point the plugin at
+// it. QD_NATIVE_IDENTITY=0/false/no disables the native layer entirely.
 func runtimeInfoExePath(region string) string {
-        if runtime.GOOS != "windows" {
-                return ""
-        }
         if v := strings.ToLower(strings.TrimSpace(os.Getenv("QD_NATIVE_IDENTITY"))); v == "0" || v == "false" || v == "no" {
                 return ""
         }
+        if p := strings.TrimSpace(os.Getenv("QD_UMID_BIN")); p != "" {
+                if st, err := os.Stat(p); err == nil && !st.IsDir() {
+                        return p
+                }
+                return ""
+        }
+        switch runtime.GOOS {
+        case "windows":
+                return runtimeInfoExePathWindows(region)
+        case "darwin":
+                for _, app := range []string{"/Applications/Qoder.app", "/Applications/Qoder CN.app", "/Applications/QoderCN.app"} {
+                        if exe := umidExe(app + "/Contents"); exe != "" {
+                                return exe
+                        }
+                }
+                return ""
+        default:
+                // Official deb root (sha256-verified extraction).
+                return umidExe("/opt/Qoder")
+        }
+}
+
+func runtimeInfoExePathWindows(region string) string {
         base := os.Getenv("LOCALAPPDATA")
         if strings.TrimSpace(base) == "" {
                 home, err := os.UserHomeDir()
@@ -309,7 +381,11 @@ func runtimeInfoExePath(region string) string {
 }
 
 func umidExe(installDir string) string {
-        exe := filepath.Join(installDir, "resources", "umid", "runtime-info.exe")
+        name := "runtime-info"
+        if runtime.GOOS == "windows" {
+                name = "runtime-info.exe"
+        }
+        exe := filepath.Join(installDir, "resources", "umid", name)
         if st, err := os.Stat(exe); err == nil && !st.IsDir() {
                 return exe
         }
@@ -397,5 +473,5 @@ func machineIdentityHint(sa *storedAuth) string {
                 }
                 return "。本机身份来源：官方 runtime-info.exe（真实机器身份，定向活动可见性最优）"
         }
-        return "。本机未取得官方机器身份（未找到官方客户端的 runtime-info.exe，使用派生身份）——设备定向活动（含 Pro 升级包）可能被服务端过滤；在装有官方客户端的机器上执行可取回真身份"
+        return "。本机未取得官方机器身份（未找到官方客户端的 runtime-info.exe/runtime-info，使用派生身份）——设备定向活动（含 Pro 升级包）可能被服务端过滤；在装有官方客户端的机器上执行可取回真身份，Linux/容器部署也可将官方安装包内 resources/umid/runtime-info 放到 /opt/Qoder 下，或以 QD_UMID_BIN 环境变量指定其路径"
 }

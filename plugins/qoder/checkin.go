@@ -696,6 +696,14 @@ func claimProViaCampaigns(sa *storedAuth) (map[string]any, error) {
                         // reward endpoint's own status/body is a server verdict
                         // (404 = account not registered for the targeted pack,
                         // 403 = identity filtering), not parser noise.
+                        // v0.8.43: GRANT_NOT_FOUND is that verdict's terminal form
+                        // — the server has no grant record for this account, the
+                        // round is closed. Report it as such and skip the opt-in
+                        // hint (a blind claim would only replay the same 404).
+                        if rewardReadDead(rerr) {
+                                probes = append(probes, fmt.Sprintf("%s(活动已失效: 上游 GRANT_NOT_FOUND，本账号无此活动的发放记录)", c.CampaignKey))
+                                continue
+                        }
                         probes = append(probes, fmt.Sprintf("%s(面值不可读: %s)", c.CampaignKey, truncateRedacted(rerr.Error(), 100)))
                         hintUnverified = true
                         if claimUnverifiedEnabled() {

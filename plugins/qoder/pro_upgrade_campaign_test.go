@@ -540,3 +540,49 @@ func TestClaimProUnverifiedNeverClaimsReadableSmallReward(t *testing.T) {
                 t.Fatalf("no claim should have succeeded: %v", res)
         }
 }
+
+// TestViewDetailsGrantNotFoundTypedDead (v0.8.43): the live field report
+// ("面值不可读：reward http 404 body={"errorCode":"GRANT_NOT_FOUND",
+// "errorMessage":"campaign was…") is NOT an unreadable face value — it is
+// the upstream's authoritative no-grant-record verdict for a closed round.
+// The panel must name it as a dead campaign, keep offering neither the
+// 面值不可读 copy nor the claim_unverified opt-in, and never POST claim on
+// the row — with or without the opt-in flag.
+func TestViewDetailsGrantNotFoundTypedDead(t *testing.T) {
+        t.Setenv("QD_NATIVE_IDENTITY", "0")
+        for _, optIn := range []bool{false, true} {
+                setClaimUnverifiedForTest(t, optIn)
+                claims := 0
+                newBillingServer(t, "cn", map[string]func(r *http.Request) (int, string){
+                        "/sash/api/v1/me/campaigns": func(r *http.Request) (int, string) {
+                                return http.StatusOK, `{"showCampaign":true,"campaigns":[{"campaignId":"act-20260901-922","campaignKey":"act-20260901-922","actionType":"VIEW_DETAILS","claimStatus":"CLAIMABLE"}]}`
+                        },
+                        "/sash/api/v1/me/campaigns/act-20260901-922/reward": func(r *http.Request) (int, string) {
+                                return http.StatusNotFound, `{"errorCode":"GRANT_NOT_FOUND","errorMessage":"campaign was closed"}`
+                        },
+                        "/sash/api/v1/me/campaigns/act-20260901-922/claim": func(r *http.Request) (int, string) {
+                                claims++
+                                return http.StatusOK, `{"data":{"status":"CLAIMED"}}`
+                        },
+                })
+
+                res, err := claimProViaCampaigns(cnAuth())
+                if err != nil {
+                        t.Fatalf("optIn=%v claimProViaCampaigns: %v", optIn, err)
+                }
+                if claims != 0 {
+                        t.Fatalf("optIn=%v claim POST count = %d, want 0 (GRANT_NOT_FOUND row is conclusively dead)", optIn, claims)
+                }
+                msg, _ := res["message"].(string)
+                for _, want := range []string{"活动已失效", "GRANT_NOT_FOUND"} {
+                        if !strings.Contains(msg, want) {
+                                t.Fatalf("optIn=%v diagnostic missing %q: %q", optIn, want, msg)
+                        }
+                }
+                for _, banned := range []string{"面值不可读", "claim_unverified"} {
+                        if strings.Contains(msg, banned) {
+                                t.Fatalf("optIn=%v dead-row verdict must not carry %q: %q", optIn, banned, msg)
+                        }
+                }
+        }
+}

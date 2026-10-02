@@ -12,6 +12,9 @@ import (
         "encoding/base64"
         "fmt"
         "net/http"
+        "os"
+        "path/filepath"
+        "runtime"
         "strings"
         "testing"
 )
@@ -110,6 +113,88 @@ func TestMachineIdentityHintDerivedDisclosesFilteringRisk(t *testing.T) {
         _ = derivedTestHeaders(t)
         hint := machineIdentityHint(&storedAuth{Auth: storedTokens{Region: "cn"}, Account: storedAccount{UID: "u"}})
         for _, want := range []string{"runtime-info.exe", "设备定向活动", "过滤"} {
+                if !strings.Contains(hint, want) {
+                        t.Fatalf("derived hint missing %q: %q", want, hint)
+                }
+        }
+}
+
+// runtimeInfoArgsDialectTable (v0.8.43, official-package forensics): the
+// spawn dialect must byte-match the client bundle's IUt function —
+// win32/darwin spawn `runtime-info prod --account-stdin` with the account
+// JSON on stdin; linux spawns `runtime-info prod` with stdin ignored.
+func TestRuntimeInfoArgsDialectTable(t *testing.T) {
+        for goos, want := range map[string]struct {
+                args     []string
+                withStdin bool
+        }{
+                "windows": {[]string{"prod", "--account-stdin"}, true},
+                "darwin":  {[]string{"prod", "--account-stdin"}, true},
+                "linux":   {[]string{"prod"}, false},
+        } {
+                args, withStdin := runtimeInfoArgs(goos)
+                if strings.Join(args, " ") != strings.Join(want.args, " ") || withStdin != want.withStdin {
+                        t.Fatalf("runtimeInfoArgs(%q) = %v,%v want %v,%v", goos, args, withStdin, want.args, want.withStdin)
+                }
+        }
+}
+
+// TestQDUmidBinNativeBridgeEndToEnd (v0.8.43): QD_UMID_BIN lets a container
+// deployment point the plugin at the official bridge binary anywhere on
+// disk. A fake executable reproduces the official runtime-info contract
+// (stderr noise + one JSON stdout line) and the identity must come back as
+// Source=runtime-info with the JSON's values, machine-level cached per
+// region. Linux-only: the fake is a POSIX shell script.
+func TestQDUmidBinNativeBridgeEndToEnd(t *testing.T) {
+        if runtime.GOOS != "linux" {
+                t.Skipf("fake bridge is a shell script; skipping on %s", runtime.GOOS)
+        }
+        t.Setenv("QD_NATIVE_IDENTITY", "")
+        dir := t.TempDir()
+        exe := filepath.Join(dir, "runtime-info")
+        script := "#!/bin/sh\n" +
+                "printf '%s\\n' \"$@\" > " + filepath.Join(dir, "args.txt") + "\n" +
+                "echo 'open:: No such file or directory' >&2\n" +
+                "echo '{\"machineToken\":\"P1gAE2ETestToken-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"machineType\":\"38de1ce79191f25e8b\",\"machineCode\":\"a2452fe300901c05e5\",\"vmInfo\":{\"isVm\":false,\"brand\":\"None\",\"percentage\":0,\"vmTypeCode\":91}}'\n"
+        if err := os.WriteFile(exe, []byte(script), 0o755); err != nil {
+                t.Fatalf("write fake bridge: %v", err)
+        }
+        t.Setenv("QD_UMID_BIN", exe)
+
+        region := "umid-e2e-cn"
+        id := machineIdentityFor(region, "u-e2e", false)
+        if id.Source != identitySourceNative {
+                t.Fatalf("source = %q, want %q (QD_UMID_BIN bridge must win)", id.Source, identitySourceNative)
+        }
+        if !strings.HasPrefix(id.MachineToken, "P1gAE2E") || id.MachineType != "38de1ce79191f25e8b" || id.MachineCode != "a2452fe300901c05e5" {
+                t.Fatalf("identity values not mapped from bridge output: %+v", id)
+        }
+        // Official dialect on linux: the environment argument only — no
+        // --account-stdin flag, stdin ignored (bundle IUt).
+        argsRaw, err := os.ReadFile(filepath.Join(dir, "args.txt"))
+        if err != nil {
+                t.Fatalf("fake bridge args missing: %v", err)
+        }
+        if got := strings.TrimSpace(string(argsRaw)); got != "prod" {
+                t.Fatalf("linux dialect args = %q, want %q", got, "prod")
+        }
+        // Machine-level cache: the same region returns the SAME identity
+        // without re-running the bridge (30-minute TTL, native only).
+        again := machineIdentityFor(region, "u-other", false)
+        if again != id {
+                t.Fatalf("native identity not region-cached: %+v vs %+v", again, id)
+        }
+        machineIdentityCache.Delete(region)
+}
+
+// TestMachineIdentityHintDerivedMentionsLinuxEscapeHatch (v0.8.43): the
+// derived-identity hint must carry the official Linux bridge path and the
+// QD_UMID_BIN override so container operators know how to get a real
+// identity instead of the filtered pseudo-device.
+func TestMachineIdentityHintDerivedMentionsLinuxEscapeHatch(t *testing.T) {
+        _ = derivedTestHeaders(t)
+        hint := machineIdentityHint(&storedAuth{Auth: storedTokens{Region: "cn"}, Account: storedAccount{UID: "u"}})
+        for _, want := range []string{"QD_UMID_BIN", "/opt/Qoder", "runtime-info"} {
                 if !strings.Contains(hint, want) {
                         t.Fatalf("derived hint missing %q: %q", want, hint)
                 }
