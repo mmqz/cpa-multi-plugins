@@ -47,6 +47,12 @@ func newBillingServer(t *testing.T, region string, respond map[string]func(r *ht
         prev := billingBaseOverride
         billingBaseOverride = func(string) string { return srv.URL }
         t.Cleanup(func() { billingBaseOverride = prev })
+        // v0.8.39: the bypass-probe / launch-sync globals are package state —
+        // reset them per test so scenarios stay order-independent (a memo
+        // seeded by an earlier test would otherwise fire stray probe POSTs).
+        roundMemo = &campaignRoundMemo{perAccount: map[string]campaignRoundEntry{}, perRegion: map[string]campaignRoundEntry{}}
+        roundProbeLast = map[string]time.Time{}
+        launchSyncLast = map[string]time.Time{}
         return srv
 }
 

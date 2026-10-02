@@ -82,9 +82,15 @@ const machineIdentityTTL = 30 * time.Minute
 // takes ~3.7s in the hub capture; 25s leaves generous headroom.
 const runtimeInfoTimeout = 25 * time.Second
 
+// identitySourceNative is the Source value the official bridge produces.
+// The cache split (v0.8.39) keys on it: native identities are machine-level
+// and region-cacheable; derived ones are per-uid and never cached.
+const identitySourceNative = "runtime-info"
+
 var (
-        // machineIdentityCache maps region → cache entry (the identity is
-        // machine-level, so region-level caching is correct).
+        // machineIdentityCache maps region → cache entry. Only NATIVE
+        // identities are stored: they are machine-level, so region-level
+        // caching is correct for them and for nothing else.
         machineIdentityCache sync.Map
 
         // machineIdentityOverride is nil in production; tests set it to inject
@@ -105,6 +111,17 @@ type machineIdentityCacheEntry struct {
 // caching it when missing/expired or when force is set. Any failure to run
 // the native bridge falls back to the per-uid derivation — the result is
 // always usable, only its Source (and row visibility) differs.
+//
+// v0.8.39 cache split (field report u673e7fcc + hub doctrine): the 30-minute
+// region cache is only valid for the NATIVE bridge's identity — that one is
+// machine-level, so every account on the host shares it by design. The
+// DERIVED fallback is per-uid (hub: "多账号之间天然隔离，阻断跨账号关联风控");
+// caching it per region collapsed every account in a deployment onto whichever
+// pseudo-device was computed first, upstream answered with per-person dedup
+// (SAME_PERSON_ALREADY_CLAIMED) and hid the daily row from the losing
+// accounts — the mechanism behind the "当前没有可领取的活动" field report.
+// Derived identities are pure-CPU derivations, so computing them per call
+// costs nothing; only native identities enter the cache.
 func machineIdentityFor(region, uid string, force bool) machineIdentity {
         if machineIdentityOverride != nil {
                 return *machineIdentityOverride
@@ -112,13 +129,15 @@ func machineIdentityFor(region, uid string, force bool) machineIdentity {
         now := time.Now()
         if !force {
                 if v, ok := machineIdentityCache.Load(region); ok {
-                        if e, ok := v.(machineIdentityCacheEntry); ok && now.Sub(e.at) < machineIdentityTTL {
+                        if e, ok := v.(machineIdentityCacheEntry); ok && now.Sub(e.at) < machineIdentityTTL && e.id.Source == identitySourceNative {
                                 return e.id
                         }
                 }
         }
         id := computeMachineIdentity(region, uid)
-        machineIdentityCache.Store(region, machineIdentityCacheEntry{at: now, id: id})
+        if id.Source == identitySourceNative {
+                machineIdentityCache.Store(region, machineIdentityCacheEntry{at: now, id: id})
+        }
         return id
 }
 

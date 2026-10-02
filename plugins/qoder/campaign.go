@@ -120,6 +120,11 @@ func fetchCampaignStatus(sa *storedAuth) (*campaignStatusResponse, error) {
         // sign-in — reproduce it best-effort so accounts hosted here see the
         // same qualification signal as an installed client. Never fatal.
         campaignLaunchSync(sa)
+        // v0.8.39: remember every daily-shaped row (CLAIM_BENEFIT / empty
+        // actionType) the server returned — the bypass-list verdict probe
+        // (performCampaignCheckin) needs a real campaign id to POST when a
+        // later round hides the row (per-person dedup / device targeting).
+        rememberCampaignRound(authRegion(sa), sa.Account.UID, out)
         // v0.8.36 self-heal (hub live pattern): showCampaign=false with a NATIVE
         // identity usually means the identity rotated past its acceptance window
         // — force a fresh one from the official bridge and retry exactly once.
@@ -132,10 +137,139 @@ func fetchCampaignStatus(sa *storedAuth) (*campaignStatusResponse, error) {
                         machineIdentityForceHook()
                 }
                 if out2, _, _, err2 := fetchCampaignStatusOnce(sa, true); err2 == nil && out2.ShowCampaign {
+                        rememberCampaignRound(authRegion(sa), sa.Account.UID, out2)
                         return out2, nil
                 }
         }
         return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// v0.8.39 — the bypass-list verdict probe.
+//
+// Field report u673e7fcc ("上游未确认签到成功：message=当前没有可领取的活动")
+// was never an upstream message: the old performCampaignCheckin printed it
+// whenever the campaigns list showed no CLAIM_BENEFIT/CLAIMABLE row. The hub's
+// field practice documents TWO live states in which the daily row is hidden
+// while the round's claim endpoint still answers authoritatively:
+//
+//   - per-person dedup (official rule writes "每账号每轮一次", the server
+//     executes per PERSON): once a sibling account on the same machine
+//     identity claimed the round, the losers "列表里连活动都不显示" — yet a
+//     direct claim POST still returns the definitive
+//     status=BLOCKED + failureCode=SAME_PERSON_ALREADY_CLAIMED verdict;
+//   - device-targeted filtering: derived/rotated identities silently lose
+//     the row from the list.
+//
+// So instead of declaring "no claimable activity" from the list alone, the
+// check-in now POSTs the claim endpoint on the LAST-SEEN daily campaign id
+// (the ids are region-stable for the campaign's duration — act-YYYYMMDD-NNN
+// rounds stay claimable across days until the next 10:00 UTC+8 refresh) and
+// lets the upstream verdict decide: +100 lands, or the panel gets the real
+// ALREADY / 同人已领 answer instead of a guess. One probe per account per
+// cooldown; ids come exclusively from rows this deployment actually saw.
+// ---------------------------------------------------------------------------
+
+// roundMemoMaxAge bounds how long a seen campaign id stays probeable. Daily
+// rounds refresh at 10:00 UTC+8; 48h comfortably covers a missed day.
+const roundMemoMaxAge = 48 * time.Hour
+
+// roundProbeCooldown rate-limits the bypass probe to one POST per account per
+// window — the same 6h cadence the hub applies to its 同人已领 cooldown.
+const roundProbeCooldown = 6 * time.Hour
+
+type campaignRoundEntry struct {
+        CampaignID  string
+        CampaignKey string
+        SeenAt      time.Time
+}
+
+type campaignRoundMemo struct {
+        mu         sync.Mutex
+        perAccount map[string]campaignRoundEntry // key region:uid
+        perRegion  map[string]campaignRoundEntry // key region
+}
+
+var roundMemo = &campaignRoundMemo{
+        perAccount: map[string]campaignRoundEntry{},
+        perRegion:  map[string]campaignRoundEntry{},
+}
+
+// rememberCampaignRound records the first daily-shaped row of the response.
+// Any status counts (CLAIMABLE / CLAIMED): a claimed row is exactly the id a
+// hidden next round will reuse.
+func rememberCampaignRound(region, uid string, status *campaignStatusResponse) {
+        if status == nil {
+                return
+        }
+        for i := range status.Campaigns {
+                c := &status.Campaigns[i]
+                if c.CampaignID == "" {
+                        continue
+                }
+                if at := strings.ToUpper(strings.TrimSpace(c.ActionType)); at != "" && at != "CLAIM_BENEFIT" {
+                        continue
+                }
+                roundMemo.remember(region, uid, c)
+                return
+        }
+}
+
+func (m *campaignRoundMemo) remember(region, uid string, c *campaign) {
+        e := campaignRoundEntry{CampaignID: c.CampaignID, CampaignKey: c.CampaignKey, SeenAt: time.Now()}
+        m.mu.Lock()
+        defer m.mu.Unlock()
+        m.perAccount[region+":"+uid] = e
+        m.perRegion[region] = e
+}
+
+// probeFor returns the id a bypass probe may POST for one account: the
+// account's own last-seen daily row first, else the deployment's freshest
+// same-region row (the daily campaign id is shared per region — every account
+// that can see the row sees the same round). ("", false) when nothing fresh
+// exists; probe candidates are never fabricated.
+func (m *campaignRoundMemo) probeFor(region, uid string) (campaign, bool) {
+        m.mu.Lock()
+        defer m.mu.Unlock()
+        now := time.Now()
+        if e, ok := m.perAccount[region+":"+uid]; ok && now.Sub(e.SeenAt) < roundMemoMaxAge {
+                return campaign{CampaignID: e.CampaignID, CampaignKey: e.CampaignKey}, true
+        }
+        if e, ok := m.perRegion[region]; ok && now.Sub(e.SeenAt) < roundMemoMaxAge {
+                return campaign{CampaignID: e.CampaignID, CampaignKey: e.CampaignKey}, true
+        }
+        return campaign{}, false
+}
+
+var (
+        roundProbeMu   sync.Mutex
+        roundProbeLast = map[string]time.Time{} // key region:uid
+)
+
+// probeHiddenRound runs the bypass-list verdict probe for one account and
+// returns the normalized claim result, or nil when no fresh id exists or the
+// cooldown forbids another POST. Network/parse errors return nil — the probe
+// is best-effort and must never mask the list-based diagnosis.
+func probeHiddenRound(sa *storedAuth) map[string]any {
+        region := authRegion(sa)
+        key := region + ":" + sa.Account.UID
+        roundProbeMu.Lock()
+        if t, ok := roundProbeLast[key]; ok && time.Since(t) < roundProbeCooldown {
+                roundProbeMu.Unlock()
+                return nil
+        }
+        c, ok := roundMemo.probeFor(region, sa.Account.UID)
+        if !ok {
+                roundProbeMu.Unlock()
+                return nil
+        }
+        roundProbeLast[key] = time.Now()
+        roundProbeMu.Unlock()
+        res, err := claimCampaignByID(sa, &c)
+        if err != nil {
+                return nil
+        }
+        return res
 }
 
 func campaignsURL(sa *storedAuth) string {
@@ -307,8 +441,16 @@ func rewardBenefit(body map[string]any) (string, int64) {
         return kind, int64(amount)
 }
 
-// claimableCampaign returns the first CLAIM_BENEFIT campaign that is
-// currently claimable and inside its activity window.
+// claimableCampaign returns the first campaign that is currently claimable
+// and inside its activity window.
+//
+// v0.8.39 (hub parity, field report u673e7fcc): rows with an EMPTY actionType
+// are claimable too — the qoder2api-hub's daily claimer only skips rows whose
+// actionType is present AND not CLAIM_BENEFIT ("action_type not in
+// ('', 'CLAIM_BENEFIT') → continue"); demanding CLAIM_BENEFIT verbatim
+// skipped daily rounds the server ships without the field. A readable benefit
+// kind must be CREDITS (or absent) so check-in never claims
+// subscription/Pro-shaped rows — those belong to the Pro flow.
 func claimableCampaign(status *campaignStatusResponse) *campaign {
         if status == nil {
                 return nil
@@ -316,7 +458,17 @@ func claimableCampaign(status *campaignStatusResponse) *campaign {
         now := time.Now().Unix()
         for i := range status.Campaigns {
                 c := &status.Campaigns[i]
-                if !strings.EqualFold(c.ActionType, "CLAIM_BENEFIT") {
+                at := strings.ToUpper(strings.TrimSpace(c.ActionType))
+                if at != "" && at != "CLAIM_BENEFIT" {
+                        continue
+                }
+                // Empty-actionType rows are the new territory (v0.8.39): claim
+                // them only when the readable benefit is credits-shaped so a
+                // stray subscription/Pro-shaped row can never ride check-in.
+                // CLAIM_BENEFIT rows keep their historical semantics — the
+                // daily round sometimes ships a coupon benefit, and claiming
+                // it IS the day's check-in.
+                if at == "" && c.Benefit != nil && c.Benefit.Kind != "" && !strings.EqualFold(c.Benefit.Kind, "CREDITS") {
                         continue
                 }
                 if !strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
@@ -465,10 +617,22 @@ func claimCampaignByID(sa *storedAuth, c *campaign) (map[string]any, error) {
                 if replayed, _ := body["replayed"].(bool); replayed {
                         return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
                 }
+                // v0.8.39: the bypass-list probe claims with a synthetic row
+                // that carries no benefit — read the face value from the claim
+                // response itself (hub: benefit.amount) so the panel shows the
+                // real +N instead of 0.
+                amount := campaignCredit(c)
+                if amount == 0 {
+                        if b, ok := body["benefit"].(map[string]any); ok {
+                                if a, ok2 := b["amount"].(float64); ok2 && a > 0 {
+                                        amount = int64(a)
+                                }
+                        }
+                }
                 return map[string]any{
                         "success":        true,
                         "result":         "CLAIMED",
-                        "rewardCredits":  float64(campaignCredit(c)),
+                        "rewardCredits":  float64(amount),
                         "campaign_id":    c.CampaignID,
                         "campaign_key":   c.CampaignKey,
                         "campaign_title": c.CampaignKey,
@@ -497,6 +661,12 @@ func claimCampaignByID(sa *storedAuth, c *campaign) (map[string]any, error) {
 // returns a typed result=NOTHING_CLAIMABLE with a row-level diagnosis, and
 // checkinOneAccount renders it as a skip.
 func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
+        // v0.8.39 (hub parity): the official client re-runs its native bridge
+        // before every claim path — an identity that rotated past its
+        // acceptance window silently filters the device-targeted rows the
+        // claim depends on. Native identities re-run the bridge (~3.7s);
+        // derived ones just recompute (pure CPU, nothing to rotate).
+        machineIdentityFor(authRegion(sa), sa.Account.UID, true)
         status, err := fetchCampaignStatus(sa)
         if err != nil {
                 return nil, err
@@ -506,35 +676,70 @@ func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
                 if claimedCampaign(status) != nil {
                         return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
                 }
+                // v0.8.39: a hidden row is not proof of nothing-to-claim —
+                // POST the last-seen daily campaign id once and let upstream
+                // hand down its verdict (probeHiddenRound's doc block). Only a
+                // conclusive verdict short-circuits; inconclusive results
+                // fall through to the list-based diagnosis.
+                if res := probeHiddenRound(sa); res != nil {
+                        if success, _ := res["success"].(bool); success {
+                                return res, nil
+                        }
+                        if r, _ := res["result"].(string); r == "ALREADY_CLAIMED" || r == "BLOCKED" {
+                                return res, nil
+                        }
+                }
                 return map[string]any{
                         "success": false,
                         "result":  "NOTHING_CLAIMABLE",
-                        "message": campaignIdleDiagnosis(status),
+                        "message": campaignIdleDiagnosis(status, sa),
                 }, nil
         }
         return claimCampaignByID(sa, c)
 }
 
-// campaignIdleDiagnosis explains WHY no CLAIM_BENEFIT row is claimable, in
-// one panel-renderable line. Non-CLAIM_BENEFIT claimable rows (the official
-// newbie/Pro packs arrive as actionType=VIEW_DETAILS — the benefit hides
-// behind the activity page) are named explicitly, plus the current official
-// newbie reality: first-login grants 300+100 credits and the +1800 Pro pack
-// is no longer delivered (user field report 2026-10-01).
-func campaignIdleDiagnosis(status *campaignStatusResponse) string {
+// campaignIdleDiagnosis explains WHY no claimable row is visible, in one
+// panel-renderable line. v0.8.39: the upstream's own unavailableReason
+// taxonomy is rendered in official semantics (hub labels — 名额发完 / 成就
+// 未完成 / 风控拦截 / 活动未开始), claimable VIEW_DETAILS rows (the newbie
+// packs — the benefit hides behind the activity page) are named explicitly,
+// and the machine-identity hint rides along when this host runs on a derived
+// pseudo-device. Current official newbie reality rides the message too:
+// first-login grants 300+100 credits and the +1800 Pro pack is no longer
+// delivered (user field report 2026-10-01).
+func campaignIdleDiagnosis(status *campaignStatusResponse, sa *storedAuth) string {
         if status == nil || len(status.Campaigns) == 0 {
-                return "今日暂无可领取权益（活动列表为空）"
+                return "今日暂无可领取权益（活动列表为空）" + machineIdentityHint(sa)
+        }
+        reasons := map[string]string{
+                "REDEMPTION_CODE_OUT_OF_STOCK": "名额已发完（次日 10:00 后可再试）",
+                "ACHIEVEMENT_NOT_COMPLETED":    "需先在官方桌面端完成新人任务",
+                "RISK_BLOCKED":                 "风控拦截",
+                "CAMPAIGN_NOT_ACTIVE":          "活动未开始或已结束",
         }
         parts := make([]string, 0, 2)
+        locked := make([]string, 0, 2)
         for i := range status.Campaigns {
                 c := &status.Campaigns[i]
-                if strings.EqualFold(c.ActionType, "CLAIM_BENEFIT") || !strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
+                if strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
+                        if at := strings.ToUpper(strings.TrimSpace(c.ActionType)); at != "" && at != "CLAIM_BENEFIT" {
+                                parts = append(parts, fmt.Sprintf("%s（%s，需在官方活动页完成领取）", c.CampaignKey, c.ActionType))
+                        }
                         continue
                 }
-                parts = append(parts, fmt.Sprintf("%s（%s，需在官方活动页完成领取）", c.CampaignKey, c.ActionType))
+                if r := reasons[strings.ToUpper(strings.TrimSpace(c.UnavailableReason))]; r != "" {
+                        locked = append(locked, fmt.Sprintf("%s（%s）", c.CampaignKey, r))
+                }
         }
+        segs := make([]string, 0, 3)
         if len(parts) > 0 {
-                return "今日暂无可签权益；存在需活动页领取的活动行：" + strings.Join(parts, "、")
+                segs = append(segs, "存在需活动页领取的活动行："+strings.Join(parts, "、"))
         }
-        return "今日暂无可领取权益"
+        if len(locked) > 0 {
+                segs = append(segs, "另有暂不可领活动："+strings.Join(locked, "、"))
+        }
+        if len(segs) == 0 {
+                return "今日暂无可领取权益" + machineIdentityHint(sa)
+        }
+        return "今日暂无可直接签领的权益；" + strings.Join(segs, "；") + machineIdentityHint(sa)
 }

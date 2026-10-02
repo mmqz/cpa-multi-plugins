@@ -128,8 +128,12 @@ func processAutoCheckinAccount(f pluginapi.HostAuthFileEntry, doCheckin bool) {
                         return
                 }
                 // CN: daily check-in when enabled.
+                // v0.8.39: the ci.Active gate is gone — a hidden daily row
+                // (dedup / device filtering) reports Active=false while the
+                // round's claim endpoint still answers; the probe inside
+                // performCheckinCall owns the verdict now.
                 ci, err := fetchCheckinStatus(sa)
-                if err == nil && ci != nil && ci.Active && !ci.TodayCheckedIn {
+                if err == nil && ci != nil && !ci.TodayCheckedIn {
                         if _, callErr := performCheckinCall(sa); callErr == nil {
                                 // v0.8.8: 记录签到时刻（与手动签到一致），让紧随
                                 // 其后的 reconcile 处于 lifecycle 宽限窗口内。
@@ -292,21 +296,16 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
                 out["total_credits"] = ci.TotalCredits
                 return out
         }
-        // v0.8.18 (campaign dialect): claimed Intl campaigns drop out of
-        // /me/campaigns entirely, so an inactive summary means "nothing left to
-        // claim today" — already claimed earlier or no campaign running. Surface
-        // it as a no-op, not a failure (reason=none, neutral panel toast).
-        // v0.12.80: CN joined the campaign dialect (legacy daily-check-in is
-        // DISABLED upstream), so this guard now covers both regions — an
-        // inactive CN summary likewise means "nothing claimable today", never
-        // an error.
-        if capabilitiesForRegion(authRegion(sa)).Contract == checkinContractCampaign && !ci.Active {
-                out["success"] = true
-                out["skipped"] = true
-                out["reason"] = "none"
-                out["message"] = "今日暂无可领取权益"
-                return out
-        }
+        // v0.8.18 (campaign dialect) / retired v0.8.39: the old
+        // !ci.Active early-skip assumed an inactive summary meant "nothing left
+        // to claim today" — but the daily row is HIDDEN from the list in two
+        // live states (per-person dedup, device-targeted filtering; hub field
+        // practice), and the bypass-list verdict probe inside
+        // performCampaignCheckin is exactly what still gets a real answer
+        // (+100 / 今日已签 / 同人已领) there. Skipping early made those
+        // accounts silently unclaimable forever (field report u673e7fcc).
+        // performCampaignCheckin now owns every no-op verdict; this flow just
+        // renders them.
 
         // Step 2: POST claim (5s budget).
         res, err := performCheckinCall(sa)
@@ -341,6 +340,20 @@ func checkinOneAccount(f pluginapi.HostAuthFileEntry) map[string]any {
                 out["skipped"] = true
                 out["reason"] = "none"
                 out["message"] = "今日暂无可领取权益"
+                if msg, ok := res["message"].(string); ok && msg != "" {
+                        out["message"] = msg
+                }
+                return out
+        }
+        // v0.8.39: the bypass probe surfaces the dedup verdict — a sibling
+        // account on this machine identity already took the round's grant.
+        // That is a normal multi-account state (hub buckets it separately),
+        // never an error toast.
+        if result, _ := res["result"].(string); result == "BLOCKED" {
+                out["success"] = true
+                out["skipped"] = true
+                out["reason"] = "blocked"
+                out["message"] = "同人已领取（同一设备身份下的其他账号本轮已领，服务端按人去重）"
                 if msg, ok := res["message"].(string); ok && msg != "" {
                         out["message"] = msg
                 }
