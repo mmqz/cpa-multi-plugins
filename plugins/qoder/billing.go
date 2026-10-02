@@ -60,6 +60,15 @@ func billingHeaders(req *http.Request, sa *storedAuth) {
         req.Header.Set("User-Agent", "Qoder")
         req.Header.Set("Cosy-ClientType", billingClientType)
         req.Header.Set("Cosy-Version", billingClientVer)
+        // 0.8.42 (adapted from bfSan f05e9e3, live-verified 2026-09-21): the
+        // billing surface additionally expects the web-session cookies
+        // (acw_tc / qoder_csrf_token) and the mirrored CSRF header. Without
+        // them the gateway can answer 401 {"code":"UNAUTHORIZED",
+        // "message":"missing cookie header"} — every panel fetch then fails
+        // and the stale-while-error carryover froze the card on a ghost
+        // 「今日已签到」+积分 0 (field report u673e7fcc / ud2d62d72). Inert where
+        // upstream does not gate on cookies (issue #27 cross-check).
+        applyBillingSessionHeaders(req, sa)
 }
 
 // checkinStatusResponse mirrors GET /sash/api/v1/me/daily-check-in/status
@@ -114,6 +123,7 @@ func fetchLegacyCheckinStatus(sa *storedAuth) (*checkinStatusResponse, error) {
         if err != nil {
                 return nil, err
         }
+        absorbBillingResponse(sa, billingBaseFor(sa), resp)
         if resp.StatusCode >= 400 {
                 return nil, fmt.Errorf("checkin status http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))
         }
@@ -194,7 +204,11 @@ type quotaPool struct {
 // fetchUserResource queries QoderWork's quota endpoint and aggregates base +
 // add-on credits into the panel's creditsSummary shape.
 func fetchUserResource(sa *storedAuth) (*creditsSummary, error) {
-        req, err := http.NewRequest(http.MethodGet, upstreamBaseFor(sa)+"/api/v2/quota/usage", nil)
+        // billingBaseFor (not upstreamBaseFor): quota/plan ARE billing calls —
+        // routing them through the shared seam also makes them interceptable
+        // by the billingBaseOverride test seam.
+        base := billingBaseFor(sa)
+        req, err := http.NewRequest(http.MethodGet, base+"/api/v2/quota/usage", nil)
         if err != nil {
                 return nil, err
         }
@@ -203,7 +217,11 @@ func fetchUserResource(sa *storedAuth) (*creditsSummary, error) {
         if err != nil {
                 return nil, err
         }
+        absorbBillingResponse(sa, base, resp)
         if resp.StatusCode >= 400 {
+                if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+                        return nil, &authRejectedError{status: resp.StatusCode, err: fmt.Errorf("quota/usage http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))}
+                }
                 return nil, fmt.Errorf("quota/usage http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))
         }
         var q quotaUsageResponse
@@ -262,7 +280,8 @@ type planResponse struct {
 }
 
 func fetchPaymentType(sa *storedAuth) string {
-        req, err := http.NewRequest(http.MethodGet, upstreamBaseFor(sa)+"/api/v2/user/plan", nil)
+        base := billingBaseFor(sa)
+        req, err := http.NewRequest(http.MethodGet, base+"/api/v2/user/plan", nil)
         if err != nil {
                 return ""
         }
@@ -271,6 +290,7 @@ func fetchPaymentType(sa *storedAuth) string {
         if err != nil || resp.StatusCode >= 400 {
                 return ""
         }
+        absorbBillingResponse(sa, base, resp)
         var p planResponse
         if err := json.Unmarshal(resp.Body, &p); err != nil {
                 return ""

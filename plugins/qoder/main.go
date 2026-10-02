@@ -355,7 +355,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.8.30"
+var version = "0.8.42"
 
 func wbRegistration() registration {
         return registration{
@@ -501,7 +501,7 @@ type storedTokens struct {
         AccessToken   string `json:"accessToken"`      // jt- (24h) or dt- (~30d)
         RefreshToken  string `json:"refreshToken"`     // jrt- (48h) or drt- (~1y)
         PersonalToken string `json:"personalToken"`    // pt-..., long-lived fallback
-        ExpiresAt     int64  `json:"expiresAt"`        // active-token expiry (unix seconds)
+        ExpiresAt     int64  `json:"expiresAt"`        // active-token expiry (unix seconds; read via tokenExpiryUnix)
         Domain        string `json:"domain"`           // realm: qoder.com.cn (cn) / qoder.com (intl)
         Region        string `json:"region,omitempty"` // cn | intl (empty = cn for legacy files)
 }

@@ -98,12 +98,29 @@ func cachedAccountDetails(authID string, sa *storedAuth, force bool) (plan strin
 		errList = append(errList, msg)
 		errMu.Unlock()
 	}
+	// authRejected records that upstream refused the credential itself
+	// (401/403). A stale snapshot must not survive that: carrying over the
+	// previous 「已签到」/credits state makes the panel report a check-in that
+	// never happened and a balance that never moved (2026-10-02 field report
+	// u673e7fcc — credits frozen at 0 while the card said 今日已签到; root
+	// cause chain: missing web-session cookies → gateway 401
+	// "missing cookie header" → every panel fetch failed → carryover kept
+	// rendering yesterday's state). Transient failures still carry over.
+	var authRejected bool
+	addAuthReject := func(what string, err error) {
+		errMu.Lock()
+		errList = append(errList, what+": "+err.Error())
+		authRejected = true
+		errMu.Unlock()
+	}
 	wg.Add(3)
 	go func() { defer wg.Done(); plan = fetchPaymentType(sa) }()
 	go func() {
 		defer wg.Done()
 		if c, err := fetchCheckinStatus(sa); err == nil {
 			ci = c
+		} else if isAuthRejectedError(err) {
+			addAuthReject("checkin", err)
 		} else {
 			addErr("checkin: " + err.Error())
 		}
@@ -112,13 +129,17 @@ func cachedAccountDetails(authID string, sa *storedAuth, force bool) (plan strin
 		defer wg.Done()
 		if r, err := fetchUserResource(sa); err == nil {
 			cr = r
+		} else if isAuthRejectedError(err) {
+			addAuthReject("credits", err)
 		} else {
 			addErr("credits: " + err.Error())
 		}
 	}()
 	wg.Wait()
 	// Stale-while-error: carry over previous values for fields that failed.
-	if prev != nil {
+	// Skipped wholesale when upstream rejected the credential — a stale
+	// 「已签到」 would be indistinguishable from a real one.
+	if prev != nil && !authRejected {
 		if ci == nil {
 			ci = prev.checkin
 		}

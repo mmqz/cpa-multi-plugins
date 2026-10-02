@@ -197,10 +197,10 @@ func uiUserType(ui *userInfoResponse) string {
 // /root/qoder-register/qoder_device_oauth.py (2026-07-22, issued dt-/drt-
 // tokens). CN realm constants from the same main.js:
 //
-//	WEBSITE_DOMAIN  = qoder.com.cn        (auth pages)
-//	OPENAPI_DOMAIN  = openapi.qoder.com.cn (token endpoints)
-//	CLIENT_ID prod  = 1c5e33e1-364d-4ce6-b02c-acaa81274a5c (shared with Global)
-//	REDIRECT_URI    = qoder-work-cn://
+//      WEBSITE_DOMAIN  = qoder.com.cn        (auth pages)
+//      OPENAPI_DOMAIN  = openapi.qoder.com.cn (token endpoints)
+//      CLIENT_ID prod  = 1c5e33e1-364d-4ce6-b02c-acaa81274a5c (shared with Global)
+//      REDIRECT_URI    = qoder-work-cn://
 //
 // Flow: StartLogin builds the /device/selectAccounts URL with a PKCE
 // challenge; the user authorizes in their browser; PollLogin polls
@@ -652,11 +652,15 @@ func handleRefreshAuth(raw []byte) ([]byte, error) {
 // preserveExpiry reuses the previous token's expiresAt when the refresh
 // response omits expiresIn. Zero would tell the host the credential is
 // permanently expired and trigger a refresh storm on every request.
+// Both sides are normalised through tokenExpiryUnix (0.8.42, adapted from
+// bfSan f05e9e3): the stored field is seconds by contract, but historical
+// writers produced millisecond values, which read back as 1970 and made
+// every token look long expired.
 func preserveExpiry(newExpiry, oldExpiry int64) int64 {
-	if newExpiry > 0 {
-		return newExpiry
+	if normalized := tokenExpiryUnix(newExpiry); normalized > 0 {
+		return normalized
 	}
-	return oldExpiry
+	return tokenExpiryUnix(oldExpiry)
 }
 
 // toAuthDataForRefresh mirrors the workbuddy helper: blank out FileName and
