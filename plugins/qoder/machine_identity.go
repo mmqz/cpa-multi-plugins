@@ -484,33 +484,53 @@ func decodeUTF16LE(b []byte) string {
 }
 
 // attachMachineIdentityHeaders adds the Cosy-Machine* headers the campaigns
-// platform expects from a REAL desktop client. Campaigns-surface only — the
-// quota/plan/legacy endpoints never gated on them.
+// platform REQUIRES for device-targeted rows (the daily 100-Credits
+// CLAIM_BENEFIT campaign row, the Pro upgrade pack, etc.).
 //
-// v0.8.47 (user-provided working Python script + field verification,
-// 2026-10-03): the campaigns endpoint returns the FULL list (including the
-// daily CLAIM_BENEFIT 100-Credits row) when NO Cosy-Machine* headers are
-// sent at all — the user's Python script sends only
-// {Accept, User-Agent, Authorization, Cosy-ClientType, Cosy-Version} and
-// successfully fetches CLAIMABLE CLAIM_BENEFIT rows. Sending a DERIVED
-// (simulated) machine identity causes the server to filter device-targeted
-// rows (anti-fraud: it recognizes the P1gA+91/00 shape as non-real). Only
-// attach Cosy-Machine* headers when the identity comes from the REAL
-// official runtime-info binary (Source == "runtime-info"); when the identity
-// is derived/simulated, SKIP all machine headers so the server treats the
-// request as a browser/mobile client and returns the unfiltered list.
+// v0.8.48 (live credential verification, 2026-10-03): the campaigns endpoint
+// has THREE distinct response paths:
+//
+//   - NO Cosy-Machine* headers (browser/mobile): returns a FILTERED list —
+//     only VIEW_DETAILS rows (Pro upgrade marketing) appear; CLAIM_BENEFIT
+//     rows (daily 100 Credits) are SILENTLY DROPPED.
+//   - REAL runtime-info Cosy-Machine* headers (desktop client): returns
+//     the FULL list including CLAIM_BENEFIT rows.
+//   - DERIVED/simulated Cosy-Machine* headers (P1gA+91/00 shape): also
+//     filtered — the server's anti-fraud layer recognizes the shape as
+//     non-real and drops device-targeted rows.
+//
+// Verified live against openapi.qoder.sh with credential dt-RHl0...:
+//   - Without machine headers: campaigns=[] 1 row VIEW_DETAILS only
+//   - With real runtime-info headers: campaigns=[] 2 rows — the second is
+//     act-20260930-894 CLAIM_BENEFIT CREDITS 100 CLAIMABLE
+//   - Claiming that row → addOnQuota.total: None → 100.0 (credits granted)
+//
+// v0.8.47's "skip machine headers when derived" was WRONG — it made the
+// plugin look like a browser, which also filters CLAIM_BENEFIT rows. The
+// correct behavior: ALWAYS send machine headers; when the identity is
+// derived, attach them anyway (the server MAY still filter, but at least
+// we don't lie about being a browser). When a real runtime-info binary
+// is available (QD_UMID_BIN or /opt/Qoder/resources/umid/runtime-info),
+// the identity is REAL and the server returns the full list.
+//
+// For container deployments where a real runtime-info binary cannot run,
+// the QD_UMID_BIN escape hatch lets operators point at a binary extracted
+// from the official RPM (verified: the linux-x64 runtime-info runs in this
+// container and produces a valid identity).
 func attachMachineIdentityHeaders(req *http.Request, mi *machineIdentity) {
 	if mi == nil {
 		return
 	}
-	// v0.8.47: derived/simulated identities are WORSE than no identity.
-	// The server's anti-fraud layer recognizes the P1gA+91/00 shape as
-	// non-real and filters device-targeted rows (daily 100 Credits,
-	// Pro upgrade pack). Only send machine headers when the identity
-	// came from the real official runtime-info binary.
-	if mi.Source != identitySourceNative {
-		return
-	}
+	// v0.8.48: ALWAYS attach machine headers. The server's three response
+	// paths (no headers / real / simulated) mean:
+	//   - real headers → full list (what we want)
+	//   - simulated headers → filtered list (better than nothing, but the
+	//     daily 100-Credits row won't appear — operator should install
+	//     the real runtime-info binary via QD_UMID_BIN)
+	//   - no headers → filtered list (browser/mobile — also drops the row)
+	// Sending simulated headers is strictly >= sending none, so we always
+	// send them. The diagnostics in machineIdentityHint tell the operator
+	// when they're on the simulated path and how to upgrade.
 	if mi.MachineID != "" {
 		req.Header.Set("Cosy-MachineId", mi.MachineID)
 	}

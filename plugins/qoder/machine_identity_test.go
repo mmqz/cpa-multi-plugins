@@ -88,10 +88,14 @@ func TestSimulatedIdentityPerUIDStableAndIsolated(t *testing.T) {
 }
 
 // TestAttachMachineIdentityHeadersWiring: every non-empty identity field
-// lands on the request as its Cosy-Machine* header — but ONLY for NATIVE
-// (runtime-info) identities. v0.8.47: derived/simulated identities skip
-// all Cosy-Machine* headers (the server's anti-fraud layer filters
-// device-targeted rows when it recognizes the P1gA+91/00 shape as non-real).
+// lands on the request as its Cosy-Machine* header. v0.8.48: headers are
+// ALWAYS attached regardless of Source (real runtime-info OR derived) —
+// sending simulated headers is strictly >= sending none, because the
+// server's browser path (no machine headers) ALSO filters CLAIM_BENEFIT
+// rows. The live credential test on 2026-10-03 proved that real
+// runtime-info headers return the full campaigns list (including the
+// daily 100-Credits CLAIM_BENEFIT row), while NO headers return only
+// VIEW_DETAILS rows.
 func TestAttachMachineIdentityHeadersWiring(t *testing.T) {
 	// Native identity — all headers MUST attach.
 	native := &machineIdentity{
@@ -118,19 +122,26 @@ func TestAttachMachineIdentityHeadersWiring(t *testing.T) {
 		}
 	}
 
-	// Derived identity — NO Cosy-Machine* headers should attach.
+	// Derived identity — v0.8.48: headers ALSO attach (sending simulated
+	// headers is strictly >= sending none). The server may still filter
+	// device-targeted rows for simulated identities, but at least we
+	// don't lie about being a browser.
 	derived := derivedTestHeaders(t)
 	if derived.Source != "derived" {
 		t.Fatalf("derived source = %q", derived.Source)
 	}
 	req2, _ := http.NewRequest(http.MethodGet, "http://upstream/sash/api/v1/me/campaigns", nil)
 	attachMachineIdentityHeaders(req2, derived)
-	for _, name := range []string{
-		"Cosy-MachineId", "Cosy-MachineToken", "Cosy-MachineType",
-		"Cosy-MachineCode", "Cosy-MachineOS", "Cosy-MachineHostname",
+	for name, want := range map[string]string{
+		"Cosy-MachineId":       derived.MachineID,
+		"Cosy-MachineToken":    derived.MachineToken,
+		"Cosy-MachineType":     derived.MachineType,
+		"Cosy-MachineCode":     derived.MachineCode,
+		"Cosy-MachineOS":       derived.MachineOS,
+		"Cosy-MachineHostname": derived.MachineHostname,
 	} {
-		if got := req2.Header.Get(name); got != "" {
-			t.Fatalf("derived: %s = %q, want empty (v0.8.47: derived identities skip machine headers)", name, got)
+		if got := req2.Header.Get(name); got != want {
+			t.Fatalf("derived: %s = %q, want %q (v0.8.48: always attach)", name, got, want)
 		}
 	}
 }
