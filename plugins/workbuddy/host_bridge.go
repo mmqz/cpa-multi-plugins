@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,6 +38,13 @@ func sharedHTTPClient() *http.Client {
 				MaxIdleConns:        20,
 				IdleConnTimeout:     90 * time.Second,
 				MaxIdleConnsPerHost: 5,
+				// v0.9.48b: disable HTTP/2. codebuddy.ai's APISIX gateway
+				// closes HTTP/2 connections mid-request with EOF (field report
+				// 2026-10-03: "Post ...get-user-resource: EOF" after 6.84s).
+				// Setting TLSNextProto to a non-nil empty map disables the
+				// HTTP/2 upgrade, forcing HTTP/1.1 which APISIX handles
+				// reliably.
+				TLSNextProto: make(map[string]func(string, *tls.Conn) http.RoundTripper),
 			},
 		}
 	})

@@ -70,7 +70,7 @@ type checkinSummary struct {
 // with a transient error (HTTP 5xx or transport error). codebuddy.cn
 // intermittently returns 500s; without a retry a single hiccup surfaces as a
 // panel error even though the very next request would succeed.
-var billingRetryDelays = []time.Duration{300 * time.Millisecond, 900 * time.Millisecond, 2700 * time.Millisecond, 5400 * time.Millisecond}
+var billingRetryDelays = []time.Duration{300 * time.Millisecond, 900 * time.Millisecond}
 
 // CapacityRemain/Used/Size         — lifetime package totals (Used often ≈0
 //
