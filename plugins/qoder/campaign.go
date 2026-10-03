@@ -19,21 +19,21 @@
 package main
 
 import (
-        "context"
-        "encoding/json"
-        "fmt"
-        "net/http"
-        "strings"
-        "sync"
-        "time"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
 )
 
 // checkinContract selects the upstream check-in dialect for a credential.
 type checkinContract int
 
 const (
-        checkinContractDaily    checkinContract = iota // RETIRED v0.12.80 — legacy daily-check-in is DISABLED upstream
-        checkinContractCampaign                        // campaigns list + claim (Intl since v0.8.18, CN since v0.12.80)
+	checkinContractDaily    checkinContract = iota // RETIRED v0.12.80 — legacy daily-check-in is DISABLED upstream
+	checkinContractCampaign                        // campaigns list + claim (Intl since v0.8.18, CN since v0.12.80)
 )
 
 // regionCapabilities records which upstream billing contracts exist per
@@ -51,97 +51,186 @@ const (
 // endpoint stays readable and is merged as a read-only stats supplement
 // (billing.go mergeLegacyCheckinStats).
 type regionCapabilities struct {
-        Checkin    bool
-        ProUpgrade bool
-        Contract   checkinContract
+	Checkin    bool
+	ProUpgrade bool
+	Contract   checkinContract
 }
 
 func capabilitiesForRegion(region string) regionCapabilities {
-        if normalizeRegion(region) == regionIntl {
-                return regionCapabilities{
-                        Checkin:    true,
-                        ProUpgrade: false,
-                        Contract:   checkinContractCampaign,
-                }
-        }
-        return regionCapabilities{
-                Checkin:    true,
-                ProUpgrade: true,
-                Contract:   checkinContractCampaign,
-        }
+	if normalizeRegion(region) == regionIntl {
+		return regionCapabilities{
+			Checkin:    true,
+			ProUpgrade: false,
+			Contract:   checkinContractCampaign,
+		}
+	}
+	return regionCapabilities{
+		Checkin:    true,
+		ProUpgrade: true,
+		Contract:   checkinContractCampaign,
+	}
 }
 
 // supportsProUpgrade reports whether the credential's region has a Pro
 // upgrade contract at all (Intl does not — skip, never retry a 404).
 func supportsProUpgrade(sa *storedAuth) bool {
-        return capabilitiesForRegion(authRegion(sa)).ProUpgrade
+	return capabilitiesForRegion(authRegion(sa)).ProUpgrade
 }
 
 type campaignStatusResponse struct {
-        ShowCampaign bool       `json:"showCampaign"`
-        Claimable    bool       `json:"claimable"`
-        Campaigns    []campaign `json:"campaigns"`
+	ShowCampaign bool       `json:"showCampaign"`
+	Claimable    bool       `json:"claimable"`
+	CampaignURL  string     `json:"campaignUrl"` // v0.8.46: official client opens this as a WebView; the daily 100 Credits row only appears in campaigns[] AFTER the surface is "opened"
+	Campaigns    []campaign `json:"campaigns"`
 }
 
 type campaign struct {
-        CampaignID  string       `json:"campaignId"`
-        CampaignKey string       `json:"campaignKey"`
-        ActionType  string       `json:"actionType"`
-        StartAt     int64        `json:"startAt"`
-        EndAt       int64        `json:"endAt"`
-        ClaimStatus string       `json:"claimStatus"` // CLAIMABLE | CLAIMED | ...
-        Benefit     *campaignBen `json:"benefit,omitempty"`
-        // v0.8.35 fields — reverse-engineered from the official
-        // growth-page/activity-iframe JS (cross-verified against the
-        // qoder2api-hub capture). They explain WHY a row is not claimable:
-        // task campaigns gate on achievements, device-targeted rows are
-        // filtered server-side, and the reason string carries the upstream's
-        // own verdict (e.g. ACHIEVEMENT_NOT_COMPLETED).
-        RequiredAchievementKey string `json:"requiredAchievementKey,omitempty"`
-        AchievementCompleted   bool   `json:"achievementCompleted,omitempty"`
-        UnavailableReason      string `json:"unavailableReason,omitempty"`
-        Placements             []any  `json:"placements,omitempty"`
+	CampaignID  string       `json:"campaignId"`
+	CampaignKey string       `json:"campaignKey"`
+	ActionType  string       `json:"actionType"`
+	StartAt     int64        `json:"startAt"`
+	EndAt       int64        `json:"endAt"`
+	ClaimStatus string       `json:"claimStatus"` // CLAIMABLE | CLAIMED | ...
+	Benefit     *campaignBen `json:"benefit,omitempty"`
+	// v0.8.35 fields — reverse-engineered from the official
+	// growth-page/activity-iframe JS (cross-verified against the
+	// qoder2api-hub capture). They explain WHY a row is not claimable:
+	// task campaigns gate on achievements, device-targeted rows are
+	// filtered server-side, and the reason string carries the upstream's
+	// own verdict (e.g. ACHIEVEMENT_NOT_COMPLETED).
+	RequiredAchievementKey string `json:"requiredAchievementKey,omitempty"`
+	AchievementCompleted   bool   `json:"achievementCompleted,omitempty"`
+	UnavailableReason      string `json:"unavailableReason,omitempty"`
+	Placements             []any  `json:"placements,omitempty"`
 }
 
 type campaignBen struct {
-        Kind   string `json:"kind"`
-        Amount int64  `json:"amount"`
+	Kind   string `json:"kind"`
+	Amount int64  `json:"amount"`
 }
 
 func fetchCampaignStatus(sa *storedAuth) (*campaignStatusResponse, error) {
-        out, miSource, hadFlag, err := fetchCampaignStatusOnce(sa, false)
-        if err != nil {
-                return nil, err
-        }
-        // v0.8.38 (official client parity, Intl+CN desktop v0.4.3 asar): right
-        // after every campaigns status refresh the client also reads the
-        // client_launch_26 limited-number endpoint once (retry-once-when-empty).
-        // That pair IS the "launch sync" the desktop client performs at every
-        // sign-in — reproduce it best-effort so accounts hosted here see the
-        // same qualification signal as an installed client. Never fatal.
-        campaignLaunchSync(sa)
-        // v0.8.39: remember every daily-shaped row (CLAIM_BENEFIT / empty
-        // actionType) the server returned — the bypass-list verdict probe
-        // (performCampaignCheckin) needs a real campaign id to POST when a
-        // later round hides the row (per-person dedup / device targeting).
-        rememberCampaignRound(authRegion(sa), sa.Account.UID, out)
-        // v0.8.36 self-heal (hub live pattern): showCampaign=false with a NATIVE
-        // identity usually means the identity rotated past its acceptance window
-        // — force a fresh one from the official bridge and retry exactly once.
-        // Derived identities never retry (there is nothing to rotate); CN
-        // envelopes may omit the flag entirely, and an absent flag (hadFlag=false)
-        // never triggers the retry either.
-        if miSource == "runtime-info" && hadFlag && !out.ShowCampaign {
-                machineIdentityFor(authRegion(sa), sa.Account.UID, true)
-                if machineIdentityForceHook != nil {
-                        machineIdentityForceHook()
-                }
-                if out2, _, _, err2 := fetchCampaignStatusOnce(sa, true); err2 == nil && out2.ShowCampaign {
-                        rememberCampaignRound(authRegion(sa), sa.Account.UID, out2)
-                        return out2, nil
-                }
-        }
-        return out, nil
+	out, miSource, hadFlag, err := fetchCampaignStatusOnce(sa, false)
+	if err != nil {
+		return nil, err
+	}
+	// v0.8.38 (official client parity, Intl+CN desktop v0.4.3 asar): right
+	// after every campaigns status refresh the client also reads the
+	// client_launch_26 limited-number endpoint once (retry-once-when-empty).
+	// That pair IS the "launch sync" the desktop client performs at every
+	// sign-in — reproduce it best-effort so accounts hosted here see the
+	// same qualification signal as an installed client. Never fatal.
+	campaignLaunchSync(sa)
+	// v0.8.39: remember every daily-shaped row (CLAIM_BENEFIT / empty
+	// actionType) the server returned — the bypass-list verdict probe
+	// (performCampaignCheckin) needs a real campaign id to POST when a
+	// later round hides the row (per-person dedup / device targeting).
+	rememberCampaignRound(authRegion(sa), sa.Account.UID, out)
+	// v0.8.36 self-heal (hub live pattern): showCampaign=false with a NATIVE
+	// identity usually means the identity rotated past its acceptance window
+	// — force a fresh one from the official bridge and retry exactly once.
+	// Derived identities never retry (there is nothing to rotate); CN
+	// envelopes may omit the flag entirely, and an absent flag (hadFlag=false)
+	// never triggers the retry either.
+	if miSource == "runtime-info" && hadFlag && !out.ShowCampaign {
+		machineIdentityFor(authRegion(sa), sa.Account.UID, true)
+		if machineIdentityForceHook != nil {
+			machineIdentityForceHook()
+		}
+		if out2, _, _, err2 := fetchCampaignStatusOnce(sa, true); err2 == nil && out2.ShowCampaign {
+			rememberCampaignRound(authRegion(sa), sa.Account.UID, out2)
+			return out2, nil
+		}
+	}
+	// v0.8.46 (official desktop client v0.4.3 asar forensics): the official
+	// client opens campaignUrl as a WebView (openSurface → registerSurface).
+	// The server tracks this "surface opened" state and ONLY includes the
+	// daily CLAIM_BENEFIT 100-Credits row in campaigns[] AFTER the surface
+	// is opened. Without opening the surface, the response carries only
+	// VIEW_DETAILS rows (newbie packs) — the daily row is silently absent.
+	//
+	// The plugin has no WebView, but it CAN simulate the "surface opened"
+	// signal by making one GET to campaignUrl (with the same billing headers
+	// + cookies the WebView would carry). This triggers the server-side
+	// state change, and the subsequent campaigns fetch returns the full list.
+	//
+	// Only fire when showCampaign=true (campaignUrl present) AND the current
+	// campaigns[] has no CLAIMABLE CLAIM_BENEFIT row (the daily row is the
+	// one we're trying to surface). Best-effort: errors are swallowed.
+	if out.ShowCampaign && strings.TrimSpace(out.CampaignURL) != "" && !hasClaimableDailyRow(out) {
+		if openCampaignSurface(sa, out.CampaignURL) {
+			// Re-fetch campaigns — the server should now include the daily row.
+			if out2, _, _, err2 := fetchCampaignStatusOnce(sa, false); err2 == nil {
+				rememberCampaignRound(authRegion(sa), sa.Account.UID, out2)
+				// Merge: keep the broader of the two campaign lists (the
+				// post-surface fetch should be a superset, but fall back
+				// gracefully if the server returned fewer rows).
+				if len(out2.Campaigns) >= len(out.Campaigns) {
+					return out2, nil
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// hasClaimableDailyRow reports whether the campaigns list already has a
+// CLAIM_BENEFIT (or empty-actionType) CLAIMABLE row — the daily 100-Credits
+// check-in. Used to decide whether the surface-open retry is needed.
+func hasClaimableDailyRow(status *campaignStatusResponse) bool {
+	if status == nil {
+		return false
+	}
+	for i := range status.Campaigns {
+		c := &status.Campaigns[i]
+		at := strings.ToUpper(strings.TrimSpace(c.ActionType))
+		if at != "" && at != "CLAIM_BENEFIT" {
+			continue
+		}
+		if !strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// openCampaignSurface makes one GET to the campaignUrl the server returned,
+// simulating the official client's "open activity page WebView" step. The
+// server tracks this visit and includes the daily 100-Credits CLAIM_BENEFIT
+// row in subsequent /sash/api/v1/me/campaigns responses.
+//
+// The GET carries the same billing headers (Authorization, Cosy-*) and the
+// per-account cookie jar (acw_tc / qoder_csrf_token) the WebView would
+// carry. Best-effort: any error returns false, and the caller falls through
+// to the original (pre-surface) campaigns list.
+func openCampaignSurface(sa *storedAuth, campaignURL string) bool {
+	campaignURL = strings.TrimSpace(campaignURL)
+	if campaignURL == "" {
+		return false
+	}
+	req, err := http.NewRequest(http.MethodGet, campaignURL, nil)
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+	// The campaignUrl is an HTML page (activity WebView), not a JSON API.
+	// Send the same billing headers (auth + Cosy-* + cookies) so the server
+	// associates this visit with the account's session.
+	billingHeaders(req, sa)
+	mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
+	attachMachineIdentityHeaders(req, &mi)
+	// Browsers send Accept: text/html for page navigations; override the
+	// application/json that billingHeaders set.
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	resp, err := hostHTTPDo(req)
+	if err != nil {
+		return false
+	}
+	// We don't care about the body — only the cookie/state side-effect.
+	return resp.StatusCode < 400
 }
 
 // ---------------------------------------------------------------------------
@@ -179,48 +268,48 @@ const roundMemoMaxAge = 48 * time.Hour
 const roundProbeCooldown = 6 * time.Hour
 
 type campaignRoundEntry struct {
-        CampaignID  string
-        CampaignKey string
-        SeenAt      time.Time
+	CampaignID  string
+	CampaignKey string
+	SeenAt      time.Time
 }
 
 type campaignRoundMemo struct {
-        mu         sync.Mutex
-        perAccount map[string]campaignRoundEntry // key region:uid
-        perRegion  map[string]campaignRoundEntry // key region
+	mu         sync.Mutex
+	perAccount map[string]campaignRoundEntry // key region:uid
+	perRegion  map[string]campaignRoundEntry // key region
 }
 
 var roundMemo = &campaignRoundMemo{
-        perAccount: map[string]campaignRoundEntry{},
-        perRegion:  map[string]campaignRoundEntry{},
+	perAccount: map[string]campaignRoundEntry{},
+	perRegion:  map[string]campaignRoundEntry{},
 }
 
 // rememberCampaignRound records the first daily-shaped row of the response.
 // Any status counts (CLAIMABLE / CLAIMED): a claimed row is exactly the id a
 // hidden next round will reuse.
 func rememberCampaignRound(region, uid string, status *campaignStatusResponse) {
-        if status == nil {
-                return
-        }
-        for i := range status.Campaigns {
-                c := &status.Campaigns[i]
-                if c.CampaignID == "" {
-                        continue
-                }
-                if at := strings.ToUpper(strings.TrimSpace(c.ActionType)); at != "" && at != "CLAIM_BENEFIT" {
-                        continue
-                }
-                roundMemo.remember(region, uid, c)
-                return
-        }
+	if status == nil {
+		return
+	}
+	for i := range status.Campaigns {
+		c := &status.Campaigns[i]
+		if c.CampaignID == "" {
+			continue
+		}
+		if at := strings.ToUpper(strings.TrimSpace(c.ActionType)); at != "" && at != "CLAIM_BENEFIT" {
+			continue
+		}
+		roundMemo.remember(region, uid, c)
+		return
+	}
 }
 
 func (m *campaignRoundMemo) remember(region, uid string, c *campaign) {
-        e := campaignRoundEntry{CampaignID: c.CampaignID, CampaignKey: c.CampaignKey, SeenAt: time.Now()}
-        m.mu.Lock()
-        defer m.mu.Unlock()
-        m.perAccount[region+":"+uid] = e
-        m.perRegion[region] = e
+	e := campaignRoundEntry{CampaignID: c.CampaignID, CampaignKey: c.CampaignKey, SeenAt: time.Now()}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.perAccount[region+":"+uid] = e
+	m.perRegion[region] = e
 }
 
 // probeFor returns the id a bypass probe may POST for one account: the
@@ -229,21 +318,21 @@ func (m *campaignRoundMemo) remember(region, uid string, c *campaign) {
 // that can see the row sees the same round). ("", false) when nothing fresh
 // exists; probe candidates are never fabricated.
 func (m *campaignRoundMemo) probeFor(region, uid string) (campaign, bool) {
-        m.mu.Lock()
-        defer m.mu.Unlock()
-        now := time.Now()
-        if e, ok := m.perAccount[region+":"+uid]; ok && now.Sub(e.SeenAt) < roundMemoMaxAge {
-                return campaign{CampaignID: e.CampaignID, CampaignKey: e.CampaignKey}, true
-        }
-        if e, ok := m.perRegion[region]; ok && now.Sub(e.SeenAt) < roundMemoMaxAge {
-                return campaign{CampaignID: e.CampaignID, CampaignKey: e.CampaignKey}, true
-        }
-        return campaign{}, false
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	if e, ok := m.perAccount[region+":"+uid]; ok && now.Sub(e.SeenAt) < roundMemoMaxAge {
+		return campaign{CampaignID: e.CampaignID, CampaignKey: e.CampaignKey}, true
+	}
+	if e, ok := m.perRegion[region]; ok && now.Sub(e.SeenAt) < roundMemoMaxAge {
+		return campaign{CampaignID: e.CampaignID, CampaignKey: e.CampaignKey}, true
+	}
+	return campaign{}, false
 }
 
 var (
-        roundProbeMu   sync.Mutex
-        roundProbeLast = map[string]time.Time{} // key region:uid
+	roundProbeMu   sync.Mutex
+	roundProbeLast = map[string]time.Time{} // key region:uid
 )
 
 // probeHiddenRound runs the bypass-list verdict probe for one account and
@@ -258,41 +347,55 @@ var (
 // verdict (claimed / already / blocked / typed eligibility) now arms the
 // cooldown; inconclusive transport failures leave it free for the next tick.
 func probeHiddenRound(sa *storedAuth) map[string]any {
-        region := authRegion(sa)
-        key := region + ":" + sa.Account.UID
-        roundProbeMu.Lock()
-        if t, ok := roundProbeLast[key]; ok && time.Since(t) < roundProbeCooldown {
-                roundProbeMu.Unlock()
-                return nil
-        }
-        c, ok := roundMemo.probeFor(region, sa.Account.UID)
-        if !ok {
-                roundProbeMu.Unlock()
-                return nil
-        }
-        roundProbeMu.Unlock()
-        res, err := claimCampaignByID(sa, &c)
-        if err != nil || res == nil {
-                return nil // transport/parse failure — retryable, no latch
-        }
-        if res["success"] == true {
-                roundProbeMu.Lock()
-                roundProbeLast[key] = time.Now()
-                roundProbeMu.Unlock()
-                return res
-        }
-        switch r, _ := res["result"].(string); r {
-        case "ALREADY_CLAIMED", "BLOCKED", "NOT_ELIGIBLE":
-                roundProbeMu.Lock()
-                roundProbeLast[key] = time.Now()
-                roundProbeMu.Unlock()
-                return res
-        }
-        return res // inconclusive (http error body etc.) — returned, not latched
+	region := authRegion(sa)
+	key := region + ":" + sa.Account.UID
+	roundProbeMu.Lock()
+	if t, ok := roundProbeLast[key]; ok && time.Since(t) < roundProbeCooldown {
+		roundProbeMu.Unlock()
+		return nil
+	}
+	c, ok := roundMemo.probeFor(region, sa.Account.UID)
+	if !ok {
+		roundProbeMu.Unlock()
+		return nil
+	}
+	roundProbeMu.Unlock()
+	res, err := claimCampaignByID(sa, &c)
+	if err != nil || res == nil {
+		return nil // transport/parse failure — retryable, no latch
+	}
+	if res["success"] == true {
+		roundProbeMu.Lock()
+		roundProbeLast[key] = time.Now()
+		roundProbeMu.Unlock()
+		return res
+	}
+	switch r, _ := res["result"].(string); r {
+	case "ALREADY_CLAIMED", "BLOCKED", "NOT_ELIGIBLE":
+		roundProbeMu.Lock()
+		roundProbeLast[key] = time.Now()
+		roundProbeMu.Unlock()
+		return res
+	}
+	return res // inconclusive (http error body etc.) — returned, not latched
 }
 
+// campaignsURL returns the campaigns list URL.
+//
+// v0.8.46 (official desktop client v0.4.3 asar forensics): the official
+// campaignMainService.getStatus() builds the URL as
+//
+//	new URL("/sash/api/v1/me/campaigns", this.discoveryBaseUrl)
+//
+// with NO query string. The `forceRefresh` parameter is a LOCAL cache-bypass
+// flag only — it appears in log metadata but is NEVER sent to the server.
+// The old `?forceRefresh=true` caused the server to return a FILTERED
+// campaigns list for accounts that hadn't "opened" the activity page: only
+// VIEW_DETAILS rows appeared (act-20260901-493 etc.), the daily
+// CLAIM_BENEFIT 100-Credits row was silently dropped. Removing the parameter
+// makes the server return the full cached list including the daily row.
 func campaignsURL(sa *storedAuth) string {
-        return billingBaseFor(sa) + "/sash/api/v1/me/campaigns?forceRefresh=true"
+	return billingBaseFor(sa) + "/sash/api/v1/me/campaigns"
 }
 
 // fetchCampaignStatusOnce fires one campaigns GET with the desktop headers
@@ -301,33 +404,33 @@ func campaignsURL(sa *storedAuth) string {
 // upstream envelope carried the showCampaign key at all (CN responses may
 // omit it — a plain bool field cannot distinguish absent from false).
 func fetchCampaignStatusOnce(sa *storedAuth, forceIdentity bool) (*campaignStatusResponse, string, bool, error) {
-        req, err := http.NewRequest(http.MethodGet, campaignsURL(sa), nil)
-        if err != nil {
-                return nil, "", false, err
-        }
-        // v0.12.76: bounded wait (billing.go parity) — a hung campaigns probe
-        // used to ride the bridge's long default ceiling.
-        ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-        defer cancel()
-        req = req.WithContext(ctx)
-        billingHeaders(req, sa)
-        mi := machineIdentityFor(authRegion(sa), sa.Account.UID, forceIdentity)
-        attachMachineIdentityHeaders(req, &mi)
-        resp, err := hostHTTPDo(req)
-        if err != nil {
-                return nil, mi.Source, false, err
-        }
-        if resp.StatusCode >= 400 {
-                return nil, mi.Source, false, fmt.Errorf("campaigns http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))
-        }
-        var probe map[string]any
-        _ = json.Unmarshal(resp.Body, &probe)
-        _, hadFlag := probe["showCampaign"]
-        var out campaignStatusResponse
-        if err := json.Unmarshal(resp.Body, &out); err != nil {
-                return nil, mi.Source, hadFlag, fmt.Errorf("campaigns parse: %w", err)
-        }
-        return &out, mi.Source, hadFlag, nil
+	req, err := http.NewRequest(http.MethodGet, campaignsURL(sa), nil)
+	if err != nil {
+		return nil, "", false, err
+	}
+	// v0.12.76: bounded wait (billing.go parity) — a hung campaigns probe
+	// used to ride the bridge's long default ceiling.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+	billingHeaders(req, sa)
+	mi := machineIdentityFor(authRegion(sa), sa.Account.UID, forceIdentity)
+	attachMachineIdentityHeaders(req, &mi)
+	resp, err := hostHTTPDo(req)
+	if err != nil {
+		return nil, mi.Source, false, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, mi.Source, false, fmt.Errorf("campaigns http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))
+	}
+	var probe map[string]any
+	_ = json.Unmarshal(resp.Body, &probe)
+	_, hadFlag := probe["showCampaign"]
+	var out campaignStatusResponse
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		return nil, mi.Source, hadFlag, fmt.Errorf("campaigns parse: %w", err)
+	}
+	return &out, mi.Source, hadFlag, nil
 }
 
 // clientLaunchCampaignKey is the campaign whose limited-number endpoint the
@@ -341,8 +444,8 @@ const clientLaunchCampaignKey = "client_launch_26"
 const launchSyncWindow = 6 * time.Hour
 
 var (
-        launchSyncMu   sync.Mutex
-        launchSyncLast = map[string]time.Time{}
+	launchSyncMu   sync.Mutex
+	launchSyncLast = map[string]time.Time{}
 )
 
 // campaignLaunchSync mirrors the official client's launch step: after a
@@ -354,55 +457,55 @@ var (
 // swallowed — the endpoint is a qualification signal, not a claim, and its
 // failure must never flip a campaign read into an error.
 func campaignLaunchSync(sa *storedAuth) {
-        key := authRegion(sa) + ":" + sa.Account.UID
-        launchSyncMu.Lock()
-        if t, ok := launchSyncLast[key]; ok && time.Since(t) < launchSyncWindow {
-                launchSyncMu.Unlock()
-                return
-        }
-        launchSyncLast[key] = time.Now()
-        launchSyncMu.Unlock()
-        for attempt := 0; attempt < 2; attempt++ {
-                if attempt > 0 {
-                        time.Sleep(750 * time.Millisecond)
-                }
-                if has, err := fetchLimitedNumber(sa); err == nil && has {
-                        return
-                }
-        }
+	key := authRegion(sa) + ":" + sa.Account.UID
+	launchSyncMu.Lock()
+	if t, ok := launchSyncLast[key]; ok && time.Since(t) < launchSyncWindow {
+		launchSyncMu.Unlock()
+		return
+	}
+	launchSyncLast[key] = time.Now()
+	launchSyncMu.Unlock()
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			time.Sleep(750 * time.Millisecond)
+		}
+		if has, err := fetchLimitedNumber(sa); err == nil && has {
+			return
+		}
+	}
 }
 
 // fetchLimitedNumber reads one limited-number endpoint. The official parser
 // accepts a bare {hasNumber:number, number:int, createdAt} payload (asar
 // function cwr); a {data:...} envelope is unwrapped defensively.
 func fetchLimitedNumber(sa *storedAuth) (bool, error) {
-        req, err := http.NewRequest(http.MethodGet,
-                billingBaseFor(sa)+"/sash/api/v1/me/campaigns/"+clientLaunchCampaignKey+"/limited-number", nil)
-        if err != nil {
-                return false, err
-        }
-        ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-        defer cancel()
-        req = req.WithContext(ctx)
-        billingHeaders(req, sa)
-        mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
-        attachMachineIdentityHeaders(req, &mi)
-        resp, err := hostHTTPDo(req)
-        if err != nil {
-                return false, err
-        }
-        if resp.StatusCode >= 400 {
-                return false, fmt.Errorf("limited-number http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 160))
-        }
-        var m map[string]any
-        if err := json.Unmarshal(resp.Body, &m); err != nil {
-                return false, err
-        }
-        if data, ok := m["data"].(map[string]any); ok {
-                m = data
-        }
-        has, _ := m["hasNumber"].(bool)
-        return has, nil
+	req, err := http.NewRequest(http.MethodGet,
+		billingBaseFor(sa)+"/sash/api/v1/me/campaigns/"+clientLaunchCampaignKey+"/limited-number", nil)
+	if err != nil {
+		return false, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+	billingHeaders(req, sa)
+	mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
+	attachMachineIdentityHeaders(req, &mi)
+	resp, err := hostHTTPDo(req)
+	if err != nil {
+		return false, err
+	}
+	if resp.StatusCode >= 400 {
+		return false, fmt.Errorf("limited-number http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 160))
+	}
+	var m map[string]any
+	if err := json.Unmarshal(resp.Body, &m); err != nil {
+		return false, err
+	}
+	if data, ok := m["data"].(map[string]any); ok {
+		m = data
+	}
+	has, _ := m["hasNumber"].(bool)
+	return has, nil
 }
 
 // fetchCampaignReward reads one campaign's grant state via
@@ -413,51 +516,51 @@ func fetchLimitedNumber(sa *storedAuth) (bool, error) {
 // how 领取Pro sees the actual face value without opening the page. Read-only
 // and idempotent upstream; any HTTP error is the caller's "unknown" signal.
 func fetchCampaignReward(sa *storedAuth, campaignID string) (map[string]any, error) {
-        req, err := http.NewRequest(http.MethodGet,
-                billingBaseFor(sa)+"/sash/api/v1/me/campaigns/"+campaignID+"/reward", nil)
-        if err != nil {
-                return nil, err
-        }
-        ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-        defer cancel()
-        req = req.WithContext(ctx)
-        billingHeaders(req, sa)
-        mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
-        attachMachineIdentityHeaders(req, &mi)
-        resp, err := hostHTTPDo(req)
-        if err != nil {
-                return nil, err
-        }
-        if resp.StatusCode >= 400 {
-                return nil, fmt.Errorf("reward http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))
-        }
-        var m map[string]any
-        if err := json.Unmarshal(resp.Body, &m); err != nil {
-                return nil, err
-        }
-        return m, nil
+	req, err := http.NewRequest(http.MethodGet,
+		billingBaseFor(sa)+"/sash/api/v1/me/campaigns/"+campaignID+"/reward", nil)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+	billingHeaders(req, sa)
+	mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
+	attachMachineIdentityHeaders(req, &mi)
+	resp, err := hostHTTPDo(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("reward http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))
+	}
+	var m map[string]any
+	if err := json.Unmarshal(resp.Body, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // rewardBenefit unwraps a /reward payload (bare or {data:{...}} envelope)
 // into its benefit kind and amount; zero values mean "not revealed".
 func rewardBenefit(body map[string]any) (string, int64) {
-        if body == nil {
-                return "", 0
-        }
-        if data, ok := body["data"].(map[string]any); ok {
-                body = data
-        }
-        kind, _ := body["kind"].(string)
-        amount := float64(0)
-        if b, ok := body["benefit"].(map[string]any); ok {
-                if k, ok := b["kind"].(string); ok && k != "" {
-                        kind = k
-                }
-                amount, _ = b["amount"].(float64)
-        } else if a, ok := body["amount"].(float64); ok {
-                amount = a
-        }
-        return kind, int64(amount)
+	if body == nil {
+		return "", 0
+	}
+	if data, ok := body["data"].(map[string]any); ok {
+		body = data
+	}
+	kind, _ := body["kind"].(string)
+	amount := float64(0)
+	if b, ok := body["benefit"].(map[string]any); ok {
+		if k, ok := b["kind"].(string); ok && k != "" {
+			kind = k
+		}
+		amount, _ = b["amount"].(float64)
+	} else if a, ok := body["amount"].(float64); ok {
+		amount = a
+	}
+	return kind, int64(amount)
 }
 
 // ---------------------------------------------------------------------------
@@ -484,46 +587,47 @@ func rewardBenefit(body map[string]any) (string, int64) {
 // ---------------------------------------------------------------------------
 
 var campaignFailureCN = map[string]string{
-        "REDEMPTION_CODE_OUT_OF_STOCK": "今日名额已发完（每日 10:00 刷新，次日 10:00 后自动重试）",
-        "ACHIEVEMENT_NOT_COMPLETED":    "需先在官方客户端完成新人任务（成就未完成）",
-        "CAMPAIGN_NOT_ACTIVE":          "活动已结束或未开始",
-        "RISK_BLOCKED":                 "风控拦截（当前设备/账号不可领取）",
-        "RISK_DEPENDENCY_UNAVAILABLE":  "风控服务暂不可用，稍后自动重试",
+	"REDEMPTION_CODE_OUT_OF_STOCK": "今日名额已发完（每日 10:00 刷新，次日 10:00 后自动重试）",
+	"ACHIEVEMENT_NOT_COMPLETED":    "需先在官方客户端完成新人任务（成就未完成）",
+	"CAMPAIGN_NOT_ACTIVE":          "活动已结束或未开始",
+	"RISK_BLOCKED":                 "风控拦截（当前设备/账号不可领取）",
+	"RISK_DEPENDENCY_UNAVAILABLE":  "风控服务暂不可用，稍后自动重试",
 }
 
 // campaignBenefitKindOf pulls the benefit kind out of a claim-response body
 // (bare or {data:...} unwrapped by the caller). Empty when absent.
 func campaignBenefitKindOf(body map[string]any) (string, bool) {
-        if body == nil {
-                return "", false
-        }
-        if b, ok := body["benefit"].(map[string]any); ok {
-                if k, ok := b["kind"].(string); ok {
-                        return strings.ToUpper(k), true
-                }
-        }
-        if k, ok := body["kind"].(string); ok && k != "" {
-                return strings.ToUpper(k), true
-        }
-        return "", false
+	if body == nil {
+		return "", false
+	}
+	if b, ok := body["benefit"].(map[string]any); ok {
+		if k, ok := b["kind"].(string); ok {
+			return strings.ToUpper(k), true
+		}
+	}
+	if k, ok := body["kind"].(string); ok && k != "" {
+		return strings.ToUpper(k), true
+	}
+	return "", false
 }
 
 // campaignBenefitClass buckets a list row's benefit for the claimer:
-//   "credits"    — CREDITS (or absent kind): the daily check-in's currency
-//   "redemption" — REDEMPTION_CODE / REDEMPTION_COUPON / COUPON rows
-//   "other"      — any other readable kind (subscription-shaped etc.)
+//
+//	"credits"    — CREDITS (or absent kind): the daily check-in's currency
+//	"redemption" — REDEMPTION_CODE / REDEMPTION_COUPON / COUPON rows
+//	"other"      — any other readable kind (subscription-shaped etc.)
 func campaignBenefitClass(c *campaign) string {
-        if c == nil || c.Benefit == nil {
-                return "credits" // absent kind: hub treats as claimable daily
-        }
-        switch strings.ToUpper(strings.TrimSpace(c.Benefit.Kind)) {
-        case "", "CREDITS":
-                return "credits"
-        case "REDEMPTION_CODE", "REDEMPTION_COUPON", "COUPON":
-                return "redemption"
-        default:
-                return "other"
-        }
+	if c == nil || c.Benefit == nil {
+		return "credits" // absent kind: hub treats as claimable daily
+	}
+	switch strings.ToUpper(strings.TrimSpace(c.Benefit.Kind)) {
+	case "", "CREDITS":
+		return "credits"
+	case "REDEMPTION_CODE", "REDEMPTION_COUPON", "COUPON":
+		return "redemption"
+	default:
+		return "other"
+	}
 }
 
 // campaignTitle renders a human name for a row: the official zh title from
@@ -531,32 +635,32 @@ func campaignBenefitClass(c *campaign) string {
 // campaign key. Keeps panel messages readable ("每天领 100 Credits" instead
 // of "act-20260930-125").
 func campaignTitle(c *campaign) string {
-        if c == nil {
-                return ""
-        }
-        for _, p := range c.Placements {
-                pm, ok := p.(map[string]any)
-                if !ok {
-                        continue
-                }
-                content, ok := pm["content"].(map[string]any)
-                if !ok {
-                        continue
-                }
-                for _, lang := range []string{"zh", "en"} {
-                        lm, ok := content[lang].(map[string]any)
-                        if !ok {
-                                continue
-                        }
-                        if t, ok := lm["title"].(string); ok && strings.TrimSpace(t) != "" {
-                                return strings.TrimSpace(t)
-                        }
-                }
-        }
-        if c.CampaignKey != "" {
-                return c.CampaignKey
-        }
-        return c.CampaignID
+	if c == nil {
+		return ""
+	}
+	for _, p := range c.Placements {
+		pm, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := pm["content"].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, lang := range []string{"zh", "en"} {
+			lm, ok := content[lang].(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, ok := lm["title"].(string); ok && strings.TrimSpace(t) != "" {
+				return strings.TrimSpace(t)
+			}
+		}
+	}
+	if c.CampaignKey != "" {
+		return c.CampaignKey
+	}
+	return c.CampaignID
 }
 
 // claimableCampaigns returns every currently-claimable row (window-checked),
@@ -565,41 +669,41 @@ func campaignTitle(c *campaign) string {
 // hold a credits row AND a redemption row simultaneously, and claiming only
 // the first left the rest for a "tomorrow" that never came.
 func claimableCampaigns(status *campaignStatusResponse) []*campaign {
-        if status == nil {
-                return nil
-        }
-        now := time.Now().Unix()
-        var credits, rest []*campaign
-        for i := range status.Campaigns {
-                c := &status.Campaigns[i]
-                at := strings.ToUpper(strings.TrimSpace(c.ActionType))
-                if at != "" && at != "CLAIM_BENEFIT" {
-                        continue
-                }
-                // Empty-actionType rows stay credits-only (v0.8.39 guard): a
-                // stray subscription-shaped row must never ride check-in.
-                // Rows with an explicit kind are classed by that kind.
-                if at == "" {
-                        if cls := campaignBenefitClass(c); cls != "credits" {
-                                continue
-                        }
-                }
-                if !strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
-                        continue
-                }
-                if c.StartAt > 0 && now < c.StartAt {
-                        continue
-                }
-                if c.EndAt > 0 && now > c.EndAt {
-                        continue
-                }
-                if campaignBenefitClass(c) == "credits" {
-                        credits = append(credits, c)
-                } else {
-                        rest = append(rest, c)
-                }
-        }
-        return append(credits, rest...)
+	if status == nil {
+		return nil
+	}
+	now := time.Now().Unix()
+	var credits, rest []*campaign
+	for i := range status.Campaigns {
+		c := &status.Campaigns[i]
+		at := strings.ToUpper(strings.TrimSpace(c.ActionType))
+		if at != "" && at != "CLAIM_BENEFIT" {
+			continue
+		}
+		// Empty-actionType rows stay credits-only (v0.8.39 guard): a
+		// stray subscription-shaped row must never ride check-in.
+		// Rows with an explicit kind are classed by that kind.
+		if at == "" {
+			if cls := campaignBenefitClass(c); cls != "credits" {
+				continue
+			}
+		}
+		if !strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
+			continue
+		}
+		if c.StartAt > 0 && now < c.StartAt {
+			continue
+		}
+		if c.EndAt > 0 && now > c.EndAt {
+			continue
+		}
+		if campaignBenefitClass(c) == "credits" {
+			credits = append(credits, c)
+		} else {
+			rest = append(rest, c)
+		}
+	}
+	return append(credits, rest...)
 }
 
 // campaignListVerdict reads the NOT-claimable rows' unavailableReason and
@@ -608,33 +712,33 @@ func claimableCampaigns(status *campaignStatusResponse) []*campaign {
 // the rows carry no explanation. Hub state machine: the official frontend
 // renders these same two states as outOfStock / locked.
 func campaignListVerdict(status *campaignStatusResponse) (map[string]any, bool) {
-        if status == nil {
-                return nil, false
-        }
-        for i := range status.Campaigns {
-                c := &status.Campaigns[i]
-                at := strings.ToUpper(strings.TrimSpace(c.ActionType))
-                if at != "" && at != "CLAIM_BENEFIT" {
-                        continue
-                }
-                switch strings.ToUpper(strings.TrimSpace(c.UnavailableReason)) {
-                case "REDEMPTION_CODE_OUT_OF_STOCK":
-                        return map[string]any{
-                                "success":      false,
-                                "result":       "NOT_ELIGIBLE",
-                                "failure_code": "REDEMPTION_CODE_OUT_OF_STOCK",
-                                "message":      campaignFailureCN["REDEMPTION_CODE_OUT_OF_STOCK"],
-                        }, true
-                case "ACHIEVEMENT_NOT_COMPLETED":
-                        return map[string]any{
-                                "success":      false,
-                                "result":       "NOT_ELIGIBLE",
-                                "failure_code": "ACHIEVEMENT_NOT_COMPLETED",
-                                "message":      campaignFailureCN["ACHIEVEMENT_NOT_COMPLETED"],
-                        }, true
-                }
-        }
-        return nil, false
+	if status == nil {
+		return nil, false
+	}
+	for i := range status.Campaigns {
+		c := &status.Campaigns[i]
+		at := strings.ToUpper(strings.TrimSpace(c.ActionType))
+		if at != "" && at != "CLAIM_BENEFIT" {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(c.UnavailableReason)) {
+		case "REDEMPTION_CODE_OUT_OF_STOCK":
+			return map[string]any{
+				"success":      false,
+				"result":       "NOT_ELIGIBLE",
+				"failure_code": "REDEMPTION_CODE_OUT_OF_STOCK",
+				"message":      campaignFailureCN["REDEMPTION_CODE_OUT_OF_STOCK"],
+			}, true
+		case "ACHIEVEMENT_NOT_COMPLETED":
+			return map[string]any{
+				"success":      false,
+				"result":       "NOT_ELIGIBLE",
+				"failure_code": "ACHIEVEMENT_NOT_COMPLETED",
+				"message":      campaignFailureCN["ACHIEVEMENT_NOT_COMPLETED"],
+			}, true
+		}
+	}
+	return nil, false
 }
 
 // claimableCampaign returns the first campaign that is currently claimable
@@ -643,42 +747,42 @@ func campaignListVerdict(status *campaignStatusResponse) (map[string]any, bool) 
 // v0.8.39 (hub parity, field report u673e7fcc): rows with an EMPTY actionType
 // are claimable too — the qoder2api-hub's daily claimer only skips rows whose
 // actionType is present AND not CLAIM_BENEFIT ("action_type not in
-// ('', 'CLAIM_BENEFIT') → continue"); demanding CLAIM_BENEFIT verbatim
+// (”, 'CLAIM_BENEFIT') → continue"); demanding CLAIM_BENEFIT verbatim
 // skipped daily rounds the server ships without the field. A readable benefit
 // kind must be CREDITS (or absent) so check-in never claims
 // subscription/Pro-shaped rows — those belong to the Pro flow.
 func claimableCampaign(status *campaignStatusResponse) *campaign {
-        if status == nil {
-                return nil
-        }
-        now := time.Now().Unix()
-        for i := range status.Campaigns {
-                c := &status.Campaigns[i]
-                at := strings.ToUpper(strings.TrimSpace(c.ActionType))
-                if at != "" && at != "CLAIM_BENEFIT" {
-                        continue
-                }
-                // Empty-actionType rows are the new territory (v0.8.39): claim
-                // them only when the readable benefit is credits-shaped so a
-                // stray subscription/Pro-shaped row can never ride check-in.
-                // CLAIM_BENEFIT rows keep their historical semantics — the
-                // daily round sometimes ships a coupon benefit, and claiming
-                // it IS the day's check-in.
-                if at == "" && c.Benefit != nil && c.Benefit.Kind != "" && !strings.EqualFold(c.Benefit.Kind, "CREDITS") {
-                        continue
-                }
-                if !strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
-                        continue
-                }
-                if c.StartAt > 0 && now < c.StartAt {
-                        continue
-                }
-                if c.EndAt > 0 && now > c.EndAt {
-                        continue
-                }
-                return c
-        }
-        return nil
+	if status == nil {
+		return nil
+	}
+	now := time.Now().Unix()
+	for i := range status.Campaigns {
+		c := &status.Campaigns[i]
+		at := strings.ToUpper(strings.TrimSpace(c.ActionType))
+		if at != "" && at != "CLAIM_BENEFIT" {
+			continue
+		}
+		// Empty-actionType rows are the new territory (v0.8.39): claim
+		// them only when the readable benefit is credits-shaped so a
+		// stray subscription/Pro-shaped row can never ride check-in.
+		// CLAIM_BENEFIT rows keep their historical semantics — the
+		// daily round sometimes ships a coupon benefit, and claiming
+		// it IS the day's check-in.
+		if at == "" && c.Benefit != nil && c.Benefit.Kind != "" && !strings.EqualFold(c.Benefit.Kind, "CREDITS") {
+			continue
+		}
+		if !strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
+			continue
+		}
+		if c.StartAt > 0 && now < c.StartAt {
+			continue
+		}
+		if c.EndAt > 0 && now > c.EndAt {
+			continue
+		}
+		return c
+	}
+	return nil
 }
 
 // claimedCampaign returns a CLAIM_BENEFIT row already claimed. Note: claimed
@@ -686,58 +790,58 @@ func claimableCampaign(status *campaignStatusResponse) *campaign {
 // an inactive summary is a normal state, not a failure (v0.8.18: surfaced as
 // reason=none instead of an error path).
 func claimedCampaign(status *campaignStatusResponse) *campaign {
-        if status == nil {
-                return nil
-        }
-        for i := range status.Campaigns {
-                c := &status.Campaigns[i]
-                if strings.EqualFold(c.ActionType, "CLAIM_BENEFIT") && strings.EqualFold(c.ClaimStatus, "CLAIMED") {
-                        return c
-                }
-        }
-        return nil
+	if status == nil {
+		return nil
+	}
+	for i := range status.Campaigns {
+		c := &status.Campaigns[i]
+		if strings.EqualFold(c.ActionType, "CLAIM_BENEFIT") && strings.EqualFold(c.ClaimStatus, "CLAIMED") {
+			return c
+		}
+	}
+	return nil
 }
 
 func campaignCredit(c *campaign) int64 {
-        if c == nil || c.Benefit == nil || !strings.EqualFold(c.Benefit.Kind, "CREDITS") {
-                return 0
-        }
-        return c.Benefit.Amount
+	if c == nil || c.Benefit == nil || !strings.EqualFold(c.Benefit.Kind, "CREDITS") {
+		return 0
+	}
+	return c.Benefit.Amount
 }
 
 // fetchCampaignCheckinSummary maps the campaign list onto the panel's shared
 // checkinSummary shape so dashboard rendering stays dialect-agnostic.
 func fetchCampaignCheckinSummary(sa *storedAuth) (*checkinSummary, error) {
-        status, err := fetchCampaignStatus(sa)
-        if err != nil {
-                return nil, err
-        }
-        return campaignCheckinSummary(status), nil
+	status, err := fetchCampaignStatus(sa)
+	if err != nil {
+		return nil, err
+	}
+	return campaignCheckinSummary(status), nil
 }
 
 func campaignCheckinSummary(status *campaignStatusResponse) *checkinSummary {
-        sum := &checkinSummary{ActivityName: "权益活动"}
-        if status == nil {
-                return sum
-        }
-        // v0.12.80: a CLAIMABLE row is authoritative evidence of an active
-        // benefit regardless of the envelope's showCampaign/claimable flags —
-        // the CN campaigns response (unlike the Intl growth-page envelope this
-        // dialect was built on) may not carry them. The old order left
-        // Active=false with DailyCredit set whenever the flags were absent,
-        // which the panel renders as an unreachable "不可签".
-        if c := claimableCampaign(status); c != nil {
-                sum.Active = true
-                sum.DailyCredit = campaignCredit(c)
-                return sum
-        }
-        sum.Active = status.ShowCampaign || status.Claimable
-        if c := claimedCampaign(status); c != nil {
-                sum.TodayCheckedIn = true
-                sum.DailyCredit = campaignCredit(c)
-                sum.TodayCredit = campaignCredit(c)
-        }
-        return sum
+	sum := &checkinSummary{ActivityName: "权益活动"}
+	if status == nil {
+		return sum
+	}
+	// v0.12.80: a CLAIMABLE row is authoritative evidence of an active
+	// benefit regardless of the envelope's showCampaign/claimable flags —
+	// the CN campaigns response (unlike the Intl growth-page envelope this
+	// dialect was built on) may not carry them. The old order left
+	// Active=false with DailyCredit set whenever the flags were absent,
+	// which the panel renders as an unreachable "不可签".
+	if c := claimableCampaign(status); c != nil {
+		sum.Active = true
+		sum.DailyCredit = campaignCredit(c)
+		return sum
+	}
+	sum.Active = status.ShowCampaign || status.Claimable
+	if c := claimedCampaign(status); c != nil {
+		sum.TodayCheckedIn = true
+		sum.DailyCredit = campaignCredit(c)
+		sum.TodayCredit = campaignCredit(c)
+	}
+	return sum
 }
 
 // claimCampaignByID POSTs one campaign's claim endpoint and normalizes the
@@ -749,159 +853,160 @@ func campaignCheckinSummary(status *campaignStatusResponse) *checkinSummary {
 // see checkin.go for the upstream forensics that retired the standalone
 // pro-upgrade endpoints.
 func claimCampaignByID(sa *storedAuth, c *campaign) (map[string]any, error) {
-        req, err := http.NewRequest(
-                http.MethodPost,
-                billingBaseFor(sa)+"/sash/api/v1/me/campaigns/"+c.CampaignID+"/claim",
-                strings.NewReader("{}"),
-        )
-        if err != nil {
-                return nil, err
-        }
-        // v0.12.76: bounded wait (billing.go parity).
-        ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-        defer cancel()
-        req = req.WithContext(ctx)
-        billingHeaders(req, sa)
-        mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
-        attachMachineIdentityHeaders(req, &mi)
-        resp, err := hostHTTPDo(req)
-        if err != nil {
-                return map[string]any{"success": false, "message": err.Error()}, nil
-        }
-        if resp.StatusCode >= 400 {
-                // v0.8.35: upstream also delivers the idempotent replay as an
-                // HTTP 409 carrying errorCode=ALREADY_CLAIMED/REPLAYED (hub
-                // capture) — normalize it like the 200 replayed body instead of
-                // surfacing a raw http error.
-                if resp.StatusCode == http.StatusConflict {
-                        var e map[string]any
-                        if json.Unmarshal(resp.Body, &e) == nil {
-                                if ec, _ := e["errorCode"].(string); strings.Contains(strings.ToUpper(ec), "ALREADY") || strings.EqualFold(ec, "REPLAYED") {
-                                        return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
-                                }
-                        }
-                }
-                return map[string]any{"success": false, "message": fmt.Sprintf("http %d: %s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))}, nil
-        }
-        var m map[string]any
-        if err := json.Unmarshal(resp.Body, &m); err != nil {
-                return nil, err
-        }
-        // The activity page accepts either a bare payload or a {data:{...}}
-        // envelope; the claim succeeded when status reports CLAIMED.
-        // replayed=true is the upstream's idempotent replay (the same claim
-        // landed earlier today — qoder2api capture): surface it as
-        // ALREADY_CLAIMED so the panel shows 今日已签 instead of a fresh
-        // success toast that would invite the user to claim again.
-        //
-        // v0.8.35: two more upstream verdicts, both live-verified by the
-        // qoder2api-hub capture:
-        //   - HTTP 409 with errorCode ALREADY_CLAIMED/REPLAYED → the same
-        //     idempotent replay, delivered as an error status instead of a
-        //     200 body;
-        //   - status=BLOCKED / failureCode=SAME_PERSON_ALREADY_CLAIMED →
-        //     upstream dedupes by PERSON, not by account: a second account
-        //     on the same machine identity already took this round's grant.
-        //     The row even disappears from that account's list afterwards.
-        body := m
-        if data, ok := m["data"].(map[string]any); ok {
-                body = data
-        }
-        statusValue, _ := body["status"].(string)
-        failureCode, _ := body["failureCode"].(string)
-        // v0.8.40: coupon/redemption campaigns answer CLAIMED with a
-        // redemptionCode instead of a credits benefit (hub capture:
-        // act-20260928-620 奶茶免单卡; "仅 CLAIMED 无码 = 发放确认中").
-        // Surfacing the code is the whole point of claiming such a row — and
-        // the caller must know NO credits moved, or the panel invites
-        // "签到成功但积分无变化" bug reports.
-        redemptionCode, _ := body["redemptionCode"].(string)
-        benefitKind, _ := campaignBenefitKindOf(body)
-        if (strings.EqualFold(statusValue, "CLAIMED") || strings.EqualFold(statusValue, "GRANTED") || strings.EqualFold(statusValue, "SUCCESS")) && !strings.EqualFold(statusValue, "BLOCKED") {
-                if replayed, _ := body["replayed"].(bool); replayed {
-                        return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
-                }
-                // v0.8.39: the bypass-list probe claims with a synthetic row
-                // that carries no benefit — read the face value from the claim
-                // response itself (hub: benefit.amount) so the panel shows the
-                // real +N instead of 0.
-                amount := campaignCredit(c)
-                if amount == 0 {
-                        if b, ok := body["benefit"].(map[string]any); ok {
-                                if a, ok2 := b["amount"].(float64); ok2 && a > 0 {
-                                        amount = int64(a)
-                                }
-                        }
-                }
-                // v0.8.40: a redemption-code reward is NOT a credits grant.
-                // Face value 0 + explicit kind so the aggregation in
-                // performCampaignCheckin and the panel render it honestly.
-                if strings.TrimSpace(redemptionCode) != "" {
-                        return map[string]any{
-                                "success":        true,
-                                "result":         "CLAIMED",
-                                "reward_credits": float64(0),
-                                "rewardCredits":  float64(0),
-                                "benefit_kind":   "REDEMPTION_CODE",
-                                "redemption_code": redemptionCode,
-                                "campaign_id":    c.CampaignID,
-                                "campaign_key":   c.CampaignKey,
-                                "campaign_title": campaignTitle(c),
-                                "message":        "已领取兑换券：" + redemptionCode + "（非积分奖励，请到官方活动页兑换）",
-                        }, nil
-                }
-                if strings.EqualFold(statusValue, "CLAIMED") && amount == 0 && strings.EqualFold(benefitKind, "REDEMPTION_CODE") {
-                        // Grant confirmed but the code not minted yet — hub's
-                        // "confirming" state. Success, with an explicit lag note.
-                        return map[string]any{
-                                "success":         true,
-                                "result":          "CLAIMED",
-                                "reward_credits":  float64(0),
-                                "rewardCredits":   float64(0),
-                                "benefit_kind":    "REDEMPTION_CODE",
-                                "redemption_code": "",
-                                "campaign_id":     c.CampaignID,
-                                "campaign_key":    c.CampaignKey,
-                                "campaign_title":  campaignTitle(c),
-                                "message":         "兑换券已确认领取，兑换码发放中（稍后在官方活动页查看）",
-                        }, nil
-                }
-                return map[string]any{
-                        "success":        true,
-                        "result":         "CLAIMED",
-                        "reward_credits": float64(amount),
-                        "rewardCredits":  float64(amount),
-                        "benefit_kind":   benefitKind,
-                        "campaign_id":    c.CampaignID,
-                        "campaign_key":   c.CampaignKey,
-                        "campaign_title": campaignTitle(c),
-                }, nil
-        }
-        if strings.EqualFold(statusValue, "BLOCKED") || strings.EqualFold(failureCode, "SAME_PERSON_ALREADY_CLAIMED") {
-                return map[string]any{
-                        "success":      false,
-                        "result":       "BLOCKED",
-                        "failure_code": failureCode,
-                        "message":      "同人已领取（同一设备身份下的其他账号本轮已领，服务端按人去重）",
-                }, nil
-        }
-        // v0.8.40 (hub taxonomy, field report "签到的积分概率性不成功"):
-        // the upstream ALSO answers 200 with an eligibility failureCode —
-        // REDEMPTION_CODE_OUT_OF_STOCK (the daily rounds are 先到先得 with a
-        // 10:00 UTC+8 refresh), ACHIEVEMENT_NOT_COMPLETED (new-user task rows),
-        // CAMPAIGN_NOT_ACTIVE, RISK_BLOCKED / RISK_DEPENDENCY_UNAVAILABLE.
-        // The old code dropped those into the generic {"upstream": m} bucket,
-        // which checkinOneAccount rendered as 上游未确认签到成功 — an error
-        // toast for a normal, retryable state. Typed verdicts now.
-        if msg, ok := campaignFailureCN[strings.ToUpper(failureCode)]; ok {
-                return map[string]any{
-                        "success":      false,
-                        "result":       "NOT_ELIGIBLE",
-                        "failure_code": strings.ToUpper(failureCode),
-                        "message":      msg,
-                }, nil
-        }
-        return map[string]any{"success": false, "upstream": m}, nil
+	req, err := http.NewRequest(
+		http.MethodPost,
+		billingBaseFor(sa)+"/sash/api/v1/me/campaigns/"+c.CampaignID+"/claim",
+		strings.NewReader("{}"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	// v0.12.76: bounded wait (billing.go parity).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+	billingHeaders(req, sa)
+	req.Header.Set("Content-Type", "application/json") // POST with body — official client's WebView JS sets this via fetch
+	mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
+	attachMachineIdentityHeaders(req, &mi)
+	resp, err := hostHTTPDo(req)
+	if err != nil {
+		return map[string]any{"success": false, "message": err.Error()}, nil
+	}
+	if resp.StatusCode >= 400 {
+		// v0.8.35: upstream also delivers the idempotent replay as an
+		// HTTP 409 carrying errorCode=ALREADY_CLAIMED/REPLAYED (hub
+		// capture) — normalize it like the 200 replayed body instead of
+		// surfacing a raw http error.
+		if resp.StatusCode == http.StatusConflict {
+			var e map[string]any
+			if json.Unmarshal(resp.Body, &e) == nil {
+				if ec, _ := e["errorCode"].(string); strings.Contains(strings.ToUpper(ec), "ALREADY") || strings.EqualFold(ec, "REPLAYED") {
+					return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
+				}
+			}
+		}
+		return map[string]any{"success": false, "message": fmt.Sprintf("http %d: %s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))}, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(resp.Body, &m); err != nil {
+		return nil, err
+	}
+	// The activity page accepts either a bare payload or a {data:{...}}
+	// envelope; the claim succeeded when status reports CLAIMED.
+	// replayed=true is the upstream's idempotent replay (the same claim
+	// landed earlier today — qoder2api capture): surface it as
+	// ALREADY_CLAIMED so the panel shows 今日已签 instead of a fresh
+	// success toast that would invite the user to claim again.
+	//
+	// v0.8.35: two more upstream verdicts, both live-verified by the
+	// qoder2api-hub capture:
+	//   - HTTP 409 with errorCode ALREADY_CLAIMED/REPLAYED → the same
+	//     idempotent replay, delivered as an error status instead of a
+	//     200 body;
+	//   - status=BLOCKED / failureCode=SAME_PERSON_ALREADY_CLAIMED →
+	//     upstream dedupes by PERSON, not by account: a second account
+	//     on the same machine identity already took this round's grant.
+	//     The row even disappears from that account's list afterwards.
+	body := m
+	if data, ok := m["data"].(map[string]any); ok {
+		body = data
+	}
+	statusValue, _ := body["status"].(string)
+	failureCode, _ := body["failureCode"].(string)
+	// v0.8.40: coupon/redemption campaigns answer CLAIMED with a
+	// redemptionCode instead of a credits benefit (hub capture:
+	// act-20260928-620 奶茶免单卡; "仅 CLAIMED 无码 = 发放确认中").
+	// Surfacing the code is the whole point of claiming such a row — and
+	// the caller must know NO credits moved, or the panel invites
+	// "签到成功但积分无变化" bug reports.
+	redemptionCode, _ := body["redemptionCode"].(string)
+	benefitKind, _ := campaignBenefitKindOf(body)
+	if (strings.EqualFold(statusValue, "CLAIMED") || strings.EqualFold(statusValue, "GRANTED") || strings.EqualFold(statusValue, "SUCCESS")) && !strings.EqualFold(statusValue, "BLOCKED") {
+		if replayed, _ := body["replayed"].(bool); replayed {
+			return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
+		}
+		// v0.8.39: the bypass-list probe claims with a synthetic row
+		// that carries no benefit — read the face value from the claim
+		// response itself (hub: benefit.amount) so the panel shows the
+		// real +N instead of 0.
+		amount := campaignCredit(c)
+		if amount == 0 {
+			if b, ok := body["benefit"].(map[string]any); ok {
+				if a, ok2 := b["amount"].(float64); ok2 && a > 0 {
+					amount = int64(a)
+				}
+			}
+		}
+		// v0.8.40: a redemption-code reward is NOT a credits grant.
+		// Face value 0 + explicit kind so the aggregation in
+		// performCampaignCheckin and the panel render it honestly.
+		if strings.TrimSpace(redemptionCode) != "" {
+			return map[string]any{
+				"success":         true,
+				"result":          "CLAIMED",
+				"reward_credits":  float64(0),
+				"rewardCredits":   float64(0),
+				"benefit_kind":    "REDEMPTION_CODE",
+				"redemption_code": redemptionCode,
+				"campaign_id":     c.CampaignID,
+				"campaign_key":    c.CampaignKey,
+				"campaign_title":  campaignTitle(c),
+				"message":         "已领取兑换券：" + redemptionCode + "（非积分奖励，请到官方活动页兑换）",
+			}, nil
+		}
+		if strings.EqualFold(statusValue, "CLAIMED") && amount == 0 && strings.EqualFold(benefitKind, "REDEMPTION_CODE") {
+			// Grant confirmed but the code not minted yet — hub's
+			// "confirming" state. Success, with an explicit lag note.
+			return map[string]any{
+				"success":         true,
+				"result":          "CLAIMED",
+				"reward_credits":  float64(0),
+				"rewardCredits":   float64(0),
+				"benefit_kind":    "REDEMPTION_CODE",
+				"redemption_code": "",
+				"campaign_id":     c.CampaignID,
+				"campaign_key":    c.CampaignKey,
+				"campaign_title":  campaignTitle(c),
+				"message":         "兑换券已确认领取，兑换码发放中（稍后在官方活动页查看）",
+			}, nil
+		}
+		return map[string]any{
+			"success":        true,
+			"result":         "CLAIMED",
+			"reward_credits": float64(amount),
+			"rewardCredits":  float64(amount),
+			"benefit_kind":   benefitKind,
+			"campaign_id":    c.CampaignID,
+			"campaign_key":   c.CampaignKey,
+			"campaign_title": campaignTitle(c),
+		}, nil
+	}
+	if strings.EqualFold(statusValue, "BLOCKED") || strings.EqualFold(failureCode, "SAME_PERSON_ALREADY_CLAIMED") {
+		return map[string]any{
+			"success":      false,
+			"result":       "BLOCKED",
+			"failure_code": failureCode,
+			"message":      "同人已领取（同一设备身份下的其他账号本轮已领，服务端按人去重）",
+		}, nil
+	}
+	// v0.8.40 (hub taxonomy, field report "签到的积分概率性不成功"):
+	// the upstream ALSO answers 200 with an eligibility failureCode —
+	// REDEMPTION_CODE_OUT_OF_STOCK (the daily rounds are 先到先得 with a
+	// 10:00 UTC+8 refresh), ACHIEVEMENT_NOT_COMPLETED (new-user task rows),
+	// CAMPAIGN_NOT_ACTIVE, RISK_BLOCKED / RISK_DEPENDENCY_UNAVAILABLE.
+	// The old code dropped those into the generic {"upstream": m} bucket,
+	// which checkinOneAccount rendered as 上游未确认签到成功 — an error
+	// toast for a normal, retryable state. Typed verdicts now.
+	if msg, ok := campaignFailureCN[strings.ToUpper(failureCode)]; ok {
+		return map[string]any{
+			"success":      false,
+			"result":       "NOT_ELIGIBLE",
+			"failure_code": strings.ToUpper(failureCode),
+			"message":      msg,
+		}, nil
+	}
+	return map[string]any{"success": false, "upstream": m}, nil
 }
 
 // performCampaignCheckin claims one Intl campaign and normalizes the result
@@ -916,185 +1021,185 @@ func claimCampaignByID(sa *storedAuth, c *campaign) (map[string]any, error) {
 // returns a typed result=NOTHING_CLAIMABLE with a row-level diagnosis, and
 // checkinOneAccount renders it as a skip.
 func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
-        // v0.8.39 (hub parity): the official client re-runs its native bridge
-        // before every claim path — an identity that rotated past its
-        // acceptance window silently filters the device-targeted rows the
-        // claim depends on. Native identities re-run the bridge (~3.7s);
-        // derived ones just recompute (pure CPU, nothing to rotate).
-        machineIdentityFor(authRegion(sa), sa.Account.UID, true)
-        status, err := fetchCampaignStatus(sa)
-        if err != nil {
-                return nil, err
-        }
-        // v0.8.40: the check-in is a MULTI-claim pass now. An account can
-        // hold a credits row (the daily +100) AND a coupon row at once, and
-        // claiming only the first stranded the rest. Claim every claimable
-        // row, credits-kind first, and aggregate: earned credits, redemption
-        // codes, and per-row verdicts. The aggregate decides the result.
-        rows := claimableCampaigns(status)
-        if len(rows) == 0 {
-                if claimedCampaign(status) != nil {
-                        return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
-                }
-                // v0.8.40 (hub taxonomy): when the LIST itself explains the
-                // state (out-of-stock / achievement-gated), that typed verdict
-                // outranks the generic nothing-claimable diagnosis — the panel
-                // gets "名额已发完，次日 10:00 后自动重试" instead of an error.
-                if v, ok := campaignListVerdict(status); ok {
-                        return v, nil
-                }
-                // v0.8.39: a hidden row is not proof of nothing-to-claim —
-                // POST the last-seen daily campaign id once and let upstream
-                // hand down its verdict (probeHiddenRound's doc block). Only a
-                // conclusive verdict short-circuits; inconclusive results
-                // fall through to the list-based diagnosis.
-                //
-                // v0.8.41 (issue #27 finding-3 parity, field report
-                // act-20260901-922 / act-20260901-493): before probing, attempt the
-                // CLAIMABLE VIEW_DETAILS rows themselves — the official client does
-                // not stop at CLAIM_BENEFIT rows, the captured launch flow POSTs the
-                // same claim on a VIEW_DETAILS (bogo) row and gets 200 CLAIMED. The
-                // old code only wrote 需在官方活动页完成领取 next to those rows,
-                // stranding the account's one visible benefit behind a manual chore.
-                landed, notes := attemptViewDetailsClaims(sa, status)
-                if landed != nil {
-                        return landed, nil
-                }
-                probeRes := probeHiddenRound(sa)
-                if probeRes != nil {
-                        if success, _ := probeRes["success"].(bool); success {
-                                mergeVerdictNotes(probeRes, notes)
-                                return probeRes, nil
-                        }
-                        switch r, _ := probeRes["result"].(string); r {
-                        case "ALREADY_CLAIMED", "BLOCKED":
-                                mergeVerdictNotes(probeRes, notes)
-                                return probeRes, nil
-                        case "NOT_ELIGIBLE":
-                                // v0.8.41: this typed verdict used to be discarded here —
-                                // the user saw the generic idle line while upstream had
-                                // just answered the real reason (round ended / out of
-                                // stock). Return it typed, with the VIEW_DETAILS verdicts
-                                // and the list diagnosis folded into the message.
-                                msg, _ := probeRes["message"].(string)
-                                all := make([]string, 0, 4)
-                                if strings.TrimSpace(msg) != "" {
-                                        all = append(all, msg)
-                                }
-                                all = append(all, notes...)
-                                all = append(all, campaignIdleDiagnosis(status, sa))
-                                probeRes["message"] = strings.Join(all, "；")
-                                return probeRes, nil
-                        }
-                }
-                diag := campaignIdleDiagnosis(status, sa)
-                if len(notes) > 0 {
-                        diag += "；" + strings.Join(notes, "；")
-                }
-                return map[string]any{
-                        "success": false,
-                        "result":  "NOTHING_CLAIMABLE",
-                        "message": diag,
-                }, nil
-        }
-        earned := float64(0)
-        creditsClaimed := false
-        codes := make([]string, 0, 2)
-        notes := make([]string, 0, 3)
-        blocked, already := false, false
-        failureCode := ""
-        for _, c := range rows {
-                res, err := claimCampaignByID(sa, c)
-                if err != nil {
-                        notes = append(notes, campaignTitle(c)+": "+err.Error())
-                        continue
-                }
-                if success, _ := res["success"].(bool); success {
-                        if rc, ok := res["reward_credits"].(float64); ok && rc > 0 {
-                                earned += rc
-                                creditsClaimed = true
-                        }
-                        if code, ok := res["redemption_code"].(string); ok && strings.TrimSpace(code) != "" {
-                                codes = append(codes, code)
-                        } else if kind, _ := res["benefit_kind"].(string); strings.EqualFold(kind, "REDEMPTION_CODE") {
-                                notes = append(notes, campaignTitle(c)+"：兑换码发放中")
-                        }
-                        continue
-                }
-                switch r, _ := res["result"].(string); r {
-                case "ALREADY_CLAIMED":
-                        already = true
-                case "BLOCKED":
-                        blocked = true
-                case "NOT_ELIGIBLE":
-                        if msg, ok := res["message"].(string); ok && msg != "" {
-                                notes = append(notes, msg)
-                        }
-                        if fc, ok := res["failure_code"].(string); ok && fc != "" && failureCode == "" {
-                                failureCode = fc
-                        }
-                default:
-                        if msg, ok := res["message"].(string); ok && msg != "" {
-                                notes = append(notes, campaignTitle(c)+": "+msg)
-                        }
-                }
-        }
-        if creditsClaimed {
-                out := map[string]any{
-                        "success":        true,
-                        "result":         "CLAIMED",
-                        "reward_credits": earned,
-                        "rewardCredits":  earned,
-                }
-                if len(codes) > 0 {
-                        out["redemption_codes"] = codes
-                }
-                if len(notes) > 0 {
-                        out["message"] = strings.Join(notes, "；")
-                }
-                return out, nil
-        }
-        if len(codes) > 0 {
-                // Only coupon rows landed — a success that moves NO credits.
-                out := map[string]any{
-                        "success":         true,
-                        "result":          "CLAIMED",
-                        "reward_credits":  float64(0),
-                        "rewardCredits":   float64(0),
-                        "benefit_kind":    "REDEMPTION_CODE",
-                        "redemption_code": codes[0],
-                        "message":         "已领取兑换券：" + strings.Join(codes, "、") + "（非积分奖励，请到官方活动页兑换）",
-                }
-                if len(notes) > 0 {
-                        out["message"] = out["message"].(string) + "；" + strings.Join(notes, "；")
-                }
-                return out, nil
-        }
-        if blocked {
-                return map[string]any{
-                        "success": false,
-                        "result":  "BLOCKED",
-                        "message": "同人已领取（同一设备身份下的其他账号本轮已领，服务端按人去重）",
-                }, nil
-        }
-        if already {
-                return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
-        }
-        if len(notes) > 0 {
-                // Every row answered with an eligibility verdict — surface the
-                // first as the typed result instead of a bare "nothing" line.
-                return map[string]any{
-                        "success":      false,
-                        "result":       "NOT_ELIGIBLE",
-                        "failure_code": failureCode,
-                        "message":      strings.Join(notes, "；"),
-                }, nil
-        }
-        return map[string]any{
-                "success": false,
-                "result":  "NOTHING_CLAIMABLE",
-                "message": campaignIdleDiagnosis(status, sa),
-        }, nil
+	// v0.8.39 (hub parity): the official client re-runs its native bridge
+	// before every claim path — an identity that rotated past its
+	// acceptance window silently filters the device-targeted rows the
+	// claim depends on. Native identities re-run the bridge (~3.7s);
+	// derived ones just recompute (pure CPU, nothing to rotate).
+	machineIdentityFor(authRegion(sa), sa.Account.UID, true)
+	status, err := fetchCampaignStatus(sa)
+	if err != nil {
+		return nil, err
+	}
+	// v0.8.40: the check-in is a MULTI-claim pass now. An account can
+	// hold a credits row (the daily +100) AND a coupon row at once, and
+	// claiming only the first stranded the rest. Claim every claimable
+	// row, credits-kind first, and aggregate: earned credits, redemption
+	// codes, and per-row verdicts. The aggregate decides the result.
+	rows := claimableCampaigns(status)
+	if len(rows) == 0 {
+		if claimedCampaign(status) != nil {
+			return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
+		}
+		// v0.8.40 (hub taxonomy): when the LIST itself explains the
+		// state (out-of-stock / achievement-gated), that typed verdict
+		// outranks the generic nothing-claimable diagnosis — the panel
+		// gets "名额已发完，次日 10:00 后自动重试" instead of an error.
+		if v, ok := campaignListVerdict(status); ok {
+			return v, nil
+		}
+		// v0.8.39: a hidden row is not proof of nothing-to-claim —
+		// POST the last-seen daily campaign id once and let upstream
+		// hand down its verdict (probeHiddenRound's doc block). Only a
+		// conclusive verdict short-circuits; inconclusive results
+		// fall through to the list-based diagnosis.
+		//
+		// v0.8.41 (issue #27 finding-3 parity, field report
+		// act-20260901-922 / act-20260901-493): before probing, attempt the
+		// CLAIMABLE VIEW_DETAILS rows themselves — the official client does
+		// not stop at CLAIM_BENEFIT rows, the captured launch flow POSTs the
+		// same claim on a VIEW_DETAILS (bogo) row and gets 200 CLAIMED. The
+		// old code only wrote 需在官方活动页完成领取 next to those rows,
+		// stranding the account's one visible benefit behind a manual chore.
+		landed, notes := attemptViewDetailsClaims(sa, status)
+		if landed != nil {
+			return landed, nil
+		}
+		probeRes := probeHiddenRound(sa)
+		if probeRes != nil {
+			if success, _ := probeRes["success"].(bool); success {
+				mergeVerdictNotes(probeRes, notes)
+				return probeRes, nil
+			}
+			switch r, _ := probeRes["result"].(string); r {
+			case "ALREADY_CLAIMED", "BLOCKED":
+				mergeVerdictNotes(probeRes, notes)
+				return probeRes, nil
+			case "NOT_ELIGIBLE":
+				// v0.8.41: this typed verdict used to be discarded here —
+				// the user saw the generic idle line while upstream had
+				// just answered the real reason (round ended / out of
+				// stock). Return it typed, with the VIEW_DETAILS verdicts
+				// and the list diagnosis folded into the message.
+				msg, _ := probeRes["message"].(string)
+				all := make([]string, 0, 4)
+				if strings.TrimSpace(msg) != "" {
+					all = append(all, msg)
+				}
+				all = append(all, notes...)
+				all = append(all, campaignIdleDiagnosis(status, sa))
+				probeRes["message"] = strings.Join(all, "；")
+				return probeRes, nil
+			}
+		}
+		diag := campaignIdleDiagnosis(status, sa)
+		if len(notes) > 0 {
+			diag += "；" + strings.Join(notes, "；")
+		}
+		return map[string]any{
+			"success": false,
+			"result":  "NOTHING_CLAIMABLE",
+			"message": diag,
+		}, nil
+	}
+	earned := float64(0)
+	creditsClaimed := false
+	codes := make([]string, 0, 2)
+	notes := make([]string, 0, 3)
+	blocked, already := false, false
+	failureCode := ""
+	for _, c := range rows {
+		res, err := claimCampaignByID(sa, c)
+		if err != nil {
+			notes = append(notes, campaignTitle(c)+": "+err.Error())
+			continue
+		}
+		if success, _ := res["success"].(bool); success {
+			if rc, ok := res["reward_credits"].(float64); ok && rc > 0 {
+				earned += rc
+				creditsClaimed = true
+			}
+			if code, ok := res["redemption_code"].(string); ok && strings.TrimSpace(code) != "" {
+				codes = append(codes, code)
+			} else if kind, _ := res["benefit_kind"].(string); strings.EqualFold(kind, "REDEMPTION_CODE") {
+				notes = append(notes, campaignTitle(c)+"：兑换码发放中")
+			}
+			continue
+		}
+		switch r, _ := res["result"].(string); r {
+		case "ALREADY_CLAIMED":
+			already = true
+		case "BLOCKED":
+			blocked = true
+		case "NOT_ELIGIBLE":
+			if msg, ok := res["message"].(string); ok && msg != "" {
+				notes = append(notes, msg)
+			}
+			if fc, ok := res["failure_code"].(string); ok && fc != "" && failureCode == "" {
+				failureCode = fc
+			}
+		default:
+			if msg, ok := res["message"].(string); ok && msg != "" {
+				notes = append(notes, campaignTitle(c)+": "+msg)
+			}
+		}
+	}
+	if creditsClaimed {
+		out := map[string]any{
+			"success":        true,
+			"result":         "CLAIMED",
+			"reward_credits": earned,
+			"rewardCredits":  earned,
+		}
+		if len(codes) > 0 {
+			out["redemption_codes"] = codes
+		}
+		if len(notes) > 0 {
+			out["message"] = strings.Join(notes, "；")
+		}
+		return out, nil
+	}
+	if len(codes) > 0 {
+		// Only coupon rows landed — a success that moves NO credits.
+		out := map[string]any{
+			"success":         true,
+			"result":          "CLAIMED",
+			"reward_credits":  float64(0),
+			"rewardCredits":   float64(0),
+			"benefit_kind":    "REDEMPTION_CODE",
+			"redemption_code": codes[0],
+			"message":         "已领取兑换券：" + strings.Join(codes, "、") + "（非积分奖励，请到官方活动页兑换）",
+		}
+		if len(notes) > 0 {
+			out["message"] = out["message"].(string) + "；" + strings.Join(notes, "；")
+		}
+		return out, nil
+	}
+	if blocked {
+		return map[string]any{
+			"success": false,
+			"result":  "BLOCKED",
+			"message": "同人已领取（同一设备身份下的其他账号本轮已领，服务端按人去重）",
+		}, nil
+	}
+	if already {
+		return map[string]any{"success": false, "result": "ALREADY_CLAIMED"}, nil
+	}
+	if len(notes) > 0 {
+		// Every row answered with an eligibility verdict — surface the
+		// first as the typed result instead of a bare "nothing" line.
+		return map[string]any{
+			"success":      false,
+			"result":       "NOT_ELIGIBLE",
+			"failure_code": failureCode,
+			"message":      strings.Join(notes, "；"),
+		}, nil
+	}
+	return map[string]any{
+		"success": false,
+		"result":  "NOTHING_CLAIMABLE",
+		"message": campaignIdleDiagnosis(status, sa),
+	}, nil
 }
 
 // isRedemptionKind reports whether a benefit kind is a coupon/redemption
@@ -1110,34 +1215,34 @@ func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
 // captured body, and the panel names it as a closed campaign instead of
 // offering the claim_unverified opt-in on a guaranteed no.
 func rewardReadDead(err error) bool {
-        if err == nil {
-                return false
-        }
-        return strings.Contains(err.Error(), "GRANT_NOT_FOUND")
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "GRANT_NOT_FOUND")
 }
 
 func isRedemptionKind(kind string) bool {
-        switch strings.ToUpper(strings.TrimSpace(kind)) {
-        case "REDEMPTION_CODE", "REDEMPTION_COUPON", "COUPON":
-                return true
-        }
-        return false
+	switch strings.ToUpper(strings.TrimSpace(kind)) {
+	case "REDEMPTION_CODE", "REDEMPTION_COUPON", "COUPON":
+		return true
+	}
+	return false
 }
 
 // mergeVerdictNotes appends per-row verdict notes to a result's message
 // without clobbering an existing one (probe results may already carry an
 // upstream message).
 func mergeVerdictNotes(res map[string]any, notes []string) {
-        if res == nil || len(notes) == 0 {
-                return
-        }
-        m, _ := res["message"].(string)
-        m = strings.TrimSpace(m)
-        if m == "" {
-                res["message"] = strings.Join(notes, "；")
-                return
-        }
-        res["message"] = m + "；" + strings.Join(notes, "；")
+	if res == nil || len(notes) == 0 {
+		return
+	}
+	m, _ := res["message"].(string)
+	m = strings.TrimSpace(m)
+	if m == "" {
+		res["message"] = strings.Join(notes, "；")
+		return
+	}
+	res["message"] = m + "；" + strings.Join(notes, "；")
 }
 
 // attemptViewDetailsClaims (v0.8.41) claims the CLAIMABLE VIEW_DETAILS rows
@@ -1162,122 +1267,122 @@ func mergeVerdictNotes(res map[string]any, notes []string) {
 // aggregate when a claim actually granted credits or produced a code, nil
 // otherwise; notes carry one verdict per attempted row for the diagnosis.
 func attemptViewDetailsClaims(sa *storedAuth, status *campaignStatusResponse) (map[string]any, []string) {
-        if status == nil {
-                return nil, nil
-        }
-        const maxRows = 5
-        notes := make([]string, 0, 2)
-        earned := float64(0)
-        creditsClaimed := false
-        codes := make([]string, 0, 2)
-        attempted := 0
-        now := time.Now().Unix()
-        for i := range status.Campaigns {
-                if attempted >= maxRows {
-                        break
-                }
-                c := &status.Campaigns[i]
-                if !strings.EqualFold(strings.ToUpper(strings.TrimSpace(c.ActionType)), "VIEW_DETAILS") {
-                        continue
-                }
-                if !strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
-                        continue
-                }
-                if (c.StartAt > 0 && now < c.StartAt) || (c.EndAt > 0 && now > c.EndAt) {
-                        continue
-                }
-                attempted++
-                kind, amount := "", int64(0)
-                body, rerr := fetchCampaignReward(sa, c.CampaignID)
-                if rerr == nil {
-                        kind, amount = rewardBenefit(body)
-                }
-                kUpper := strings.ToUpper(strings.TrimSpace(kind))
-                readable := rerr == nil && (kUpper == "CREDITS" || isRedemptionKind(kUpper) || (kUpper == "" && amount > 0))
-                if rerr == nil && !readable && kUpper != "" {
-                        // Subscription/other-shaped reward — the Pro flow owns
-                        // these; check-in must not ride a subscription claim.
-                        notes = append(notes, fmt.Sprintf("%s（奖励类型 %s，归 Pro/订阅流程，签到不代领）", c.CampaignKey, kind))
-                        continue
-                }
-                if !readable {
-                        // v0.8.43: GRANT_NOT_FOUND is the upstream's authoritative
-                        // "no grant record for this account" — a dead round, not a
-                        // face-value problem. Name it and move on; the opt-in hint
-                        // would only promise a claim the server already refused.
-                        if rerr != nil && rewardReadDead(rerr) {
-                                notes = append(notes, fmt.Sprintf("%s（活动已失效：上游 GRANT_NOT_FOUND，本账号无此活动的发放记录）", c.CampaignKey))
-                                continue
-                        }
-                        if !claimUnverifiedEnabled() {
-                                if rerr != nil {
-                                        notes = append(notes, fmt.Sprintf("%s（面值不可读：%s；配置 claim_unverified 后签到可代领）", c.CampaignKey, truncateRedacted(rerr.Error(), 80)))
-                                } else {
-                                        notes = append(notes, fmt.Sprintf("%s（reward 无面值；配置 claim_unverified 后签到可代领）", c.CampaignKey))
-                                }
-                                continue
-                        }
-                }
-                res, err := claimCampaignByID(sa, c)
-                if err != nil {
-                        notes = append(notes, campaignTitle(c)+": "+err.Error())
-                        continue
-                }
-                if success, _ := res["success"].(bool); success {
-                        rc, _ := res["reward_credits"].(float64)
-                        if rc > 0 {
-                                earned += rc
-                                creditsClaimed = true
-                        } else if amount > 0 && (kUpper == "CREDITS" || kUpper == "") {
-                                // The reward probe knew the face value but the
-                                // claim body carried none (v0.8.39 synthetic-row
-                                // case) — trust the read-only probe.
-                                earned += float64(amount)
-                                creditsClaimed = true
-                        }
-                        if code, ok := res["redemption_code"].(string); ok && strings.TrimSpace(code) != "" {
-                                codes = append(codes, code)
-                        }
-                        continue
-                }
-                switch r, _ := res["result"].(string); r {
-                case "ALREADY_CLAIMED":
-                        notes = append(notes, campaignTitle(c)+"：已领取过")
-                case "BLOCKED":
-                        notes = append(notes, campaignTitle(c)+"：同人已领取（服务端按人去重）")
-                case "NOT_ELIGIBLE":
-                        if m, ok := res["message"].(string); ok && m != "" {
-                                notes = append(notes, campaignTitle(c)+"："+m)
-                        } else if fc, ok := res["failure_code"].(string); ok && fc != "" {
-                                notes = append(notes, campaignTitle(c)+"：暂不可领取（"+fc+"）")
-                        }
-                default:
-                        if m, ok := res["message"].(string); ok && m != "" {
-                                notes = append(notes, campaignTitle(c)+": "+truncateRedacted(m, 100))
-                        } else {
-                                notes = append(notes, campaignTitle(c)+"：领取未成功")
-                        }
-                }
-        }
-        if !creditsClaimed && len(codes) == 0 {
-                return nil, notes
-        }
-        out := map[string]any{
-                "success":        true,
-                "result":         "CLAIMED",
-                "reward_credits": earned,
-                "rewardCredits":  earned,
-        }
-        if len(codes) > 0 {
-                out["redemption_code"] = codes[0]
-                out["redemption_codes"] = codes
-                out["benefit_kind"] = "REDEMPTION_CODE"
-                out["message"] = "已领取兑换券：" + strings.Join(codes, "、") + "（非积分奖励，请到官方活动页兑换）"
-        }
-        if len(notes) > 0 {
-                mergeVerdictNotes(out, notes)
-        }
-        return out, notes
+	if status == nil {
+		return nil, nil
+	}
+	const maxRows = 5
+	notes := make([]string, 0, 2)
+	earned := float64(0)
+	creditsClaimed := false
+	codes := make([]string, 0, 2)
+	attempted := 0
+	now := time.Now().Unix()
+	for i := range status.Campaigns {
+		if attempted >= maxRows {
+			break
+		}
+		c := &status.Campaigns[i]
+		if !strings.EqualFold(strings.ToUpper(strings.TrimSpace(c.ActionType)), "VIEW_DETAILS") {
+			continue
+		}
+		if !strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
+			continue
+		}
+		if (c.StartAt > 0 && now < c.StartAt) || (c.EndAt > 0 && now > c.EndAt) {
+			continue
+		}
+		attempted++
+		kind, amount := "", int64(0)
+		body, rerr := fetchCampaignReward(sa, c.CampaignID)
+		if rerr == nil {
+			kind, amount = rewardBenefit(body)
+		}
+		kUpper := strings.ToUpper(strings.TrimSpace(kind))
+		readable := rerr == nil && (kUpper == "CREDITS" || isRedemptionKind(kUpper) || (kUpper == "" && amount > 0))
+		if rerr == nil && !readable && kUpper != "" {
+			// Subscription/other-shaped reward — the Pro flow owns
+			// these; check-in must not ride a subscription claim.
+			notes = append(notes, fmt.Sprintf("%s（奖励类型 %s，归 Pro/订阅流程，签到不代领）", c.CampaignKey, kind))
+			continue
+		}
+		if !readable {
+			// v0.8.43: GRANT_NOT_FOUND is the upstream's authoritative
+			// "no grant record for this account" — a dead round, not a
+			// face-value problem. Name it and move on; the opt-in hint
+			// would only promise a claim the server already refused.
+			if rerr != nil && rewardReadDead(rerr) {
+				notes = append(notes, fmt.Sprintf("%s（活动已失效：上游 GRANT_NOT_FOUND，本账号无此活动的发放记录）", c.CampaignKey))
+				continue
+			}
+			if !claimUnverifiedEnabled() {
+				if rerr != nil {
+					notes = append(notes, fmt.Sprintf("%s（面值不可读：%s；配置 claim_unverified 后签到可代领）", c.CampaignKey, truncateRedacted(rerr.Error(), 80)))
+				} else {
+					notes = append(notes, fmt.Sprintf("%s（reward 无面值；配置 claim_unverified 后签到可代领）", c.CampaignKey))
+				}
+				continue
+			}
+		}
+		res, err := claimCampaignByID(sa, c)
+		if err != nil {
+			notes = append(notes, campaignTitle(c)+": "+err.Error())
+			continue
+		}
+		if success, _ := res["success"].(bool); success {
+			rc, _ := res["reward_credits"].(float64)
+			if rc > 0 {
+				earned += rc
+				creditsClaimed = true
+			} else if amount > 0 && (kUpper == "CREDITS" || kUpper == "") {
+				// The reward probe knew the face value but the
+				// claim body carried none (v0.8.39 synthetic-row
+				// case) — trust the read-only probe.
+				earned += float64(amount)
+				creditsClaimed = true
+			}
+			if code, ok := res["redemption_code"].(string); ok && strings.TrimSpace(code) != "" {
+				codes = append(codes, code)
+			}
+			continue
+		}
+		switch r, _ := res["result"].(string); r {
+		case "ALREADY_CLAIMED":
+			notes = append(notes, campaignTitle(c)+"：已领取过")
+		case "BLOCKED":
+			notes = append(notes, campaignTitle(c)+"：同人已领取（服务端按人去重）")
+		case "NOT_ELIGIBLE":
+			if m, ok := res["message"].(string); ok && m != "" {
+				notes = append(notes, campaignTitle(c)+"："+m)
+			} else if fc, ok := res["failure_code"].(string); ok && fc != "" {
+				notes = append(notes, campaignTitle(c)+"：暂不可领取（"+fc+"）")
+			}
+		default:
+			if m, ok := res["message"].(string); ok && m != "" {
+				notes = append(notes, campaignTitle(c)+": "+truncateRedacted(m, 100))
+			} else {
+				notes = append(notes, campaignTitle(c)+"：领取未成功")
+			}
+		}
+	}
+	if !creditsClaimed && len(codes) == 0 {
+		return nil, notes
+	}
+	out := map[string]any{
+		"success":        true,
+		"result":         "CLAIMED",
+		"reward_credits": earned,
+		"rewardCredits":  earned,
+	}
+	if len(codes) > 0 {
+		out["redemption_code"] = codes[0]
+		out["redemption_codes"] = codes
+		out["benefit_kind"] = "REDEMPTION_CODE"
+		out["message"] = "已领取兑换券：" + strings.Join(codes, "、") + "（非积分奖励，请到官方活动页兑换）"
+	}
+	if len(notes) > 0 {
+		mergeVerdictNotes(out, notes)
+	}
+	return out, notes
 }
 
 // campaignIdleDiagnosis explains WHY no claimable row is visible, in one
@@ -1290,38 +1395,38 @@ func attemptViewDetailsClaims(sa *storedAuth, status *campaignStatusResponse) (m
 // first-login grants 300+100 credits and the +1800 Pro pack is no longer
 // delivered (user field report 2026-10-01).
 func campaignIdleDiagnosis(status *campaignStatusResponse, sa *storedAuth) string {
-        if status == nil || len(status.Campaigns) == 0 {
-                return "今日暂无可领取权益（活动列表为空）" + machineIdentityHint(sa)
-        }
-        reasons := map[string]string{
-                "REDEMPTION_CODE_OUT_OF_STOCK": "名额已发完（次日 10:00 后可再试）",
-                "ACHIEVEMENT_NOT_COMPLETED":    "需先在官方桌面端完成新人任务",
-                "RISK_BLOCKED":                 "风控拦截",
-                "CAMPAIGN_NOT_ACTIVE":          "活动未开始或已结束",
-        }
-        parts := make([]string, 0, 2)
-        locked := make([]string, 0, 2)
-        for i := range status.Campaigns {
-                c := &status.Campaigns[i]
-                if strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
-                        if at := strings.ToUpper(strings.TrimSpace(c.ActionType)); at != "" && at != "CLAIM_BENEFIT" {
-                                parts = append(parts, fmt.Sprintf("%s（%s，需在官方活动页完成领取）", c.CampaignKey, c.ActionType))
-                        }
-                        continue
-                }
-                if r := reasons[strings.ToUpper(strings.TrimSpace(c.UnavailableReason))]; r != "" {
-                        locked = append(locked, fmt.Sprintf("%s（%s）", c.CampaignKey, r))
-                }
-        }
-        segs := make([]string, 0, 3)
-        if len(parts) > 0 {
-                segs = append(segs, "存在需活动页领取的活动行："+strings.Join(parts, "、"))
-        }
-        if len(locked) > 0 {
-                segs = append(segs, "另有暂不可领活动："+strings.Join(locked, "、"))
-        }
-        if len(segs) == 0 {
-                return "今日暂无可领取权益" + machineIdentityHint(sa)
-        }
-        return "今日暂无可直接签领的权益；" + strings.Join(segs, "；") + machineIdentityHint(sa)
+	if status == nil || len(status.Campaigns) == 0 {
+		return "今日暂无可领取权益（活动列表为空）" + machineIdentityHint(sa)
+	}
+	reasons := map[string]string{
+		"REDEMPTION_CODE_OUT_OF_STOCK": "名额已发完（次日 10:00 后可再试）",
+		"ACHIEVEMENT_NOT_COMPLETED":    "需先在官方桌面端完成新人任务",
+		"RISK_BLOCKED":                 "风控拦截",
+		"CAMPAIGN_NOT_ACTIVE":          "活动未开始或已结束",
+	}
+	parts := make([]string, 0, 2)
+	locked := make([]string, 0, 2)
+	for i := range status.Campaigns {
+		c := &status.Campaigns[i]
+		if strings.EqualFold(c.ClaimStatus, "CLAIMABLE") {
+			if at := strings.ToUpper(strings.TrimSpace(c.ActionType)); at != "" && at != "CLAIM_BENEFIT" {
+				parts = append(parts, fmt.Sprintf("%s（%s，需在官方活动页完成领取）", c.CampaignKey, c.ActionType))
+			}
+			continue
+		}
+		if r := reasons[strings.ToUpper(strings.TrimSpace(c.UnavailableReason))]; r != "" {
+			locked = append(locked, fmt.Sprintf("%s（%s）", c.CampaignKey, r))
+		}
+	}
+	segs := make([]string, 0, 3)
+	if len(parts) > 0 {
+		segs = append(segs, "存在需活动页领取的活动行："+strings.Join(parts, "、"))
+	}
+	if len(locked) > 0 {
+		segs = append(segs, "另有暂不可领活动："+strings.Join(locked, "、"))
+	}
+	if len(segs) == 0 {
+		return "今日暂无可领取权益" + machineIdentityHint(sa)
+	}
+	return "今日暂无可直接签领的权益；" + strings.Join(segs, "；") + machineIdentityHint(sa)
 }
