@@ -7,6 +7,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -167,6 +168,7 @@ func billingHeaders(req *http.Request, sa *storedAuth) {
 	if sa.Auth.Domain != "" {
 		req.Header.Set("X-Domain", sa.Auth.Domain)
 	}
+	req.Header.Set("User-Agent", "CodeBuddy")
 	// Intl realm parity (applyRealmHeaders): the codebuddy.ai gateway expects
 	// the IDE client header set and no X-Requested-With. Without these the
 	// request is treated as a browser call and bounced (401).
@@ -236,13 +238,17 @@ func billingCallOnce(sa *storedAuth, path string, body any) (json.RawMessage, er
 		reader = bytes.NewReader([]byte("{}"))
 	}
 	base := billingBaseFor(sa)
-	req, err := http.NewRequest(http.MethodPost, base+path, reader)
+	// v0.9.48: bound the billing call with a context timeout so a hung
+	// codebuddy.ai gateway connection (field report: EOF after 6.84s)
+	// doesn't block the full 120s host-bridge ceiling. 15s is enough
+	// for any legitimate meter/checkin/plan call (all are fast JSON APIs).
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, reader)
 	if err != nil {
 		return nil, err
 	}
 	billingHeaders(req, sa)
-	// Route via host.http.do so request-log captures the call (v0.8.1 compliance:
-	// was sharedHTTPClient().Do — bypassed host transport policy + logging).
 	resp, err := hostHTTPDo(req)
 	if err != nil {
 		return nil, err
