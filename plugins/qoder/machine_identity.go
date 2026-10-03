@@ -22,9 +22,9 @@
 // The official desktop client obtains that identity by spawning its native
 // risk-identity bridge before every campaigns call:
 //
-//      <install>/resources/umid/runtime-info.exe prod --account-stdin
-//      stdin:  {"account": <uid>}
-//      stdout: {"machineToken","machineType","machineCode","vmInfo":{...}}
+//	<install>/resources/umid/runtime-info.exe prod --account-stdin
+//	stdin:  {"account": <uid>}
+//	stdout: {"machineToken","machineType","machineCode","vmInfo":{...}}
 //
 // The identity is MACHINE-level (every account id on the same host returns
 // the same values), rotates over time, and briefly-stale values are still
@@ -49,13 +49,13 @@
 //     "repPc.json" collectors and caches its state AES-encrypted in
 //     ~/.config/.locale_cfg (random 16-char keys + a millis timestamp).
 //   - Container-verified output format (9 runs, all observed values):
-//       machineToken  88 chars base64url, ALWAYS prefixed "P1gA"
-//                     = raw 66 bytes: fixed header 3f 58 00 + 63 random bytes
-//       machineType   18 hex chars, ALWAYS 8hex + "91" + 8hex
-//       machineCode   18 hex chars, ALWAYS 8hex + "00" + 8hex
-//       vmInfo        {"isVm":false,"brand":"None","percentage":0,"vmTypeCode":91}
-//                     (isVm is machine-local and dropped by the client's EUt
-//                     mapper — it never reaches the server as a header)
+//     machineToken  88 chars base64url, ALWAYS prefixed "P1gA"
+//     = raw 66 bytes: fixed header 3f 58 00 + 63 random bytes
+//     machineType   18 hex chars, ALWAYS 8hex + "91" + 8hex
+//     machineCode   18 hex chars, ALWAYS 8hex + "00" + 8hex
+//     vmInfo        {"isVm":false,"brand":"None","percentage":0,"vmTypeCode":91}
+//     (isVm is machine-local and dropped by the client's EUt
+//     mapper — it never reaches the server as a header)
 //   - Generation semantics: with the cache unreadable the bridge mints a FRESH
 //     random identity per run (verified: every run differs, even with a
 //     writable HOME; stability only comes from .locale_cfg decrypting). The
@@ -76,21 +76,21 @@
 package main
 
 import (
-        "bytes"
-        "context"
-        "crypto/md5"
-        "crypto/sha512"
-        "encoding/base64"
-        "encoding/json"
-        "fmt"
-        "net/http"
-        "os"
-        "os/exec"
-        "path/filepath"
-        "runtime"
-        "strings"
-        "sync"
-        "time"
+	"bytes"
+	"context"
+	"crypto/md5"
+	"crypto/sha512"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
 )
 
 // machineIdentity is one machine identity in the shape the campaigns
@@ -98,16 +98,16 @@ import (
 // bridge's virtualization verdict (the upstream explicitly excludes VMs
 // from new-user/device-targeted campaigns).
 type machineIdentity struct {
-        MachineID       string
-        MachineToken    string
-        MachineType     string
-        MachineCode     string
-        MachineOS       string
-        MachineHostname string
-        Source          string // "runtime-info" (native bridge) | "derived"
-        VMIsVM          bool
-        VMBrand         string
-        VMScore         int
+	MachineID       string
+	MachineToken    string
+	MachineType     string
+	MachineCode     string
+	MachineOS       string
+	MachineHostname string
+	Source          string // "runtime-info" (native bridge) | "derived"
+	VMIsVM          bool
+	VMBrand         string
+	VMScore         int
 }
 
 // machineIdentityTTL mirrors the hub capture: identities rotate, but
@@ -125,10 +125,10 @@ const runtimeInfoTimeout = 25 * time.Second
 // account JSON on stdin; linux gets [env] and stdin is ignored. The bool
 // reports whether stdin carries the account payload.
 func runtimeInfoArgs(goos string) ([]string, bool) {
-        if goos == "windows" || goos == "darwin" {
-                return []string{"prod", "--account-stdin"}, true
-        }
-        return []string{"prod"}, false
+	if goos == "windows" || goos == "darwin" {
+		return []string{"prod", "--account-stdin"}, true
+	}
+	return []string{"prod"}, false
 }
 
 // identitySourceNative is the Source value the official bridge produces.
@@ -137,23 +137,23 @@ func runtimeInfoArgs(goos string) ([]string, bool) {
 const identitySourceNative = "runtime-info"
 
 var (
-        // machineIdentityCache maps region → cache entry. Only NATIVE
-        // identities are stored: they are machine-level, so region-level
-        // caching is correct for them and for nothing else.
-        machineIdentityCache sync.Map
+	// machineIdentityCache maps region → cache entry. Only NATIVE
+	// identities are stored: they are machine-level, so region-level
+	// caching is correct for them and for nothing else.
+	machineIdentityCache sync.Map
 
-        // machineIdentityOverride is nil in production; tests set it to inject
-        // a fixed identity (e.g. a native-bridge one) without spawning any exe.
-        machineIdentityOverride *machineIdentity
+	// machineIdentityOverride is nil in production; tests set it to inject
+	// a fixed identity (e.g. a native-bridge one) without spawning any exe.
+	machineIdentityOverride *machineIdentity
 
-        // machineIdentityForceHook is nil in production; tests set it to count
-        // forced identity refreshes (the showCampaign=false self-heal).
-        machineIdentityForceHook func()
+	// machineIdentityForceHook is nil in production; tests set it to count
+	// forced identity refreshes (the showCampaign=false self-heal).
+	machineIdentityForceHook func()
 )
 
 type machineIdentityCacheEntry struct {
-        at time.Time
-        id machineIdentity
+	at time.Time
+	id machineIdentity
 }
 
 // machineIdentityFor returns the identity for one region, computing and
@@ -172,66 +172,66 @@ type machineIdentityCacheEntry struct {
 // Derived identities are pure-CPU derivations, so computing them per call
 // costs nothing; only native identities enter the cache.
 func machineIdentityFor(region, uid string, force bool) machineIdentity {
-        if machineIdentityOverride != nil {
-                return *machineIdentityOverride
-        }
-        now := time.Now()
-        if !force {
-                if v, ok := machineIdentityCache.Load(region); ok {
-                        if e, ok := v.(machineIdentityCacheEntry); ok && now.Sub(e.at) < machineIdentityTTL && e.id.Source == identitySourceNative {
-                                return e.id
-                        }
-                }
-        }
-        id := computeMachineIdentity(region, uid)
-        if id.Source == identitySourceNative {
-                machineIdentityCache.Store(region, machineIdentityCacheEntry{at: now, id: id})
-        }
-        return id
+	if machineIdentityOverride != nil {
+		return *machineIdentityOverride
+	}
+	now := time.Now()
+	if !force {
+		if v, ok := machineIdentityCache.Load(region); ok {
+			if e, ok := v.(machineIdentityCacheEntry); ok && now.Sub(e.at) < machineIdentityTTL && e.id.Source == identitySourceNative {
+				return e.id
+			}
+		}
+	}
+	id := computeMachineIdentity(region, uid)
+	if id.Source == identitySourceNative {
+		machineIdentityCache.Store(region, machineIdentityCacheEntry{at: now, id: id})
+	}
+	return id
 }
 
 // computeMachineIdentity tries the official native bridge first and falls
 // back to the stable per-uid derivation.
 func computeMachineIdentity(region, uid string) machineIdentity {
-        if exe := runtimeInfoExePath(region); exe != "" {
-                if id := nativeMachineIdentityFrom(exe, uid); id != nil {
-                        return *id
-                }
-        }
-        return derivedMachineIdentity(uid)
+	if exe := runtimeInfoExePath(region); exe != "" {
+		if id := nativeMachineIdentityFrom(exe, uid); id != nil {
+			return *id
+		}
+	}
+	return derivedMachineIdentity(uid)
 }
 
 // nativeMachineIdentityFrom runs the official bridge once and maps its JSON
 // onto machineIdentity. Returns nil when anything is missing — a partial
 // identity is worse than an honest derivation.
 func nativeMachineIdentityFrom(exe, uid string) *machineIdentity {
-        data := runRuntimeInfo(exe, uid)
-        if data == nil {
-                return nil
-        }
-        token := strings.TrimSpace(strField(data, "machineToken"))
-        mtype := strings.TrimSpace(strField(data, "machineType"))
-        code := strings.TrimSpace(strField(data, "machineCode"))
-        if token == "" || mtype == "" || code == "" {
-                return nil
-        }
-        id := &machineIdentity{
-                MachineToken: token,
-                MachineType:  mtype,
-                MachineCode:  code,
-                MachineID:    derivedMachineID(uid, "machine"), // hub parity: native bridge has no machineId slot
-                MachineOS:    machineOSString(),
-                Source:       "runtime-info",
-        }
-        id.MachineHostname = machineHostname()
-        if vm, ok := data["vmInfo"].(map[string]any); ok {
-                id.VMIsVM, _ = vm["isVm"].(bool)
-                id.VMBrand, _ = vm["brand"].(string)
-                if f, ok := vm["percentage"].(float64); ok {
-                        id.VMScore = int(f)
-                }
-        }
-        return id
+	data := runRuntimeInfo(exe, uid)
+	if data == nil {
+		return nil
+	}
+	token := strings.TrimSpace(strField(data, "machineToken"))
+	mtype := strings.TrimSpace(strField(data, "machineType"))
+	code := strings.TrimSpace(strField(data, "machineCode"))
+	if token == "" || mtype == "" || code == "" {
+		return nil
+	}
+	id := &machineIdentity{
+		MachineToken: token,
+		MachineType:  mtype,
+		MachineCode:  code,
+		MachineID:    derivedMachineID(uid, "machine"), // hub parity: native bridge has no machineId slot
+		MachineOS:    machineOSString(),
+		Source:       "runtime-info",
+	}
+	id.MachineHostname = machineHostname()
+	if vm, ok := data["vmInfo"].(map[string]any); ok {
+		id.VMIsVM, _ = vm["isVm"].(bool)
+		id.VMBrand, _ = vm["brand"].(string)
+		if f, ok := vm["percentage"].(float64); ok {
+			id.VMScore = int(f)
+		}
+	}
+	return id
 }
 
 // derivedMachineIdentity builds the per-uid SIMULATED identity (v0.8.44):
@@ -242,32 +242,32 @@ func nativeMachineIdentityFrom(exe, uid string) *machineIdentity {
 // account always presents the same well-formed pseudo-device and accounts
 // never collide (hub: 多账号之间天然隔离，阻断跨账号关联风控).
 func derivedMachineIdentity(uid string) machineIdentity {
-        return machineIdentity{
-                MachineID:       derivedMachineID(uid, "machine"),
-                MachineToken:    simulatedMachineToken(uid),
-                MachineType:     simulatedMachineType(uid),
-                MachineCode:     simulatedMachineCode(uid),
-                MachineOS:       machineOSString(),
-                MachineHostname: machineHostname(),
-                Source:          "derived",
-        }
+	return machineIdentity{
+		MachineID:       derivedMachineID(uid, "machine"),
+		MachineToken:    simulatedMachineToken(uid),
+		MachineType:     simulatedMachineType(uid),
+		MachineCode:     simulatedMachineCode(uid),
+		MachineOS:       machineOSString(),
+		MachineHostname: machineHostname(),
+		Source:          "derived",
+	}
 }
 
 func derivedMachineID(uid, salt string) string {
-        sum := md5.Sum([]byte(salt + ":" + uid))
-        return fmt.Sprintf("%x", sum)
+	sum := md5.Sum([]byte(salt + ":" + uid))
+	return fmt.Sprintf("%x", sum)
 }
 
 // simulatedKeystream derives n stable pseudo-random bytes from uid+salt
 // (sha512 in counter mode — enough entropy for the token body without any
 // shared state between accounts).
 func simulatedKeystream(uid, salt string, n int) []byte {
-        out := make([]byte, 0, n+64)
-        for counter := 0; len(out) < n; counter++ {
-                sum := sha512.Sum512([]byte(fmt.Sprintf("%s:%s:%d", salt, uid, counter)))
-                out = append(out, sum[:]...)
-        }
-        return out[:n]
+	out := make([]byte, 0, n+64)
+	for counter := 0; len(out) < n; counter++ {
+		sum := sha512.Sum512([]byte(fmt.Sprintf("%s:%s:%d", salt, uid, counter)))
+		out = append(out, sum[:]...)
+	}
+	return out[:n]
 }
 
 // simulatedMachineToken replays the official token shape: base64url of
@@ -275,50 +275,50 @@ func simulatedKeystream(uid, salt string, n int) []byte {
 // the literal prefix "P1gA" — verified against 9 live official-bridge runs)
 // followed by 63 per-uid derived bytes. Output is exactly 88 chars.
 func simulatedMachineToken(uid string) string {
-        raw := make([]byte, 66)
-        raw[0], raw[1], raw[2] = 0x3f, 0x58, 0x00
-        copy(raw[3:], simulatedKeystream(uid, "qd-sim-token", 63))
-        return base64.RawURLEncoding.EncodeToString(raw)
+	raw := make([]byte, 66)
+	raw[0], raw[1], raw[2] = 0x3f, 0x58, 0x00
+	copy(raw[3:], simulatedKeystream(uid, "qd-sim-token", 63))
+	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
 // simulatedMachineType replays 18 hex chars: 8 hex + the official "91"
 // marker + 8 hex (observed unchanged across every live official run).
 func simulatedMachineType(uid string) string {
-        ks := simulatedKeystream(uid, "qd-sim-type", 9)
-        return fmt.Sprintf("%x", ks[:4]) + "91" + fmt.Sprintf("%x", ks[4:])[:8]
+	ks := simulatedKeystream(uid, "qd-sim-type", 9)
+	return fmt.Sprintf("%x", ks[:4]) + "91" + fmt.Sprintf("%x", ks[4:])[:8]
 }
 
 // simulatedMachineCode replays 18 hex chars: 8 hex + the official "00"
 // marker + 8 hex.
 func simulatedMachineCode(uid string) string {
-        ks := simulatedKeystream(uid, "qd-sim-code", 9)
-        return fmt.Sprintf("%x", ks[:4]) + "00" + fmt.Sprintf("%x", ks[4:])[:8]
+	ks := simulatedKeystream(uid, "qd-sim-code", 9)
+	return fmt.Sprintf("%x", ks[:4]) + "00" + fmt.Sprintf("%x", ks[4:])[:8]
 }
 
 // machineOSString mirrors the official desktop's os string on Windows
 // ("x86_64_win32", the only platform the official CN client ships its
 // bridge for) and degrades honestly elsewhere.
 func machineOSString() string {
-        switch runtime.GOOS {
-        case "windows":
-                return "x86_64_win32"
-        case "darwin":
-                return "x86_64_darwin"
-        default:
-                return "x86_64_" + runtime.GOOS
-        }
+	switch runtime.GOOS {
+	case "windows":
+		return "x86_64_win32"
+	case "darwin":
+		return "x86_64_darwin"
+	default:
+		return "x86_64_" + runtime.GOOS
+	}
 }
 
 func machineHostname() string {
-        if h, err := os.Hostname(); err == nil && strings.TrimSpace(h) != "" {
-                return strings.TrimSpace(h)
-        }
-        return "DESKTOP-QODER" // hub's constant, last resort only
+	if h, err := os.Hostname(); err == nil && strings.TrimSpace(h) != "" {
+		return strings.TrimSpace(h)
+	}
+	return "DESKTOP-QODER" // hub's constant, last resort only
 }
 
 func strField(m map[string]any, key string) string {
-        s, _ := m[key].(string)
-        return s
+	s, _ := m[key].(string)
+	return s
 }
 
 // runRuntimeInfo spawns the official bridge with the client's per-platform
@@ -326,35 +326,35 @@ func strField(m map[string]any, key string) string {
 // one JSON object on stdin, linux `runtime-info prod` with stdin closed —
 // first stdout line is the answer either way.
 func runRuntimeInfo(exe, uid string) map[string]any {
-        ctx, cancel := context.WithTimeout(context.Background(), runtimeInfoTimeout)
-        defer cancel()
-        args, withStdin := runtimeInfoArgs(runtime.GOOS)
-        cmd := exec.CommandContext(ctx, exe, args...)
-        cmd.Dir = filepath.Dir(exe)
-        if withStdin {
-                payload, _ := json.Marshal(map[string]any{"account": uid})
-                cmd.Stdin = bytes.NewReader(append(payload, ' '))
-        } else {
-                cmd.Stdin = nil // official linux dialect: stdio ignore
-        }
-        var out bytes.Buffer
-        cmd.Stdout = &out
-        cmd.Stderr = nil
-        if err := cmd.Run(); err != nil {
-                return nil
-        }
-        line := strings.TrimSpace(out.String())
-        if i := strings.IndexByte(line, '\n'); i >= 0 {
-                line = strings.TrimSpace(line[:i])
-        }
-        if line == "" {
-                return nil
-        }
-        var m map[string]any
-        if json.Unmarshal([]byte(line), &m) != nil {
-                return nil
-        }
-        return m
+	ctx, cancel := context.WithTimeout(context.Background(), runtimeInfoTimeout)
+	defer cancel()
+	args, withStdin := runtimeInfoArgs(runtime.GOOS)
+	cmd := exec.CommandContext(ctx, exe, args...)
+	cmd.Dir = filepath.Dir(exe)
+	if withStdin {
+		payload, _ := json.Marshal(map[string]any{"account": uid})
+		cmd.Stdin = bytes.NewReader(append(payload, ' '))
+	} else {
+		cmd.Stdin = nil // official linux dialect: stdio ignore
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = nil
+	if err := cmd.Run(); err != nil {
+		return nil
+	}
+	line := strings.TrimSpace(out.String())
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = strings.TrimSpace(line[:i])
+	}
+	if line == "" {
+		return nil
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(line), &m) != nil {
+		return nil
+	}
+	return m
 }
 
 // runtimeInfoExePath locates the official bridge, or "" when this host
@@ -373,153 +373,177 @@ func runRuntimeInfo(exe, uid string) map[string]any {
 // deployments drop the official binary anywhere and point the plugin at
 // it. QD_NATIVE_IDENTITY=0/false/no disables the native layer entirely.
 func runtimeInfoExePath(region string) string {
-        if v := strings.ToLower(strings.TrimSpace(os.Getenv("QD_NATIVE_IDENTITY"))); v == "0" || v == "false" || v == "no" {
-                return ""
-        }
-        if p := strings.TrimSpace(os.Getenv("QD_UMID_BIN")); p != "" {
-                if st, err := os.Stat(p); err == nil && !st.IsDir() {
-                        return p
-                }
-                return ""
-        }
-        switch runtime.GOOS {
-        case "windows":
-                return runtimeInfoExePathWindows(region)
-        case "darwin":
-                for _, app := range []string{"/Applications/Qoder.app", "/Applications/Qoder CN.app", "/Applications/QoderCN.app"} {
-                        if exe := umidExe(app + "/Contents"); exe != "" {
-                                return exe
-                        }
-                }
-                return ""
-        default:
-                // Official deb root (sha256-verified extraction).
-                return umidExe("/opt/Qoder")
-        }
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("QD_NATIVE_IDENTITY"))); v == "0" || v == "false" || v == "no" {
+		return ""
+	}
+	if p := strings.TrimSpace(os.Getenv("QD_UMID_BIN")); p != "" {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+		return ""
+	}
+	switch runtime.GOOS {
+	case "windows":
+		return runtimeInfoExePathWindows(region)
+	case "darwin":
+		for _, app := range []string{"/Applications/Qoder.app", "/Applications/Qoder CN.app", "/Applications/QoderCN.app"} {
+			if exe := umidExe(app + "/Contents"); exe != "" {
+				return exe
+			}
+		}
+		return ""
+	default:
+		// Official deb root (sha256-verified extraction).
+		return umidExe("/opt/Qoder")
+	}
 }
 
 func runtimeInfoExePathWindows(region string) string {
-        base := os.Getenv("LOCALAPPDATA")
-        if strings.TrimSpace(base) == "" {
-                home, err := os.UserHomeDir()
-                if err != nil {
-                        return ""
-                }
-                base = filepath.Join(home, "AppData", "Local")
-        }
-        names := []string{"Qoder CN", "QoderCN", "Qoder"}
-        if normalizeRegion(region) == regionIntl {
-                names = []string{"Qoder"}
-        }
-        for _, name := range names {
-                for _, launcher := range []string{name + " Launcher", "Launcher"} {
-                        ini := filepath.Join(base, name, launcher, "state.ini")
-                        if d := iniValue(ini, "installDir"); d != "" && isDir(d) {
-                                return umidExe(d)
-                        }
-                }
-        }
-        for _, name := range names {
-                d := filepath.Join(base, "Programs", name)
-                if isDir(d) {
-                        return umidExe(d)
-                }
-        }
-        return ""
+	base := os.Getenv("LOCALAPPDATA")
+	if strings.TrimSpace(base) == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		base = filepath.Join(home, "AppData", "Local")
+	}
+	names := []string{"Qoder CN", "QoderCN", "Qoder"}
+	if normalizeRegion(region) == regionIntl {
+		names = []string{"Qoder"}
+	}
+	for _, name := range names {
+		for _, launcher := range []string{name + " Launcher", "Launcher"} {
+			ini := filepath.Join(base, name, launcher, "state.ini")
+			if d := iniValue(ini, "installDir"); d != "" && isDir(d) {
+				return umidExe(d)
+			}
+		}
+	}
+	for _, name := range names {
+		d := filepath.Join(base, "Programs", name)
+		if isDir(d) {
+			return umidExe(d)
+		}
+	}
+	return ""
 }
 
 func umidExe(installDir string) string {
-        name := "runtime-info"
-        if runtime.GOOS == "windows" {
-                name = "runtime-info.exe"
-        }
-        exe := filepath.Join(installDir, "resources", "umid", name)
-        if st, err := os.Stat(exe); err == nil && !st.IsDir() {
-                return exe
-        }
-        return ""
+	name := "runtime-info"
+	if runtime.GOOS == "windows" {
+		name = "runtime-info.exe"
+	}
+	exe := filepath.Join(installDir, "resources", "umid", name)
+	if st, err := os.Stat(exe); err == nil && !st.IsDir() {
+		return exe
+	}
+	return ""
 }
 
 func isDir(path string) bool {
-        st, err := os.Stat(path)
-        return err == nil && st.IsDir()
+	st, err := os.Stat(path)
+	return err == nil && st.IsDir()
 }
 
 // iniValue reads one key from a UTF-8 or UTF-16 state.ini (launcher's
 // writer is not consistent — hub capture reads both encodings).
 func iniValue(path, key string) string {
-        raw, err := os.ReadFile(path)
-        if err != nil {
-                return ""
-        }
-        if bytes.HasPrefix(raw, []byte{0xFF, 0xFE}) {
-                raw = raw[2:]
-                return iniScan(decodeUTF16LE(raw), key)
-        }
-        return iniScan(string(raw), key)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	if bytes.HasPrefix(raw, []byte{0xFF, 0xFE}) {
+		raw = raw[2:]
+		return iniScan(decodeUTF16LE(raw), key)
+	}
+	return iniScan(string(raw), key)
 }
 
 func iniScan(text, key string) string {
-        for _, line := range strings.Split(text, "\n") {
-                line = strings.TrimSpace(line)
-                if strings.HasPrefix(strings.ToLower(line), strings.ToLower(key)+"=") {
-                        return strings.TrimSpace(line[len(key)+1:])
-                }
-        }
-        return ""
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(line), strings.ToLower(key)+"=") {
+			return strings.TrimSpace(line[len(key)+1:])
+		}
+	}
+	return ""
 }
 
 // decodeUTF16LE decodes little-endian UTF-16 content (state.ini's second
 // possible encoding) without pulling golang.org/x/text in.
 func decodeUTF16LE(b []byte) string {
-        var sb strings.Builder
-        for i := 0; i+1 < len(b); i += 2 {
-                r := rune(b[i]) | rune(b[i+1])<<8
-                if r == 0 {
-                        break
-                }
-                sb.WriteRune(r)
-        }
-        return sb.String()
+	var sb strings.Builder
+	for i := 0; i+1 < len(b); i += 2 {
+		r := rune(b[i]) | rune(b[i+1])<<8
+		if r == 0 {
+			break
+		}
+		sb.WriteRune(r)
+	}
+	return sb.String()
 }
 
 // attachMachineIdentityHeaders adds the Cosy-Machine* headers the campaigns
-// platform filters device-targeted rows on. Campaigns-surface only — the
+// platform expects from a REAL desktop client. Campaigns-surface only — the
 // quota/plan/legacy endpoints never gated on them.
+//
+// v0.8.47 (user-provided working Python script + field verification,
+// 2026-10-03): the campaigns endpoint returns the FULL list (including the
+// daily CLAIM_BENEFIT 100-Credits row) when NO Cosy-Machine* headers are
+// sent at all — the user's Python script sends only
+// {Accept, User-Agent, Authorization, Cosy-ClientType, Cosy-Version} and
+// successfully fetches CLAIMABLE CLAIM_BENEFIT rows. Sending a DERIVED
+// (simulated) machine identity causes the server to filter device-targeted
+// rows (anti-fraud: it recognizes the P1gA+91/00 shape as non-real). Only
+// attach Cosy-Machine* headers when the identity comes from the REAL
+// official runtime-info binary (Source == "runtime-info"); when the identity
+// is derived/simulated, SKIP all machine headers so the server treats the
+// request as a browser/mobile client and returns the unfiltered list.
 func attachMachineIdentityHeaders(req *http.Request, mi *machineIdentity) {
-        if mi.MachineID != "" {
-                req.Header.Set("Cosy-MachineId", mi.MachineID)
-        }
-        if mi.MachineToken != "" {
-                req.Header.Set("Cosy-MachineToken", mi.MachineToken)
-        }
-        if mi.MachineType != "" {
-                req.Header.Set("Cosy-MachineType", mi.MachineType)
-        }
-        if mi.MachineCode != "" {
-                req.Header.Set("Cosy-MachineCode", mi.MachineCode)
-        }
-        if mi.MachineOS != "" {
-                req.Header.Set("Cosy-MachineOS", mi.MachineOS)
-        }
-        if mi.MachineHostname != "" {
-                req.Header.Set("Cosy-MachineHostname", mi.MachineHostname)
-        }
+	if mi == nil {
+		return
+	}
+	// v0.8.47: derived/simulated identities are WORSE than no identity.
+	// The server's anti-fraud layer recognizes the P1gA+91/00 shape as
+	// non-real and filters device-targeted rows (daily 100 Credits,
+	// Pro upgrade pack). Only send machine headers when the identity
+	// came from the real official runtime-info binary.
+	if mi.Source != identitySourceNative {
+		return
+	}
+	if mi.MachineID != "" {
+		req.Header.Set("Cosy-MachineId", mi.MachineID)
+	}
+	if mi.MachineToken != "" {
+		req.Header.Set("Cosy-MachineToken", mi.MachineToken)
+	}
+	if mi.MachineType != "" {
+		req.Header.Set("Cosy-MachineType", mi.MachineType)
+	}
+	if mi.MachineCode != "" {
+		req.Header.Set("Cosy-MachineCode", mi.MachineCode)
+	}
+	if mi.MachineOS != "" {
+		req.Header.Set("Cosy-MachineOS", mi.MachineOS)
+	}
+	if mi.MachineHostname != "" {
+		req.Header.Set("Cosy-MachineHostname", mi.MachineHostname)
+	}
 }
 
 // machineIdentityHint renders the identity's role in the 领取Pro diagnostics:
 // where it came from and what its limitations mean for device-targeted rows.
 func machineIdentityHint(sa *storedAuth) string {
-        mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
-        if mi.Source == "runtime-info" {
-                if mi.VMIsVM {
-                        brand := strings.TrimSpace(mi.VMBrand)
-                        if brand == "" {
-                                brand = "未知平台"
-                        }
-                        return fmt.Sprintf("。本机身份来源：官方 runtime-info.exe；注意官方风控判定本机为虚拟机（%s，评分 %d/100）——虚拟机不参与新人/定向活动", brand, mi.VMScore)
-                }
-                return "。本机身份来源：官方 runtime-info.exe（真实机器身份，定向活动可见性最优）"
-        }
-        return "。本机身份来源：官方格式模拟身份（88 位 P1gA 令牌 + 91/00 型机器码，逐字段复刻官方 runtime-info 输出形态，随账号稳定且跨账号隔离）——容器部署的推荐形态；如需真机身份可放置官方安装包内 resources/umid/runtime-info 并以 QD_UMID_BIN 指定其路径"
+	mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
+	if mi.Source == "runtime-info" {
+		if mi.VMIsVM {
+			brand := strings.TrimSpace(mi.VMBrand)
+			if brand == "" {
+				brand = "未知平台"
+			}
+			return fmt.Sprintf("。本机身份来源：官方 runtime-info.exe；注意官方风控判定本机为虚拟机（%s，评分 %d/100）——虚拟机不参与新人/定向活动", brand, mi.VMScore)
+		}
+		return "。本机身份来源：官方 runtime-info.exe（真实机器身份，定向活动可见性最优）"
+	}
+	return "。本机身份来源：官方格式模拟身份（88 位 P1gA 令牌 + 91/00 型机器码，逐字段复刻官方 runtime-info 输出形态，随账号稳定且跨账号隔离）——容器部署的推荐形态；如需真机身份可放置官方安装包内 resources/umid/runtime-info 并以 QD_UMID_BIN 指定其路径"
 }

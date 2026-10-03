@@ -30,20 +30,20 @@ func billingBaseFor(sa *storedAuth) string {
 }
 
 // billingClientType/Version are the desktop client's Cosy identity headers.
-// v0.8.35: 0.3.4 → 0.4.3 — the version shipped inside the official CN
-// client v0.4.3 (x-oss-meta-version, app.asar package.json) and the
-// value the qoder2api-hub capture uses for its desktop headers. The
-// campaigns surface gates on the desktop identity; an old version
-// string is exactly the kind of stale signal that starts returning
-// flag-less/row-less envelopes.
 //
-// v0.8.46 (asar forensics): Fh = Object.freeze({clientType:10, ...}) —
-// the official client sends Cosy-ClientType:"10" (String(Fh.clientType)).
-// Cosy-Version comes from clientIdentity.clientVersion which is the
-// application version "0.4.3" from package.json.
+// v0.8.47 (user-provided working Python script + official client main.log
+// capture, 2026-10-03): the official client's actual request log shows
+//
+//	"Cosy-ClientType":"10", "Cosy-Version":"0.3.4"
+//
+// — Cosy-Version is the PROTOCOL version, NOT the app version (package.json's
+// 0.4.3 is the Electron app version, a different thing). The previous 0.4.3
+// value was set in v0.8.35 from a misreading of the asar; the user's working
+// script confirms 0.3.4 is the correct value that returns the full campaigns
+// list including the daily CLAIM_BENEFIT 100-Credits row.
 const (
 	billingClientType = "10"
-	billingClientVer  = "0.4.3"
+	billingClientVer  = "0.3.4"
 )
 
 // billingHeaders sets the shared billing auth + identity headers.

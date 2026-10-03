@@ -142,41 +142,22 @@ func fetchCampaignStatus(sa *storedAuth) (*campaignStatusResponse, error) {
 			return out2, nil
 		}
 	}
-	// v0.8.46 (official desktop client v0.4.3 asar forensics): the official
-	// client opens campaignUrl as a WebView (openSurface → registerSurface).
-	// The server tracks this "surface opened" state and ONLY includes the
-	// daily CLAIM_BENEFIT 100-Credits row in campaigns[] AFTER the surface
-	// is opened. Without opening the surface, the response carries only
-	// VIEW_DETAILS rows (newbie packs) — the daily row is silently absent.
-	//
-	// The plugin has no WebView, but it CAN simulate the "surface opened"
-	// signal by making one GET to campaignUrl (with the same billing headers
-	// + cookies the WebView would carry). This triggers the server-side
-	// state change, and the subsequent campaigns fetch returns the full list.
-	//
-	// Only fire when showCampaign=true (campaignUrl present) AND the current
-	// campaigns[] has no CLAIMABLE CLAIM_BENEFIT row (the daily row is the
-	// one we're trying to surface). Best-effort: errors are swallowed.
-	if out.ShowCampaign && strings.TrimSpace(out.CampaignURL) != "" && !hasClaimableDailyRow(out) {
-		if openCampaignSurface(sa, out.CampaignURL) {
-			// Re-fetch campaigns — the server should now include the daily row.
-			if out2, _, _, err2 := fetchCampaignStatusOnce(sa, false); err2 == nil {
-				rememberCampaignRound(authRegion(sa), sa.Account.UID, out2)
-				// Merge: keep the broader of the two campaign lists (the
-				// post-surface fetch should be a superset, but fall back
-				// gracefully if the server returned fewer rows).
-				if len(out2.Campaigns) >= len(out.Campaigns) {
-					return out2, nil
-				}
-			}
-		}
-	}
+	// v0.8.47: the v0.8.46 openCampaignSurface retry was REMOVED. The user's
+	// working Python script (which sends NO Cosy-Machine* headers and NO
+	// surface-open step) proves the campaigns endpoint already returns
+	// CLAIMABLE CLAIM_BENEFIT rows in its initial response — the daily
+	// 100-Credits row was only missing because the plugin was sending
+	// simulated Cosy-Machine* headers that the server's anti-fraud layer
+	// filtered. With v0.8.47's attachMachineIdentityHeaders now skipping
+	// machine headers for derived identities, the first fetch returns the
+	// full list and no surface-open retry is needed.
 	return out, nil
 }
 
 // hasClaimableDailyRow reports whether the campaigns list already has a
 // CLAIM_BENEFIT (or empty-actionType) CLAIMABLE row — the daily 100-Credits
-// check-in. Used to decide whether the surface-open retry is needed.
+// check-in. Kept for diagnostics; no longer drives a retry (v0.8.47 removed
+// the surface-open path).
 func hasClaimableDailyRow(status *campaignStatusResponse) bool {
 	if status == nil {
 		return false
@@ -193,44 +174,6 @@ func hasClaimableDailyRow(status *campaignStatusResponse) bool {
 		return true
 	}
 	return false
-}
-
-// openCampaignSurface makes one GET to the campaignUrl the server returned,
-// simulating the official client's "open activity page WebView" step. The
-// server tracks this visit and includes the daily 100-Credits CLAIM_BENEFIT
-// row in subsequent /sash/api/v1/me/campaigns responses.
-//
-// The GET carries the same billing headers (Authorization, Cosy-*) and the
-// per-account cookie jar (acw_tc / qoder_csrf_token) the WebView would
-// carry. Best-effort: any error returns false, and the caller falls through
-// to the original (pre-surface) campaigns list.
-func openCampaignSurface(sa *storedAuth, campaignURL string) bool {
-	campaignURL = strings.TrimSpace(campaignURL)
-	if campaignURL == "" {
-		return false
-	}
-	req, err := http.NewRequest(http.MethodGet, campaignURL, nil)
-	if err != nil {
-		return false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	req = req.WithContext(ctx)
-	// The campaignUrl is an HTML page (activity WebView), not a JSON API.
-	// Send the same billing headers (auth + Cosy-* + cookies) so the server
-	// associates this visit with the account's session.
-	billingHeaders(req, sa)
-	mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
-	attachMachineIdentityHeaders(req, &mi)
-	// Browsers send Accept: text/html for page navigations; override the
-	// application/json that billingHeaders set.
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	resp, err := hostHTTPDo(req)
-	if err != nil {
-		return false
-	}
-	// We don't care about the body — only the cookie/state side-effect.
-	return resp.StatusCode < 400
 }
 
 // ---------------------------------------------------------------------------
