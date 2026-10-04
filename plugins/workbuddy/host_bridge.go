@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -132,6 +133,16 @@ func hostHTTPDo(req *http.Request) (*hostHTTPResponse, error) {
 		}
 		_ = req.Body.Close()
 		bodyBytes = b
+	}
+	// v0.9.49: force direct HTTP for codebuddy.ai billing endpoints.
+	// The CPA host bridge uses Go's default http.Transport which enables
+	// HTTP/2 via ALPN. The APISIX gateway on www.codebuddy.ai closes
+	// HTTP/2 connections mid-request, returning EOF
+	// ("Post https://www.codebuddy.ai/v2/billing/meter/get-user-resource: EOF").
+	// sharedHTTPClient has TLSNextProto set to disable HTTP/2 — route
+	// billing calls through it directly instead of the host bridge.
+	if strings.Contains(req.URL.Host, "codebuddy.ai") || strings.Contains(req.URL.Host, "workbuddy.ai") {
+		return hostHTTPDoDirect(req, bodyBytes)
 	}
 	// Windows stack movement mitigation: nested host calls during synchronous
 	// RPCs (model.for_auth, management.handle) cause the host stack to move,

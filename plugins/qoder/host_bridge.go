@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -124,6 +125,17 @@ func hostHTTPDo(req *http.Request) (*hostHTTPResponse, error) {
 		}
 		_ = req.Body.Close()
 		bodyBytes = b
+	}
+	// v0.8.51: force direct HTTP for billing/campaigns endpoints.
+	// The CPA host bridge uses Go's default http.Transport which enables
+	// HTTP/2 via ALPN. The APISIX gateway on openapi.qoder.com.cn /
+	// openapi.qoder.sh closes HTTP/2 connections mid-request, returning EOF
+	// or truncated responses (empty campaigns list → "今日暂无可领取权益").
+	// sharedHTTPClient has TLSNextProto set to disable HTTP/2 — route
+	// billing/campaigns/quota calls through it directly instead of the
+	// host bridge.
+	if isBillingEndpoint(req.URL.Host, req.URL.Path) {
+		return hostHTTPDoDirect(req, bodyBytes)
 	}
 	// Windows stack movement mitigation: nested host calls during synchronous
 	// RPCs (model.for_auth, management.handle) cause the host stack to move,
@@ -412,4 +424,18 @@ func mustJSON(v any) []byte {
 		panic(err)
 	}
 	return b
+}
+
+// isBillingEndpoint reports whether the URL targets a Qoder billing/campaigns
+// endpoint that must bypass the CPA host bridge (which uses HTTP/2 and gets
+// EOF from APISIX). These endpoints use the plugin's own sharedHTTPClient
+// (with HTTP/2 disabled) instead.
+func isBillingEndpoint(host, path string) bool {
+	// All openapi.qoder.com.cn / openapi.qoder.sh billing paths
+	return strings.Contains(host, "openapi.qoder.") &&
+		(strings.Contains(path, "/sash/api/") ||
+			strings.Contains(path, "/api/v2/quota/") ||
+			strings.Contains(path, "/api/v2/user/plan") ||
+			strings.Contains(path, "/api/v1/userinfo") ||
+			strings.Contains(path, "/api/v1/deviceToken/"))
 }
