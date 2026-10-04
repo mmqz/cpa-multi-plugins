@@ -114,24 +114,8 @@ func fetchCampaignStatus(sa *storedAuth) (*campaignStatusResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	// v0.8.38 (official client parity, Intl+CN desktop v0.4.3 asar): right
-	// after every campaigns status refresh the client also reads the
-	// client_launch_26 limited-number endpoint once (retry-once-when-empty).
-	// That pair IS the "launch sync" the desktop client performs at every
-	// sign-in — reproduce it best-effort so accounts hosted here see the
-	// same qualification signal as an installed client. Never fatal.
 	campaignLaunchSync(sa)
-	// v0.8.39: remember every daily-shaped row (CLAIM_BENEFIT / empty
-	// actionType) the server returned — the bypass-list verdict probe
-	// (performCampaignCheckin) needs a real campaign id to POST when a
-	// later round hides the row (per-person dedup / device targeting).
 	rememberCampaignRound(authRegion(sa), sa.Account.UID, out)
-	// v0.8.36 self-heal (hub live pattern): showCampaign=false with a NATIVE
-	// identity usually means the identity rotated past its acceptance window
-	// — force a fresh one from the official bridge and retry exactly once.
-	// Derived identities never retry (there is nothing to rotate); CN
-	// envelopes may omit the flag entirely, and an absent flag (hadFlag=false)
-	// never triggers the retry either.
 	if miSource == "runtime-info" && hadFlag && !out.ShowCampaign {
 		machineIdentityFor(authRegion(sa), sa.Account.UID, true)
 		if machineIdentityForceHook != nil {
@@ -142,16 +126,70 @@ func fetchCampaignStatus(sa *storedAuth) (*campaignStatusResponse, error) {
 			return out2, nil
 		}
 	}
-	// v0.8.47: the v0.8.46 openCampaignSurface retry was REMOVED. The user's
-	// working Python script (which sends NO Cosy-Machine* headers and NO
-	// surface-open step) proves the campaigns endpoint already returns
-	// CLAIMABLE CLAIM_BENEFIT rows in its initial response — the daily
-	// 100-Credits row was only missing because the plugin was sending
-	// simulated Cosy-Machine* headers that the server's anti-fraud layer
-	// filtered. With v0.8.47's attachMachineIdentityHeaders now skipping
-	// machine headers for derived identities, the first fetch returns the
-	// full list and no surface-open retry is needed.
+	// v0.8.52: if the first fetch returned campaigns but NO CLAIM_BENEFIT
+	// row (daily 100 Credits is missing), retry WITHOUT Cosy-Machine*
+	// headers. The server's anti-fraud layer may filter device-targeted
+	// rows for certain machine identity shapes — sending NO machine headers
+	// makes the server treat the request as a browser/mobile call and
+	// return the full unfiltered list. This is exactly what the working
+	// Python script does (no Cosy-Machine* headers at all).
+	if !hasClaimableDailyRow(out) && !hasAnyClaimBenefitRow(out) {
+		out2, _, _, err2 := fetchCampaignStatusNoMachine(sa)
+		if err2 == nil && (hasClaimableDailyRow(out2) || hasAnyClaimBenefitRow(out2)) {
+			rememberCampaignRound(authRegion(sa), sa.Account.UID, out2)
+			return out2, nil
+		}
+	}
 	return out, nil
+}
+
+// hasAnyClaimBenefitRow reports whether the campaigns list has ANY
+// CLAIM_BENEFIT row (regardless of claim status). Used to detect when
+// the server filtered all CLAIM_BENEFIT rows (the daily 100-Credits
+// row is device-targeted and may be silently dropped).
+func hasAnyClaimBenefitRow(status *campaignStatusResponse) bool {
+	if status == nil {
+		return false
+	}
+	for i := range status.Campaigns {
+		c := &status.Campaigns[i]
+		at := strings.ToUpper(strings.TrimSpace(c.ActionType))
+		if at == "CLAIM_BENEFIT" || at == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchCampaignStatusNoMachine fires one campaigns GET with billing headers
+// but WITHOUT any Cosy-Machine* headers. This matches the working Python
+// script's behavior and bypasses the server's device-targeted row filtering.
+func fetchCampaignStatusNoMachine(sa *storedAuth) (*campaignStatusResponse, string, bool, error) {
+	req, err := http.NewRequest(http.MethodGet, campaignsURL(sa), nil)
+	if err != nil {
+		return nil, "", false, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+	billingHeaders(req, sa)
+	// Deliberately do NOT call attachMachineIdentityHeaders — send zero
+	// Cosy-Machine* headers so the server returns the unfiltered list.
+	resp, err := hostHTTPDo(req)
+	if err != nil {
+		return nil, "none", false, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, "none", false, fmt.Errorf("campaigns (no-machine) http %d body=%s", resp.StatusCode, truncateRedacted(string(resp.Body), 200))
+	}
+	var probe map[string]any
+	_ = json.Unmarshal(resp.Body, &probe)
+	_, hadFlag := probe["showCampaign"]
+	var out campaignStatusResponse
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		return nil, "none", hadFlag, fmt.Errorf("campaigns (no-machine) parse: %w", err)
+	}
+	return &out, "none", hadFlag, nil
 }
 
 // hasClaimableDailyRow reports whether the campaigns list already has a

@@ -6,7 +6,7 @@ Provider plugins for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
 | --- | --- |
 | workbuddy | 0.9.49 |
 | trae | 0.12.70 |
-| qoder | 0.8.51 |
+| qoder | 0.8.52 |
 | zcode | 0.2.0 |
 | mimo | 0.2.17 |
 
