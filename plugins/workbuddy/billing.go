@@ -189,10 +189,14 @@ func billingCall(sa *storedAuth, path string, body any) (json.RawMessage, error)
 			break
 		}
 		time.Sleep(d)
-		// Retry attempts run on the rescue transport (fresh connection per
-		// attempt, tcp4-first dialing): the pooled path just failed with a
-		// transport error, so hammering the exact same socket state is how
-		// 3-for-3 EOF exhaustion happens (field reports, v0.9.51).
+		// Retry ladder (v0.9.52): attempt 1 and 3 run on the rescue transport
+		// (fresh connection per attempt, tcp4-first dialing) — the pooled path
+		// just failed with a transport error, so hammering the exact same
+		// socket state is how 3-for-3 EOF exhaustion happens. Attempt 2 forces
+		// the HOST BRIDGE despite the codebuddy.ai direct bypass: the bridge
+		// applies the host's own transport policy (config.yaml proxy-url), the
+		// one path that works when the deployment's proxy lives only in CPA
+		// config and the plugin hasn't seen a HostConfigSummary yet.
 		data, err = billingCallOnce(sa, path, body, attempts)
 		attempts++
 	}
@@ -200,7 +204,7 @@ func billingCall(sa *storedAuth, path string, body any) (json.RawMessage, error)
 		// Transport-class exhaustion: keep the underlying error first (its
 		// `Post "url": EOF` shape stays greppable and transient-classified),
 		// append the actionable deployment hint.
-		return data, fmt.Errorf("%w — billing gateway unreachable after %d attempts (pooled + rescue fresh-conn/v4 paths; if codebuddy.ai/workbuddy.ai needs a proxy from this network, set HTTPS_PROXY on the CPA host process)", err, attempts)
+		return data, fmt.Errorf("%w — billing gateway unreachable after %d attempts (direct pooled+rescue fresh-conn/v4 and host-bridge paths; set proxy-url in CPA config.yaml or HTTPS_PROXY on the host process if codebuddy.ai/workbuddy.ai needs a proxy from this network)", err, attempts)
 	}
 	return data, err
 }
@@ -242,8 +246,10 @@ func isTransientBillingErr(err error) bool {
 }
 
 // billingCallOnce performs one billing HTTP attempt. attempt 0 uses the pooled
-// sharedHTTPClient; attempt >= 1 marks the context so hostHTTPDoDirect routes
-// through rescueHTTPClient (fresh connection per attempt, tcp4-first).
+// sharedHTTPClient; attempt 2 marks the context for the host-bridge fallback
+// (host transport policy incl. config.yaml proxy-url); all other attempts >= 1
+// mark the context so hostHTTPDoDirect routes through rescueHTTPClient (fresh
+// connection per attempt, tcp4-first).
 func billingCallOnce(sa *storedAuth, path string, body any, attempt int) (json.RawMessage, error) {
 	var reader *bytes.Reader
 	if body != nil {
@@ -260,7 +266,11 @@ func billingCallOnce(sa *storedAuth, path string, body any, attempt int) (json.R
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if attempt > 0 {
-		ctx = withHTTPRescue(ctx)
+		if attempt == 2 {
+			ctx = withHTTPBridge(ctx)
+		} else {
+			ctx = withHTTPRescue(ctx)
+		}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, reader)
 	if err != nil {

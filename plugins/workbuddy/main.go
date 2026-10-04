@@ -680,6 +680,12 @@ func handleParseAuth(raw []byte) ([]byte, error) {
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
 	}
+	// HostConfigSummary arrives with every parse callback (startup scan and
+	// panel import). Cache the configured proxy URL so the billing direct
+	// path can honor config.yaml proxy-url — the v0.9.49 bridge bypass
+	// dropped that policy and broke credits display on proxy-only
+	// deployments (v0.9.52).
+	rememberHostProxy(req.Host.ProxyURL)
 	// Ownership check (CPA native contract): the host routes by the file's
 	// top-level "type" field (synthesizer/file.go). Files without a type fall
 	// back to polling every plugin — first Handled=true wins. Only claim files

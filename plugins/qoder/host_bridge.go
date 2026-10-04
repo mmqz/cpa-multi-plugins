@@ -37,7 +37,10 @@ func sharedHTTPClient() *http.Client {
 				// host proxy policy; deployments that need a proxy for
 				// openapi.qoder.sh (Intl) lost that coverage. No env proxy
 				// set → ProxyFromEnvironment returns nil → unchanged.
-				Proxy:               http.ProxyFromEnvironment,
+				// v0.8.55: directProxyFunc also honors the proxy-url from
+				// CPA's config.yaml (delivered via HostConfigSummary on
+				// parse/model callbacks). Config proxy wins over env.
+				Proxy:               directProxyFunc,
 				MaxIdleConns:        20,
 				IdleConnTimeout:     90 * time.Second,
 				MaxIdleConnsPerHost: 5,

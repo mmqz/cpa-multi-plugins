@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.9.52
+
+### Billing direct path now honors config.yaml proxy-url — the pre-bypass behavior restored
+
+Follow-up to v0.9.51's env-var proxy support. Field feedback (2026-10-04,
+v0.8.54 build): all four attempts still died with `Post ".../get-user-resource":
+EOF` — and the decisive clue arrived with it: credits display **worked in
+versions old enough that billing still rode the host bridge**. That was the
+missing piece. The bridge applies the host's own transport policy — including
+`proxy-url` from CPA's config.yaml — and v0.9.49's billing bypass to a direct
+h1.1 client dropped that policy entirely. Deployments whose proxy lives ONLY
+in config.yaml (not in process env) had zero proxy coverage on the billing
+path ever since; v0.9.51's `HTTPS_PROXY` support pointed at the wrong knob
+for them.
+
+The host already hands the plugin its config: every `AuthParseRequest`
+(startup scan, panel import) and model-discovery request carries
+`HostConfigSummary.ProxyURL`. Two changes:
+
+1. **Config proxy capture + honor.** `rememberHostProxy` caches the URL at
+   both delivery points; `billingProxyFunc` (now the Proxy policy of both
+   direct transports) resolves config proxy → env proxy → nil (direct). A
+   config reload refreshes the cache on the next parse/model callback.
+2. **Host-bridge fallback attempt.** The billing retry ladder becomes
+   pooled-direct → rescue-direct → **host bridge** (a `withHTTPBridge`
+   context marker overrides the codebuddy.ai/workbuddy.ai direct bypass for
+   exactly one attempt) → rescue-direct. Even with a cold proxy cache the
+   bridge gets one shot with the host's full transport policy. The Windows
+   stack-movement bypass is deliberately NOT overridden.
+
+Exhaustion hint now names both knobs: `proxy-url` in CPA config.yaml or
+`HTTPS_PROXY` on the host process. Regression tests (`proxy_policy_test.go`):
+cache semantics (empty/invalid ignored — and tests must restore the global
+cache via `restoreHostProxy`, since `rememberHostProxy("")` is a no-op),
+config-wins-over-env precedence, bridge-marker override, and the full
+three-attempt ladder recovery. qoder v0.8.55 mirrors the capture + proxy
+policy for its own direct transports (Intl openapi.qoder.sh deployments).
+
+
 ## 0.9.51
 
 ### Billing EOF storm: direct path honors env proxy; retries switch to a rescue transport

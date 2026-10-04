@@ -300,6 +300,11 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 }
 
 func cacheModelAliases(host pluginapi.HostConfigSummary) {
+	// Model discovery is the second HostConfigSummary delivery point (parse
+	// is the first). Cache the configured proxy URL here too so deployments
+	// whose first plugin callback was a model request still populate the
+	// proxy policy (v0.8.55).
+	rememberHostProxy(host.ProxyURL)
 	entries := host.OAuthModelAlias[providerName]
 	if len(entries) == 0 {
 		// Host may key the channel case-insensitively; fall back to a scan.
