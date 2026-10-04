@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,16 +27,16 @@ import (
 // applies. Direct use of this client in new code is a compliance bug.
 func sharedHTTPClient() *http.Client {
 	httpClientOnce.Do(func() {
-		// No cookie jar here: auth is carried by Bearer headers, and a shared
-		// jar would leak upstream set-cookie state across accounts (multi-account
-		// deployments could cross-contaminate sessions). Only the short-lived
-		// login clients get a jar.
 		sharedClient = &http.Client{
 			Timeout: 120 * time.Second,
 			Transport: &http.Transport{
 				MaxIdleConns:        20,
 				IdleConnTimeout:     90 * time.Second,
 				MaxIdleConnsPerHost: 5,
+				// v0.8.50: disable HTTP/2 — same fix as workbuddy v0.9.48.
+				// The APISIX gateway on openapi.qoder.com.cn / openapi.qoder.sh
+				// closes HTTP/2 connections mid-request with EOF.
+				TLSNextProto: make(map[string]func(string, *tls.Conn) http.RoundTripper),
 			},
 		}
 	})
