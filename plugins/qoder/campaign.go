@@ -469,8 +469,9 @@ func fetchLimitedNumber(sa *storedAuth) (bool, error) {
 	defer cancel()
 	req = req.WithContext(ctx)
 	billingHeaders(req, sa)
-	mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
-	attachMachineIdentityHeaders(req, &mi)
+	// v0.8.53: browser dialect — zero Cosy-Machine* headers, matching the
+	// claim path and the user's working Python script; a derived identity on
+	// this read risks the same risk-layer filtering the claim hit.
 	resp, err := hostHTTPDo(req)
 	if err != nil {
 		return false, err
@@ -506,8 +507,9 @@ func fetchCampaignReward(sa *storedAuth, campaignID string) (map[string]any, err
 	defer cancel()
 	req = req.WithContext(ctx)
 	billingHeaders(req, sa)
-	mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
-	attachMachineIdentityHeaders(req, &mi)
+	// v0.8.53: browser dialect — zero Cosy-Machine* headers, matching the
+	// claim path. A reward read the risk layer hides for derived identities
+	// used to strand VIEW_DETAILS rows behind a "面值不可读" note.
 	resp, err := hostHTTPDo(req)
 	if err != nil {
 		return nil, err
@@ -834,6 +836,23 @@ func campaignCheckinSummary(status *campaignStatusResponse) *checkinSummary {
 // see checkin.go for the upstream forensics that retired the standalone
 // pro-upgrade endpoints.
 func claimCampaignByID(sa *storedAuth, c *campaign) (map[string]any, error) {
+	// v0.8.53: the claim POST is the check-in WRITE path, and the server's
+	// risk layer rejects claims carrying a derived (simulated) identity with
+	// 503 RISK_DEPENDENCY_UNAVAILABLE — live-verified 2026-10-04 on CN
+	// (account ud2d62d72): with Cosy-Machine* headers → 503 RISK and NO
+	// grant; without them (browser/mobile dialect, exactly what the official
+	// growth-page JS and the user's working Python script send) → 200
+	// CLAIMED +100 Credits. v0.8.52 fixed only the campaigns LIST read; the
+	// claim still rode the machine headers, so the list showed the daily row
+	// while the claim itself was risk-blocked ("签到不了").
+	//
+	// Therefore the claim sends ZERO Cosy-Machine* headers, always — the
+	// browser activity page never sends them either, so this dialect is
+	// universally valid (accounts with real runtime-info identities included:
+	// the server just treats the call as a browser/mobile claim). No retry
+	// dance: exactly one claim POST per attempt keeps the probeHiddenRound
+	// cooldown semantics (one hit per attempt, pinned by the taxonomy tests)
+	// and the upstream's replay idempotency unambiguous.
 	req, err := http.NewRequest(
 		http.MethodPost,
 		billingBaseFor(sa)+"/sash/api/v1/me/campaigns/"+c.CampaignID+"/claim",
@@ -848,8 +867,9 @@ func claimCampaignByID(sa *storedAuth, c *campaign) (map[string]any, error) {
 	req = req.WithContext(ctx)
 	billingHeaders(req, sa)
 	req.Header.Set("Content-Type", "application/json") // POST with body — official client's WebView JS sets this via fetch
-	mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false)
-	attachMachineIdentityHeaders(req, &mi)
+	// v0.8.53: deliberately NO attachMachineIdentityHeaders here — zero
+	// Cosy-Machine* headers is the dialect the risk layer accepts on the
+	// claim path (see the block comment above).
 	resp, err := hostHTTPDo(req)
 	if err != nil {
 		return map[string]any{"success": false, "message": err.Error()}, nil

@@ -191,6 +191,16 @@ func notePrefix(sa *storedAuth, disabled bool) string {
 // (everything after the region / disabled prefix). Returns "" when the note
 // carries no usable credit information, so callers never resurrect "积分未知".
 func creditSegmentFromNote(note string) string {
+	// v0.9.50: drop everything from the 【用量】 marker onward FIRST. The
+	// usage segment carries its own " · " separators ("今日 请求228 · Tok
+	// 15.9M ｜ 窗口… ｜ 累计 …"), so the parts-split below only ever skipped
+	// its FIRST piece — the remainder ("Tok 15.9M ｜ 该账号暂未解析出额度窗口
+	// ｜ 累计 请求321 · 成功率46% · Tok 45.8M") was resurrected as a fake
+	// credit segment, carried into the base note, and mangled by the 80-char
+	// cap into the user-visible "Tok 18.7M ｜ 该账号暂未解析出额度...".
+	if idx := strings.Index(note, usageSegmentMarker); idx >= 0 {
+		note = note[:idx]
+	}
 	parts := strings.Split(note, " · ")
 	segments := make([]string, 0, len(parts))
 	for _, part := range parts {
@@ -201,6 +211,15 @@ func creditSegmentFromNote(note string) string {
 		// v0.9.42: the 【用量】 segment belongs to the usage-note writer, not
 		// the credits segment — skip it so the two owners never merge.
 		if strings.HasPrefix(part, usageSegmentMarker) {
+			continue
+		}
+		// v0.9.50: legacy pre-marker usage residue. The fullwidth bar is the
+		// usage writer's segment separator and "Tok " prefix is usage token
+		// totals — neither occurs in a credits segment ("余N 已用M 池K" /
+		// "耗尽 · 余N 已用M" / "积分未知"). Skipping them finally retires
+		// notes written before the marker existed instead of carrying the
+		// residue forward forever.
+		if strings.HasPrefix(part, "Tok ") || strings.Contains(part, "｜") {
 			continue
 		}
 		segments = append(segments, part)
