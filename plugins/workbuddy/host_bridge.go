@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"runtime"
 	"strings"
@@ -38,7 +37,13 @@ func sharedHTTPClient() *http.Client {
 		sharedClient = &http.Client{
 			Timeout: 120 * time.Second,
 			Transport: &http.Transport{
-				Proxy:               billingProxyFunc,
+				Proxy: billingProxyFunc,
+				// v0.9.53: resilient dialing — multi-source DNS
+				// (system + DoH cross-check), multi-IP fallback
+				// with dead-IP memory, Linux MSS clamp for MTU
+				// blackholes. IP-literal/localhost dials are
+				// byte-identical to the default transport.
+				DialContext:         billingDialContext,
 				MaxIdleConns:        20,
 				IdleConnTimeout:     90 * time.Second,
 				MaxIdleConnsPerHost: 5,
@@ -112,7 +117,6 @@ func withHTTPBridge(ctx context.Context) context.Context {
 // HTTP/2 stays disabled and env-proxy support matches sharedHTTPClient.
 func rescueHTTPClient() *http.Client {
 	rescueClientOnce.Do(func() {
-		dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 		rescueClient = &http.Client{
 			Timeout: 120 * time.Second,
 			Transport: &http.Transport{
@@ -120,15 +124,11 @@ func rescueHTTPClient() *http.Client {
 				// Fresh connection per attempt — the whole point.
 				DisableKeepAlives: true,
 				TLSNextProto:      make(map[string]func(string, *tls.Conn) http.RoundTripper),
-				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-					conn, err := dialer.DialContext(ctx, "tcp4", addr)
-					if err == nil {
-						return conn, nil
-					}
-					// No v4 route (v6-only host, AAAA-only name) —
-					// fall back to whatever the request asked for.
-					return dialer.DialContext(ctx, network, addr)
-				},
+				// v0.9.53: same resilient dialer as the pooled client
+				// (multi-IP fallback subsumes the old tcp4-first-then-
+				// any-family dialer: v4 consensus/DoH candidates first,
+				// v6 tail, per-IP dead memory, MSS clamp).
+				DialContext: billingDialContext,
 			},
 		}
 	})

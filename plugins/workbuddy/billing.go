@@ -203,8 +203,18 @@ func billingCall(sa *storedAuth, path string, body any) (json.RawMessage, error)
 	if err != nil && isTransientBillingErr(err) {
 		// Transport-class exhaustion: keep the underlying error first (its
 		// `Post "url": EOF` shape stays greppable and transient-classified),
-		// append the actionable deployment hint.
-		return data, fmt.Errorf("%w — billing gateway unreachable after %d attempts (direct pooled+rescue fresh-conn/v4 and host-bridge paths; set proxy-url in CPA config.yaml or HTTPS_PROXY on the host process if codebuddy.ai/workbuddy.ai needs a proxy from this network)", err, attempts)
+		// append the actionable deployment hint, then the staged net-diag
+		// probe (v0.9.53: dns → tcp → tls → http per candidate IP) so a
+		// field report pinpoints the failing stage instead of another bare
+		// EOF. Probe results are cached for 30s and skipped entirely for
+		// IP-literal/localhost bases (hermetic tests).
+		//
+		// Also reset dial state: stickiness clearly picked a losing path,
+		// so forget the cached-good IP / dead marks and drop pooled
+		// connections (a poisoned pooled conn would otherwise serve the
+		// next billing call straight from the pool).
+		billingResetDialState()
+		return data, fmt.Errorf("%w — billing gateway unreachable after %d attempts (direct pooled+rescue fresh-conn/v4 and host-bridge paths; set proxy-url in CPA config.yaml or HTTPS_PROXY on the host process if codebuddy.ai/workbuddy.ai needs a proxy from this network)%s", err, attempts, billingNetDiagSuffix(billingBaseFor(sa)))
 	}
 	return data, err
 }
