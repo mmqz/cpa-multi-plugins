@@ -110,8 +110,11 @@ jobs:
             echo "=== Building $plugin ==="
             cd plugins/$plugin
             go mod download
+            VER="$(tr -d '[:space:]' < VERSION 2>/dev/null || true)"
+            VFLAG=""
+            [ -n "$VER" ] && VFLAG="-X main.version=$VER"
             OUTPUT="../../dist/${{ matrix.os }}-${{ matrix.arch }}/${plugin}.${{ matrix.ext }}"
-            go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o "$OUTPUT" .
+            go build -buildmode=c-shared -trimpath -ldflags="-s -w $VFLAG" -o "$OUTPUT" .
             if [ $? -eq 0 ]; then
               echo "  ✅ $plugin built"
             else
@@ -136,8 +139,11 @@ jobs:
             echo "=== Building $plugin ==="
             cd plugins/$plugin
             go mod download
+            VER="$(tr -d '[:space:]' < VERSION 2>/dev/null || true)"
+            VFLAG=""
+            [ -n "$VER" ] && VFLAG="-X main.version=$VER"
             OUTPUT="../../dist/${{ matrix.os }}-${{ matrix.arch }}/${plugin}.${{ matrix.ext }}"
-            go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o "$OUTPUT" .
+            go build -buildmode=c-shared -trimpath -ldflags="-s -w $VFLAG" -o "$OUTPUT" .
             if [ $? -eq 0 ]; then
               echo "  ✅ $plugin built"
             else
@@ -169,8 +175,11 @@ jobs:
             echo "=== Building $name (from $dir, pin=$pin) ==="
             cd plugins/$dir
             go mod download
+            VER="$(tr -d '[:space:]' < VERSION 2>/dev/null || true)"
+            VFLAG=""
+            [ -n "$VER" ] && VFLAG="-X main.version=$VER"
             OUTPUT="../../dist-split/${{ matrix.os }}-${{ matrix.arch }}/${name}.${{ matrix.ext }}"
-            go build -buildmode=c-shared -trimpath -ldflags="-s -w -X main.providerName=$name -X main.pluginVariantPin=$pin" -o "$OUTPUT" .
+            go build -buildmode=c-shared -trimpath -ldflags="-s -w -X main.providerName=$name -X main.pluginVariantPin=$pin $VFLAG" -o "$OUTPUT" .
             if [ $? -eq 0 ]; then
               echo "  ✅ $name built"
             else
@@ -196,8 +205,11 @@ jobs:
             echo "=== Building $name (from $dir, pin=$pin) ==="
             cd plugins/$dir
             go mod download
+            VER="$(tr -d '[:space:]' < VERSION 2>/dev/null || true)"
+            VFLAG=""
+            [ -n "$VER" ] && VFLAG="-X main.version=$VER"
             OUTPUT="../../dist-split/${{ matrix.os }}-${{ matrix.arch }}/${name}.${{ matrix.ext }}"
-            go build -buildmode=c-shared -trimpath -ldflags="-s -w -X main.providerName=$name -X main.pluginVariantPin=$pin" -o "$OUTPUT" .
+            go build -buildmode=c-shared -trimpath -ldflags="-s -w -X main.providerName=$name -X main.pluginVariantPin=$pin $VFLAG" -o "$OUTPUT" .
             if [ $? -eq 0 ]; then
               echo "  ✅ $name built"
             else

@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.9.56
+
+### Output-side scrubber: the tag format the reasoning replay teaches is now stripped from what clients receive (issue #30)
+
+Field report (issue #30, Misaka09982 + a friend on DSH): on `deepseek-v4.1-flash`
+(CN) answers began with raw `<thought>`/`<analysis>`/`<summary>` blocks that
+Pi rendered verbatim — "Pi 长任务" (long tasks) and never on the pre-absorb
+"original author" builds. Root cause confirmed on the live gateway: since 0.9.26
+the reasoning replay (issue #5) folds every historical assistant turn's
+`reasoning_content` into content as a `<thought>\n…\n</thought>` block so it
+survives the gateway's field whitelist, and the model **imitates the taught
+shape** — the imitation prior grows with the number of folded turns, which is
+why only long multi-turn tasks leak. A live A/B probe (8 folded turns,
+bat-and-ball final question, `deepseek-v4.1-flash`): control history without
+folds leaked 0/1, the folded history leaked **2/5** samples opening with a
+verbatim `<thought>` block. Removing the replay would resurrect issue #5 (the
+model loses its own prior chain of thought), so the fix is output-side:
+
+1. **Leading tag-run scrubber** (`tag_scrub.go`): a per-choice, cross-chunk
+   state machine recognizes a leading run of *complete* `<thought>` /
+   `<analysis>` / `<summary>` / `<think>` blocks (whitespace-separated) — the
+   taught shape plus the two drift variants the reporter saw and DeepSeek's
+   native marker — and drops it from the content the client receives.
+   Wired into all three executor paths: `pumpStreamFrames` (async pump),
+   `aggregateSSEWithCollector` (sync fallback), `aggregateCompletion`
+   (non-stream fold).
+2. **Conservative by construction.** Only a *leading* run is removed: the
+   first real content byte ends scrubbing for good, so legitimate HTML
+   (`<details><summary>…`) and any mid-answer tag is never touched. A
+   `<summary>` block after real content stays exactly as the model wrote it.
+3. **Fail-open on every degenerate input.** An unterminated block (stream cut
+   mid-thought), a divergence, or the 1 MB hold cap releases the buffer
+   verbatim — a broken stream degrades to the pre-fix wire shape instead of
+   swallowing the answer or stalling the client. Tail bytes still held when
+   the stream ends are emitted as a synthetic chunk, never dropped.
+4. **Deterministic release gate** (`TestIssue30_TaughtTagRunNeverReachesClient`
+   + pipeline-level tests): whatever the model emits in the taught shape, the
+   client-visible stream on every executor path carries no leading tag block;
+   byte-by-byte and pseudo-random chunk splits are pinned. The live probe
+   (`tag_leak_live_test.go`, `-tags live`) re-runs the A/B on the real gateway
+   and asserts the production pump output stays clean even when the raw
+   upstream imitates.
+
+Also syncs the self-reported plugin version (`var version`) with the VERSION
+file — it had drifted to 0.9.46 while the shipped builds were 0.9.55.
+
 ## 0.9.52
 
 ### Billing direct path now honors config.yaml proxy-url — the pre-bypass behavior restored

@@ -310,6 +310,9 @@ func pumpStreamFrames(scanner *bufio.Scanner, sink streamSink, gate *streamHeadG
 	seenPayload := false
 	gating := gate != nil
 	var pending [][]byte
+	// Issue #30: per-choice output scrubbers — strip the leading tag-block run
+	// the reasoning replay taught the model to emit (see tag_scrub.go).
+	scrubbers := map[int]*thoughtTagScrubber{}
 	for scanner.Scan() {
 		line := scanner.Text()
 		content, meaningful, frameErr := workBuddyStreamFrame(line)
@@ -335,7 +338,7 @@ func pumpStreamFrames(scanner *bufio.Scanner, sink streamSink, gate *streamHeadG
 			continue
 		}
 		collector.feed(content)
-		cleaned := cleanChunkJSON(content)
+		cleaned := cleanChunkJSON(scrubTagBlocksInChunk(content, scrubbers))
 		if cleaned == "" {
 			continue
 		}
@@ -374,6 +377,15 @@ func pumpStreamFrames(scanner *bufio.Scanner, sink streamSink, gate *streamHeadG
 		// caller's tail still classifies empty-stream / read-error in-band.
 		gate.release()
 		if err := emitChunks(sink, pending); err != nil {
+			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
+			return seenPayload, true
+		}
+	}
+	// Issue #30 fail-open: whatever the scrubbers still hold (an unterminated
+	// leading block, a whitespace tail) goes out verbatim so a degenerate
+	// stream degrades to the pre-fix wire shape instead of swallowing bytes.
+	for _, chunk := range scrubTailChunks(scrubbers, sseFramed) {
+		if err := sink.emit(chunk); err != nil {
 			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
 			return seenPayload, true
 		}
@@ -448,6 +460,8 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var chunks []pluginapi.ExecutorStreamChunk
 	seenPayload := false
+	// Issue #30: per-choice output scrubbers (see tag_scrub.go).
+	scrubbers := map[int]*thoughtTagScrubber{}
 	for scanner.Scan() {
 		content, meaningful, frameErr := workBuddyStreamFrame(scanner.Text())
 		if frameErr != nil {
@@ -460,7 +474,7 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 		if collector != nil {
 			collector.feed(content)
 		}
-		cleaned := cleanChunkJSON(content)
+		cleaned := cleanChunkJSON(scrubTagBlocksInChunk(content, scrubbers))
 		if cleaned == "" {
 			continue
 		}
@@ -474,6 +488,10 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 	}
 	if !seenPayload {
 		return chunks, emptyStreamError()
+	}
+	// Issue #30 fail-open: release scrubber tails verbatim (see pumpStreamFrames).
+	for _, chunk := range scrubTailChunks(scrubbers, sseFramed) {
+		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: chunk})
 	}
 	return chunks, nil
 }
@@ -646,6 +664,9 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 		return nil, emptyStreamError()
 	}
 
+	// Issue #30: strip the leading tag-block run the reasoning replay
+	// taught the model to emit (non-stream fold gets the one-shot variant).
+	content = scrubTagBlocksOneShot(content)
 	message := map[string]any{"role": firstNonEmpty(role, "assistant"), "content": content}
 	if reasoning != "" {
 		message["reasoning_content"] = reasoning
