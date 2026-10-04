@@ -148,14 +148,76 @@ jobs:
           done
         shell: bash
 
+      # Split-channel flavor (issue #29): the legacy per-variant plugins,
+      # built from the SAME source purely via ldflags injection —
+      #   -X main.providerName=<id>      → registered plugin id / auth-file
+      #                                    namespace / panel entry
+      #   -X main.pluginVariantPin=<pin> → default login_region/login_variant
+      # One zip per platform: cpa-multi-plugins-split-<os>-<arch>.zip.
+      - name: Build split-channel plugins (Windows)
+        if: matrix.os == 'windows'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+          CC: gcc
+        run: |
+          mkdir -p dist-split/${{ matrix.os }}-${{ matrix.arch }}
+          SPLIT="codebuddy-cn:workbuddy:cn codebuddy-intl:workbuddy:intl qoder-cn:qoder:cn qoder-intl:qoder:intl trae-cn:trae:cn trae-solo-cn:trae:solo trae-intl:trae:intl"
+          for entry in $SPLIT; do
+            name="${entry%%:*}"; rest="${entry#*:}"; dir="${rest%%:*}"; pin="${rest##*:}"
+            echo "=== Building $name (from $dir, pin=$pin) ==="
+            cd plugins/$dir
+            go mod download
+            OUTPUT="../../dist-split/${{ matrix.os }}-${{ matrix.arch }}/${name}.${{ matrix.ext }}"
+            go build -buildmode=c-shared -trimpath -ldflags="-s -w -X main.providerName=$name -X main.pluginVariantPin=$pin" -o "$OUTPUT" .
+            if [ $? -eq 0 ]; then
+              echo "  ✅ $name built"
+            else
+              echo "  ❌ $name failed"
+              exit 1
+            fi
+            cd ../..
+          done
+        shell: msys2 {0}
+
+      - name: Build split-channel plugins (non-Windows)
+        if: matrix.os != 'windows'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+          CC: ${{ matrix.cc }}
+        run: |
+          mkdir -p dist-split/${{ matrix.os }}-${{ matrix.arch }}
+          SPLIT="codebuddy-cn:workbuddy:cn codebuddy-intl:workbuddy:intl qoder-cn:qoder:cn qoder-intl:qoder:intl trae-cn:trae:cn trae-solo-cn:trae:solo trae-intl:trae:intl"
+          for entry in $SPLIT; do
+            name="${entry%%:*}"; rest="${entry#*:}"; dir="${rest%%:*}"; pin="${rest##*:}"
+            echo "=== Building $name (from $dir, pin=$pin) ==="
+            cd plugins/$dir
+            go mod download
+            OUTPUT="../../dist-split/${{ matrix.os }}-${{ matrix.arch }}/${name}.${{ matrix.ext }}"
+            go build -buildmode=c-shared -trimpath -ldflags="-s -w -X main.providerName=$name -X main.pluginVariantPin=$pin" -o "$OUTPUT" .
+            if [ $? -eq 0 ]; then
+              echo "  ✅ $name built"
+            else
+              echo "  ❌ $name failed"
+              exit 1
+            fi
+            cd ../..
+          done
+        shell: bash
+
       - name: Package artifacts (Windows)
         if: matrix.os == 'windows'
         shell: powershell
         run: |
           Get-ChildItem dist/${{ matrix.os }}-${{ matrix.arch }} -Filter *.dll | ForEach-Object { Write-Host "  $($_.Name)" }
           Compress-Archive -Path "dist/${{ matrix.os }}-${{ matrix.arch }}/*.dll" -DestinationPath "cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}.zip" -Force
-          Write-Host "Created zip:"
-          Get-Item "cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}.zip" | Select-Object Name, Length
+          Get-ChildItem dist-split/${{ matrix.os }}-${{ matrix.arch }} -Filter *.dll | ForEach-Object { Write-Host "  split: $($_.Name)" }
+          Compress-Archive -Path "dist-split/${{ matrix.os }}-${{ matrix.arch }}/*.dll" -DestinationPath "cpa-multi-plugins-split-${{ matrix.os }}-${{ matrix.arch }}.zip" -Force
+          Write-Host "Created zips:"
+          Get-Item "cpa-multi-plugins*${{ matrix.os }}-${{ matrix.arch }}.zip" | Select-Object Name, Length
 
       - name: Package artifacts (non-Windows)
         if: matrix.os != 'windows'
@@ -163,15 +225,20 @@ jobs:
           cd dist/${{ matrix.os }}-${{ matrix.arch }}
           rm -f *.h
           zip -r ../../cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}.zip .
+          cd ../../dist-split/${{ matrix.os }}-${{ matrix.arch }}
+          rm -f *.h
+          zip -r ../../cpa-multi-plugins-split-${{ matrix.os }}-${{ matrix.arch }}.zip .
           cd ../..
-          ls -lh cpa-multi-plugins-*.zip
+          ls -lh cpa-multi-plugins*.zip
         shell: bash
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}
-          path: cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}.zip
+          path: |
+            cpa-multi-plugins-${{ matrix.os }}-${{ matrix.arch }}.zip
+            cpa-multi-plugins-split-${{ matrix.os }}-${{ matrix.arch }}.zip
           retention-days: 30
 
   release:
@@ -223,11 +290,16 @@ jobs:
             5 unified CPA plugins: **CodeBuddy/WorkBuddy**, **Qoder**, **Trae**, **ZCode (GLM coding plan)**, **MiMo** — the first three merge the former CN/Intl/solo variants with automatic legacy auth-file adoption.
 
             ## Downloads
+
+            ### Unified package (default, recommended)
             - `cpa-multi-plugins-linux-amd64.zip` — Linux x86_64
             - `cpa-multi-plugins-linux-arm64.zip` — Linux ARM64
             - `cpa-multi-plugins-darwin-arm64.zip` — macOS Apple Silicon
             - `cpa-multi-plugins-darwin-amd64.zip` — macOS Intel (cross-built on an arm64 runner)
             - `cpa-multi-plugins-windows-amd64.zip` — Windows x86_64
+
+            ### Split-channel package (issue #29)
+            Same platform list with a `cpa-multi-plugins-split-<os>-<arch>.zip` each. Contains the legacy **per-variant plugins** — `codebuddy-cn`, `codebuddy-intl`, `qoder-cn`, `qoder-intl`, `trae-cn`, `trae-solo-cn`, `trae-intl` — each with its own panel entry and its own OAuth login pinned to its realm. Install INSTEAD of (not next to) the unified plugin of the same provider; enable them in config.yaml by their own ids (`plugins.configs.codebuddy-intl.enabled: true`, …).
 
             ## Installation (verified against real CLIProxyAPI host)
             1. Download and unzip the archive for your platform.

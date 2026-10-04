@@ -470,6 +470,14 @@ type storedTokens struct {
 	MachineID    string `json:"machineId"`
 	DeviceID     string `json:"deviceId"`
 	Variant      string `json:"variant"`
+	// Region is intl-only (auth.region, e.g. "US-East") — feeds X-User-Region
+	// on the intl pay face (intl_pay.go).
+	Region string `json:"region"`
+	// BoundDeviceID mirrors the credential-parity extra auth.boundDeviceId
+	// (issue #29 field report): intl logins before v0.12.72 persisted the
+	// OAuth-bound device id ONLY under this key — auth.deviceId was absent,
+	// so device_id_set surfaced false. Read as the DeviceID fallback.
+	BoundDeviceID string `json:"boundDeviceId"`
 }
 
 type storedAccount struct {
@@ -507,6 +515,13 @@ func hostAuthGet(authIndex string) (*storedAuth, error) {
 // hostAuthAsUpstream converts the host-stored nested shape into the upstream
 // *auth.Auth the trae-solo-cn upstream client expects.
 func hostAuthAsUpstream(sa *storedAuth) *auth.Auth {
+	deviceID := sa.Auth.DeviceID
+	if deviceID == "" {
+		// v0.12.72 (issue #29 field report): legacy intl files carry the bound
+		// device id only under auth.boundDeviceId — fall back so device_id_set
+		// reflects reality and X-Device-Id headers carry the bound id.
+		deviceID = sa.Auth.BoundDeviceID
+	}
 	return &auth.Auth{
 		AccessToken:  sa.Auth.AccessToken,
 		RefreshToken: sa.Auth.RefreshToken,
@@ -514,12 +529,26 @@ func hostAuthAsUpstream(sa *storedAuth) *auth.Auth {
 		Domain:       sa.Auth.Domain,
 		APIHost:      sa.Auth.APIHost,
 		MachineID:    sa.Auth.MachineID,
-		DeviceID:     sa.Auth.DeviceID,
+		DeviceID:     deviceID,
 		UID:          sa.Account.UID,
 		EnterpriseID: sa.Account.EnterpriseID,
 		Nickname:     sa.Account.Nickname,
 		Variant:      sa.Variant,
 	}
+}
+
+// isIntlStoredAuth reports whether the account lives on the intl realm and
+// therefore must use the intl faces (chat via intlupstream, billing via
+// intl_pay.go's grow-normal.trae.ai + v1) instead of the CN ones.
+func isIntlStoredAuth(sa *storedAuth) bool {
+	if sa == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(sa.Variant), "intl") {
+		return true
+	}
+	d := strings.ToLower(strings.TrimSpace(sa.Auth.Domain))
+	return d == "trae.ai" || d == "marscode.com" || strings.HasSuffix(d, ".trae.ai")
 }
 
 // -----------------------------------------------------------------------------
@@ -916,31 +945,19 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 // decision to skip (same dead token would just fail upstream again).
 func refreshAccountCredits(f pluginapi.HostAuthFileEntry, sa *storedAuth, a *auth.Auth) map[string]any {
 	entry := map[string]any{"auth_index": f.AuthIndex, "uid": sa.Account.UID, "nickname": sa.Account.Nickname}
+	// v0.12.72 (issue #29 field report): intl accounts live on a DIFFERENT
+	// billing face (grow-normal.trae.ai + /trae/api/v1/pay/*). Driving them
+	// through the CN client surfaced "ent_usage: upstream session_dead (http
+	// 401) code 4014" for every intl account. Route by realm.
+	if isIntlStoredAuth(sa) {
+		return refreshAccountCreditsIntl(f, sa, entry)
+	}
 	usage, err := upstreamClient.UserEntUsage(a)
 	if err != nil {
 		entry["error"] = "ent_usage: " + err.Error()
 		return entry
 	}
-	// v0.12.28: 套餐剩余对齐 cockpit-tools 的用量模型（trae.ts）：
-	//   fast  → 速通可用次数（-1 无限）
-	//   basic → 选中包 basic_usage_limit - basic_usage_amount（含 bonus）
-	//   unknown → 剩余不可知（面板显示 "--"；旧代码读不存在的
-	//             credits_limit 字段把这里渲染成"剩余 0 积分 · 00%"）。
-	sum := upstream.SummarizeUsage(usage.UserEntitlementPackList, true)
-	// v0.12.34: 官方 cashier 同口径积分池（Σ max(credits_limit-usage,0)，
-	// -1 不限）。这是模型调用真正扣减的池子——此前把签到钱包当
-	// "剩余积分"展示，与官方数字对不上（用户实测反馈）。
-	sum.CreditsPool = upstream.CreditsPoolUsage(usage.UserEntitlementPackList, usage.IsCreditsBilling)
-	selected := upstream.SelectActivePack(usage.UserEntitlementPackList, true)
-	plan := "Unknown"
-	if selected != nil {
-		// 上游 identityStr 优先取选中包 display_desc，回退 product_type 映射。
-		if d := strings.TrimSpace(selected.DisplayDesc); d != "" {
-			plan = d
-		} else {
-			plan = upstream.ProductTypeIdentity(selected.EntitlementBaseInfo.ProductType, true)
-		}
-	}
+	sum, plan, selected := summarizeEntUsage(usage, true)
 	// v0.12.29: ide_user_pay_status —— 上游刷新链路的第二个数据源
 	// （trae_account_core_refresh.rs 先 pay_status 再 ent_usage）。Free CN/SOLO
 	// 的 ent_usage pack 里没有可解析 quota，剩余维度（快请求/月、SOLO 并发）
@@ -981,6 +998,54 @@ func refreshAccountCredits(f pluginapi.HostAuthFileEntry, sa *storedAuth, a *aut
 	} else if clErr != nil {
 		entry["checklogin_error"] = clErr.Error()
 	}
+	// v0.12.25: also fetch the CHECK-IN status (CN face only — the intl realm
+	// has no check-in endpoints; refreshAccountCreditsIntl passes zero values
+	// and skips this). v0.12.40: credits 语义修正——它是签到奖励数额（非钱包），
+	// 仅作展示与"已签"判定，不再计入池子评分/可花余额。
+	wallet := int64(-1)
+	checkedIn, enable := false, false
+	if st, stErr := upstreamClient.CheckinStatus(a); stErr == nil {
+		wallet = st.Credits
+		checkedIn, enable = st.CheckedIn || st.DidCheckedIn, st.Enable
+	} else {
+		entry["checkin_status_error"] = stErr.Error()
+	}
+	// Shared tail: entry projection + cache/pool snapshot (pool-eligible).
+	return finalizeAccountCredits(f, sa, entry, sum, plan, bind, wallet, checkedIn, enable, true)
+}
+
+// summarizeEntUsage builds the panel/cache usage summary, plan label and
+// selected pack from an ent_usage snapshot (v0.12.28/34 semantics, shared
+// CN/Intl).
+func summarizeEntUsage(usage *upstream.EntUsageResult, isCN bool) (upstream.UsageSummary, string, *upstream.EntitlementPack) {
+	// v0.12.28: 套餐剩余对齐 cockpit-tools 的用量模型（trae.ts）：
+	//   fast  → 速通可用次数（-1 无限）
+	//   basic → 选中包 basic_usage_limit - basic_usage_amount（含 bonus）
+	//   unknown → 剩余不可知（面板显示 "--"；旧代码读不存在的
+	//             credits_limit 字段把这里渲染成"剩余 0 积分 · 00%"）。
+	sum := upstream.SummarizeUsage(usage.UserEntitlementPackList, isCN)
+	// v0.12.34: 官方 cashier 同口径积分池（Σ max(credits_limit-usage,0)，
+	// -1 不限）。这是模型调用真正扣减的池子——此前把签到钱包当
+	// "剩余积分"展示，与官方数字对不上（用户实测反馈）。
+	sum.CreditsPool = upstream.CreditsPoolUsage(usage.UserEntitlementPackList, usage.IsCreditsBilling)
+	selected := upstream.SelectActivePack(usage.UserEntitlementPackList, isCN)
+	plan := "Unknown"
+	if selected != nil {
+		// 上游 identityStr 优先取选中包 display_desc，回退 product_type 映射。
+		if d := strings.TrimSpace(selected.DisplayDesc); d != "" {
+			plan = d
+		} else {
+			plan = upstream.ProductTypeIdentity(selected.EntitlementBaseInfo.ProductType, true)
+		}
+	}
+	return sum, plan, selected
+}
+
+// finalizeAccountCredits projects the usage summary onto the management entry
+// and stores the accountCache (+ optionally accountPool) snapshot. Shared by
+// the CN/SOLO and Intl data paths (v0.12.72 extraction — behavior-preserving
+// for CN/SOLO).
+func finalizeAccountCredits(f pluginapi.HostAuthFileEntry, sa *storedAuth, entry map[string]any, sum upstream.UsageSummary, plan string, bind *bindStatus, wallet int64, checkedIn, enable, poolEligible bool) map[string]any {
 	entry["usage_model"] = sum.UsageModel
 	entry["remain_known"] = sum.RemainKnown
 	if sum.RemainKnown {
@@ -1015,17 +1080,6 @@ func refreshAccountCredits(f pluginapi.HostAuthFileEntry, sa *storedAuth, a *aut
 	}
 	if sum.PlanType != "" {
 		entry["plan_type"] = sum.PlanType
-	}
-	// v0.12.25: also fetch the CHECK-IN status. v0.12.40: credits 语义
-	// 修正——它是签到奖励数额（非钱包），仅作展示与"已签"判定，不再
-	// 计入池子评分/可花余额。
-	wallet := int64(-1)
-	checkedIn, enable := false, false
-	if st, stErr := upstreamClient.CheckinStatus(a); stErr == nil {
-		wallet = st.Credits
-		checkedIn, enable = st.CheckedIn || st.DidCheckedIn, st.Enable
-	} else {
-		entry["checkin_status_error"] = stErr.Error()
 	}
 	if wallet >= 0 {
 		entry["checkin_credits"] = wallet
@@ -1064,7 +1118,10 @@ func refreshAccountCredits(f pluginapi.HostAuthFileEntry, sa *storedAuth, a *aut
 	// trae exposes no reset-window bounds → the note shows the no-window
 	// fallback until one can be parsed.
 	usageQuotaStampFromSummary(f.AuthIndex, sum)
-	if accountPool != nil {
+	// v0.12.72: pool mutations stay CN/SOLO-only (poolEligible) — the
+	// scheduler pool semantics are CN-tuned and intl chat routing does not
+	// flow through it.
+	if poolEligible && accountPool != nil {
 		// v0.12.40: 不再叠加奖励配置（wallet 变量名保留为历史语义，
 		// 现含义 = 签到奖励数额）。
 		accountPool.SetCredits(sa.Account.UID, scoreRemain)
@@ -1077,6 +1134,41 @@ func refreshAccountCredits(f pluginapi.HostAuthFileEntry, sa *storedAuth, a *aut
 		}
 	}
 	return entry
+}
+
+// refreshAccountCreditsIntl is the intl-realm data path (v0.12.72, issue #29
+// field report): ent_usage + pay_status on the intl pay face (intl_pay.go —
+// grow-normal.trae.ai + /trae/api/v1/pay/*). No check-in / CheckLogin: those
+// are CN-face endpoints and upstream 404s/401s them on intl. The cache
+// snapshot stays pool-neutral (poolEligible=false).
+func refreshAccountCreditsIntl(f pluginapi.HostAuthFileEntry, sa *storedAuth, entry map[string]any) map[string]any {
+	deviceID := sa.Auth.DeviceID
+	if deviceID == "" {
+		deviceID = sa.Auth.BoundDeviceID
+	}
+	usageResp, err := intlEntUsage(sa.Auth.AccessToken, sa.Auth.Region, deviceID)
+	if err != nil {
+		entry["error"] = "intl ent_usage: " + err.Error()
+		return entry
+	}
+	usage := usageResp.toCNResult()
+	sum, plan, selected := summarizeEntUsage(usage, false)
+	// pay_status v1 — best-effort, same summary fields as the CN face.
+	if raw, psErr := intlPayStatusRaw(sa.Auth.AccessToken, sa.Auth.Region, deviceID); psErr == nil {
+		var ps upstream.PayStatusResult
+		if json.Unmarshal(raw, &ps) == nil && ps.Code == 0 {
+			sum.FastRequestPer = ps.FastRequestPer()
+			sum.SoloParallel = ps.SoloParallelLimit()
+			sum.SoloPackage = ps.HasSoloPackage()
+			sum.PlanType = ps.PlanIdentity()
+			if selected == nil && ps.PlanIdentity() != "" {
+				plan = ps.PlanIdentity()
+			}
+		}
+	}
+	entry["variant"] = "intl"
+	// No check-in on intl: wallet=-1 keeps checkin fields out of the entry.
+	return finalizeAccountCredits(f, sa, entry, sum, plan, &bindStatus{}, -1, false, false, false)
 }
 func max64(a, b int64) int64 {
 	if a > b {

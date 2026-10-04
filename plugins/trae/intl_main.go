@@ -369,6 +369,12 @@ func intlparseStoredAuth(raw []byte) (*upstream.Auth, error) {
 			AppVersion    string `json:"appVersion"`
 			RefererOrigin string `json:"refererOrigin"`
 			Timezone      string `json:"timezone"`
+			// v0.12.72: device identity + key material — previously dropped on
+			// parse, so refresh re-persists auth files without them.
+			DeviceID         string `json:"deviceId"`
+			MachineID        string `json:"machineId"`
+			DevicePublicKey  string `json:"devicePublicKey"`
+			DevicePrivateKey string `json:"devicePrivateKey"`
 		} `json:"auth"`
 		Account struct {
 			UID          string `json:"uid"`
@@ -377,75 +383,87 @@ func intlparseStoredAuth(raw []byte) (*upstream.Auth, error) {
 		} `json:"account"`
 	}
 	var flat struct {
-		AccessToken   string `json:"accessToken"`
-		RefreshToken  string `json:"refreshToken"`
-		ExpiresAt     int64  `json:"expiresAt"`
-		Domain        string `json:"domain"`
-		APIHost       string `json:"apiHost"`
-		UID           string `json:"uid"`
-		EnterpriseID  string `json:"enterpriseId"`
-		Nickname      string `json:"nickname"`
-		WebID         string `json:"webId"`
-		BizUserID     string `json:"bizUserId"`
-		UserUniqueID  string `json:"userUniqueId"`
-		UserIdentity  string `json:"userIdentity"`
-		Scope         string `json:"scope"`
-		Tenant        string `json:"tenant"`
-		Region        string `json:"region"`
-		AppLanguage   string `json:"appLanguage"`
-		AppVersion    string `json:"appVersion"`
-		RefererOrigin string `json:"refererOrigin"`
-		Timezone      string `json:"timezone"`
+		AccessToken      string `json:"accessToken"`
+		RefreshToken     string `json:"refreshToken"`
+		ExpiresAt        int64  `json:"expiresAt"`
+		Domain           string `json:"domain"`
+		APIHost          string `json:"apiHost"`
+		UID              string `json:"uid"`
+		EnterpriseID     string `json:"enterpriseId"`
+		Nickname         string `json:"nickname"`
+		WebID            string `json:"webId"`
+		BizUserID        string `json:"bizUserId"`
+		UserUniqueID     string `json:"userUniqueId"`
+		UserIdentity     string `json:"userIdentity"`
+		Scope            string `json:"scope"`
+		Tenant           string `json:"tenant"`
+		Region           string `json:"region"`
+		AppLanguage      string `json:"appLanguage"`
+		AppVersion       string `json:"appVersion"`
+		RefererOrigin    string `json:"refererOrigin"`
+		Timezone         string `json:"timezone"`
+		DeviceID         string `json:"deviceId"`
+		MachineID        string `json:"machineId"`
+		DevicePublicKey  string `json:"devicePublicKey"`
+		DevicePrivateKey string `json:"devicePrivateKey"`
 	}
 	if _, ok := probe["auth"]; ok {
 		if err := json.Unmarshal(raw, &nested); err != nil {
 			return nil, fmt.Errorf("parse nested auth: %w", err)
 		}
 		return &upstream.Auth{
-			AccessToken:   nested.Auth.AccessToken,
-			RefreshToken:  nested.Auth.RefreshToken,
-			ExpiresAt:     nested.Auth.ExpiresAt,
-			APIHost:       nested.Auth.APIHost,
-			Domain:        intlnonEmpty(nested.Auth.Domain, "trae.ai"),
-			UID:           nested.Account.UID,
-			EnterpriseID:  nested.Account.EnterpriseID,
-			Nickname:      nested.Account.Nickname,
-			WebID:         nested.Auth.WebID,
-			BizUserID:     nested.Auth.BizUserID,
-			UserUniqueID:  nested.Auth.UserUniqueID,
-			UserIdentity:  nested.Auth.UserIdentity,
-			Scope:         nested.Auth.Scope,
-			Tenant:        nested.Auth.Tenant,
-			Region:        nested.Auth.Region,
-			AppLanguage:   nested.Auth.AppLanguage,
-			AppVersion:    nested.Auth.AppVersion,
-			RefererOrigin: nested.Auth.RefererOrigin,
-			Timezone:      nested.Auth.Timezone,
+			AccessToken:      nested.Auth.AccessToken,
+			RefreshToken:     nested.Auth.RefreshToken,
+			ExpiresAt:        nested.Auth.ExpiresAt,
+			APIHost:          nested.Auth.APIHost,
+			Domain:           intlnonEmpty(nested.Auth.Domain, "trae.ai"),
+			UID:              nested.Account.UID,
+			EnterpriseID:     nested.Account.EnterpriseID,
+			Nickname:         nested.Account.Nickname,
+			WebID:            nested.Auth.WebID,
+			BizUserID:        nested.Auth.BizUserID,
+			UserUniqueID:     nested.Auth.UserUniqueID,
+			UserIdentity:     nested.Auth.UserIdentity,
+			Scope:            nested.Auth.Scope,
+			Tenant:           nested.Auth.Tenant,
+			Region:           nested.Auth.Region,
+			AppLanguage:      nested.Auth.AppLanguage,
+			AppVersion:       nested.Auth.AppVersion,
+			RefererOrigin:    nested.Auth.RefererOrigin,
+			Timezone:         nested.Auth.Timezone,
+			DeviceID:         nested.Auth.DeviceID,
+			MachineID:        nested.Auth.MachineID,
+			DevicePublicKey:  nested.Auth.DevicePublicKey,
+			DevicePrivateKey: nested.Auth.DevicePrivateKey,
 		}, nil
 	}
 	if err := json.Unmarshal(raw, &flat); err != nil {
 		return nil, fmt.Errorf("parse flat auth: %w", err)
 	}
 	return &upstream.Auth{
-		AccessToken:   flat.AccessToken,
-		RefreshToken:  flat.RefreshToken,
-		ExpiresAt:     flat.ExpiresAt,
-		APIHost:       flat.APIHost,
-		Domain:        intlnonEmpty(flat.Domain, "trae.ai"),
-		UID:           flat.UID,
-		EnterpriseID:  flat.EnterpriseID,
-		Nickname:      flat.Nickname,
-		WebID:         flat.WebID,
-		BizUserID:     flat.BizUserID,
-		UserUniqueID:  flat.UserUniqueID,
-		UserIdentity:  flat.UserIdentity,
-		Scope:         flat.Scope,
-		Tenant:        flat.Tenant,
-		Region:        flat.Region,
-		AppLanguage:   flat.AppLanguage,
-		AppVersion:    flat.AppVersion,
-		RefererOrigin: flat.RefererOrigin,
-		Timezone:      flat.Timezone,
+		AccessToken:      flat.AccessToken,
+		RefreshToken:     flat.RefreshToken,
+		ExpiresAt:        flat.ExpiresAt,
+		APIHost:          flat.APIHost,
+		Domain:           intlnonEmpty(flat.Domain, "trae.ai"),
+		UID:              flat.UID,
+		EnterpriseID:     flat.EnterpriseID,
+		Nickname:         flat.Nickname,
+		WebID:            flat.WebID,
+		BizUserID:        flat.BizUserID,
+		UserUniqueID:     flat.UserUniqueID,
+		UserIdentity:     flat.UserIdentity,
+		Scope:            flat.Scope,
+		Tenant:           flat.Tenant,
+		Region:           flat.Region,
+		AppLanguage:      flat.AppLanguage,
+		AppVersion:       flat.AppVersion,
+		RefererOrigin:    flat.RefererOrigin,
+		Timezone:         flat.Timezone,
+		DeviceID:         flat.DeviceID,
+		MachineID:        flat.MachineID,
+		DevicePublicKey:  flat.DevicePublicKey,
+		DevicePrivateKey: flat.DevicePrivateKey,
 	}, nil
 }
 
@@ -766,11 +784,17 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 	// from the intl client, region fields land only when the exchange echo
 	// carries them (不猜测).
 	authFields := map[string]any{
-		"accessToken":      a.AccessToken,
-		"refreshToken":     a.RefreshToken,
-		"expiresAt":        a.ExpiresAt,
-		"domain":           a.Domain,
-		"apiHost":          a.APIHost,
+		"accessToken":  a.AccessToken,
+		"refreshToken": a.RefreshToken,
+		"expiresAt":    a.ExpiresAt,
+		"domain":       a.Domain,
+		"apiHost":      a.APIHost,
+		// v0.12.72 (issue #29 field report): persist the OAuth-bound device
+		// identity — the login binds it server-side, so the auth file must
+		// carry it (was missing: device_id_set surfaced false, X-Device-Id
+		// empty on the intl pay face).
+		"machineId":        lc.machineID,
+		"deviceId":         lc.deviceID,
 		"variant":          "intl",
 		"region":           a.Region,
 		"scope":            a.Scope,
@@ -835,18 +859,24 @@ func intlhandleRefreshAuth(request []byte) ([]byte, error) {
 	storageJSON, _ := json.MarshalIndent(map[string]any{
 		"type":     intlproviderName,
 		"provider": intlproviderName,
+		// v0.12.72: carry the device identity + key material through refresh —
+		// this map REPLACES the auth file, so anything omitted here is lost.
 		"auth": map[string]any{
-			"accessToken":  a.AccessToken,
-			"refreshToken": a.RefreshToken,
-			"expiresAt":    a.ExpiresAt,
-			"domain":       a.Domain,
-			"apiHost":      a.APIHost,
-			"variant":      "intl",
-			"region":       a.Region,
-			"scope":        a.Scope,
-			"tenant":       a.Tenant,
-			"appLanguage":  a.AppLanguage,
-			"appVersion":   a.AppVersion,
+			"accessToken":      a.AccessToken,
+			"refreshToken":     a.RefreshToken,
+			"expiresAt":        a.ExpiresAt,
+			"domain":           a.Domain,
+			"apiHost":          a.APIHost,
+			"machineId":        a.MachineID,
+			"deviceId":         a.DeviceID,
+			"devicePublicKey":  a.DevicePublicKey,
+			"devicePrivateKey": a.DevicePrivateKey,
+			"variant":          "intl",
+			"region":           a.Region,
+			"scope":            a.Scope,
+			"tenant":           a.Tenant,
+			"appLanguage":      a.AppLanguage,
+			"appVersion":       a.AppVersion,
 		},
 		"account": map[string]any{
 			"uid":          a.UID,

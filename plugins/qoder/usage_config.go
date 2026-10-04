@@ -91,7 +91,7 @@ func configure(raw []byte) {
 	nextLifecycleAuto := true
 	nextSchedulerMode := schedulerModeOff // reset to default on reconfigure
 	nextKeepaliveAuto := true
-	nextLoginRegion := "" // sticky: empty = keep current (issue #24)
+	nextLoginRegion := ""  // sticky: empty = keep current (issue #24)
 	nextLoginDialect := "" // sticky: empty = keep current (v0.8.40)
 	nextMgmtKey := ""
 	nextStreamHeadTimeout := 0

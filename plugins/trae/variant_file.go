@@ -49,6 +49,12 @@ import (
 // instead of the later login overwriting the earlier one.
 func credentialFileName(variant, uid string) string {
 	uid = strings.TrimSpace(uid)
+	// Split-channel build (issue #29): the registered id ALREADY encodes the
+	// variant namespace (trae-cn / trae-solo-cn / trae-intl) — no infix, or
+	// the file would be "trae-intl-intl-<uid>.json".
+	if providerName != "trae" {
+		return fmt.Sprintf("%s-%s.json", providerName, uid)
+	}
 	switch normalizeVariant(variant) {
 	case variantSolo:
 		return fmt.Sprintf("%s-solo-cn-%s.json", providerName, uid)
@@ -60,8 +66,10 @@ func credentialFileName(variant, uid string) string {
 }
 
 // soloNamespacePrefix is the file-name prefix of the solo credential
-// namespace (also recognized by adopt.go's legacy claim logic).
-const soloNamespacePrefix = providerName + "-solo-"
+// namespace (also recognized by adopt.go's legacy claim logic). Var (split
+// flavor): providerName became injectable — for split builds the prefix is
+// only consulted by the legacy migration, which never matches there.
+var soloNamespacePrefix = providerName + "-solo-"
 
 // migrateSoloFileNames moves v0.12.0-0.12.26 solo credentials written into
 // the shared `trae-<uid>.json` namespace into the solo namespace. Idempotent:

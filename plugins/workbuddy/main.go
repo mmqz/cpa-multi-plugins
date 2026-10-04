@@ -76,7 +76,6 @@ import (
 )
 
 const (
-	providerName  = "workbuddy"
 	authFileName  = "workbuddy.json"
 	pluginLogoURL = "https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png"
 	// CN chat/auth gateway (iss = codebuddy.cn realm).

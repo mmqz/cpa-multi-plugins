@@ -89,7 +89,6 @@ import (
 )
 
 const (
-	providerName = "trae"
 	authFileName = "trae.json"
 	// Official Trae favicon (trae.com.cn CDN). The CPA management UI renders
 	// metadata.logo as the plugin icon (sidebar drawer + OAuth entry) — it

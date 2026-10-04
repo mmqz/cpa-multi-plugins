@@ -87,6 +87,19 @@ type Auth struct {
 	// was captured against the legacy solo.trae.ai host can pin it here.
 	RefererOrigin string
 
+	// Device identity (v0.12.72, issue #29 field report): the OAuth login
+	// binds a server-side device (newDeviceID/newMachineID in the login
+	// verification URI) but the persisted auth JSON omitted both keys —
+	// device_id_set surfaced false and X-Device-Id went empty on the intl
+	// pay face. Carried on Auth so refresh re-persists them verbatim.
+	DeviceID  string
+	MachineID string
+
+	// Device key material (P-256 SPKI/PKCS#8 PEM, devicekey.go) — preserved
+	// across refresh so the binding proof stays with the account.
+	DevicePublicKey  string
+	DevicePrivateKey string
+
 	// Timezone optionally sets the x-trae-user-timezone header (OmniRoute
 	// #13255 forwards psd.userTimezone alongside the Referer/Origin refresh
 	// — both halves together stopped imported connections failing with 401).

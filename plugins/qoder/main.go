@@ -76,7 +76,6 @@ import (
 )
 
 const (
-	providerName  = "qoder"
 	authFileName  = "qoder.json"
 	pluginLogoURL = "https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/QoderWork.png"
 	// QoderWork CN: OpenAPI for auth/billing, gateway for COSY-signed inference.
@@ -356,6 +355,12 @@ type registrationCapability struct {
 
 // version is injected at build time via -ldflags "-X main.version=...".
 var version = "0.8.44"
+
+// providerName is a VAR (split flavor, issue #29): the unified build keeps
+// the default "qoder"; the split-channel builds rename it via
+// -ldflags "-X main.providerName=qoder-intl" so the plugin registers as its
+// own panel entry / auth-file namespace. See split_build.go.
+var providerName = "qoder"
 
 func wbRegistration() registration {
 	return registration{
