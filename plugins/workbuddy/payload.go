@@ -711,6 +711,19 @@ func ensureSystemMessage(payload []byte, sa *storedAuth) []byte {
 var (
 	reClaudeCodeCli = regexp.MustCompile(`(?i)anthropic(?:'s)?\s+official\s+cli\s+for\s+claude`)
 	reMainBranchPr  = regexp.MustCompile(`(?i)main\s+branch\s+\(you\s+will\s+usually\s+use\s+this\s+for\s+prs\)`)
+
+	// reCodexCliIntro matches the Codex CLI base-instructions opening
+	// signature that Tencent's gateway blocklists as channel risk-control
+	// (issue #31, code 11128 "Illegal API invocation from an unapproved
+	// channel"): the two-sentence intro every Codex CLI / Codex Desktop
+	// session opens its system prompt with. Reporter's single-variable
+	// replay: 16 tools / long context / reasoning all pass; only this
+	// sentence pair 100% triggers 11128, and swapping it for a generic
+	// line passes verbatim with the full 20k-char instruction intact.
+	// Tolerant to case and to the first sentence ending with or without
+	// further description before the period.
+	reCodexCliIntro          = regexp.MustCompile(`(?i)you are a coding agent running in the codex cli[^.\n]*\.\s*codex cli is an open source project led by openai\s*\.?`)
+	codexCliIntroReplacement = "You are a helpful coding assistant running in the terminal."
 )
 
 func sanitizeBlockedTemplates(s string) string {
@@ -722,6 +735,15 @@ func sanitizeBlockedTemplates(s string) string {
 		"Default branch (you will usually use this for PRs)")
 	s = reClaudeCodeCli.ReplaceAllString(s, "Anthropic's official CLI tool for Claude")
 	s = reMainBranchPr.ReplaceAllString(s, "Default branch (you will usually use this for PRs)")
+	// v0.9.54 (issue #31): Codex CLI intro signature — Tencent gateway
+	// channel risk-control (11128). Exact match first (the verified
+	// trigger), then the tolerant regex for case / phrasing drift between
+	// Codex releases. System-role gating happens upstream in
+	// rewriteSystemMessagesInPlace — user content stays untouched.
+	s = strings.ReplaceAll(s,
+		"You are a coding agent running in the Codex CLI, a terminal-based coding assistant. Codex CLI is an open source project led by OpenAI.",
+		codexCliIntroReplacement)
+	s = reCodexCliIntro.ReplaceAllString(s, codexCliIntroReplacement)
 	return s
 }
 
