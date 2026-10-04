@@ -8,11 +8,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"runtime"
 	"strings"
@@ -36,6 +38,7 @@ func sharedHTTPClient() *http.Client {
 		sharedClient = &http.Client{
 			Timeout: 120 * time.Second,
 			Transport: &http.Transport{
+				Proxy:               http.ProxyFromEnvironment,
 				MaxIdleConns:        20,
 				IdleConnTimeout:     90 * time.Second,
 				MaxIdleConnsPerHost: 5,
@@ -46,10 +49,74 @@ func sharedHTTPClient() *http.Client {
 				// HTTP/2 upgrade, forcing HTTP/1.1 which APISIX handles
 				// reliably.
 				TLSNextProto: make(map[string]func(string, *tls.Conn) http.RoundTripper),
+				// v0.9.51: honor HTTPS_PROXY / HTTP_PROXY / NO_PROXY from the
+				// host process environment. The billing path bypasses the host
+				// bridge (v0.9.49), which also bypassed every host transport
+				// policy — including the proxy. Deployments that need a proxy
+				// for cross-border reach to www.codebuddy.ai / www.workbuddy.ai
+				// saw every billing call die with
+				// `Post ".../get-user-resource": EOF` (direct GFW/WAF/NAT
+				// interference) while all bridge-routed traffic worked fine.
+				// ProxyFromEnvironment returns nil when no env proxy is set,
+				// so proxyless deployments behave exactly as before.
 			},
 		}
 	})
 	return sharedClient
+}
+
+// httpRescueCtxKey tags requests that must run on the rescue transport.
+type httpRescueCtxKey struct{}
+
+// withHTTPRescue marks a request context so hostHTTPDoDirect routes it through
+// rescueHTTPClient instead of the pooled sharedHTTPClient. Billing retries use
+// this after the pooled path already failed with a transport error.
+func withHTTPRescue(ctx context.Context) context.Context {
+	return context.WithValue(ctx, httpRescueCtxKey{}, true)
+}
+
+// rescueHTTPClient is the last-resort transport for billing retries. It differs
+// from sharedHTTPClient in the two dimensions that actually break long-lived
+// pooled connections on hostile paths (field reports: repeated
+// `Post "https://www.codebuddy.ai/v2/billing/meter/get-user-resource": EOF`
+// surviving every same-path retry):
+//
+//   - DisableKeepAlives: every attempt opens a brand-new TCP+TLS connection.
+//     NAT/conntrack tables and intermediate firewalls silently drop idle
+//     sessions (often after 30-60s); a pooled connection that LOOKS alive but
+//     is dead produces exactly the EOF shape above, and Go's internal
+//     stale-conn replay only covers the first such hit per request.
+//   - tcp4-first dialing: IPv6 paths with broken return routes (blackholed
+//     /64s, misconfigured RA) complete the handshake then die mid-request —
+//     Happy Eyeballs only protects connect, not data. Rescue attempts try
+//     tcp4 first and fall back to the default family when no v4 route exists,
+//     so v6-only deployments lose nothing (rescue runs strictly after the
+//     normal path already failed).
+//
+// HTTP/2 stays disabled and env-proxy support matches sharedHTTPClient.
+func rescueHTTPClient() *http.Client {
+	rescueClientOnce.Do(func() {
+		dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
+		rescueClient = &http.Client{
+			Timeout: 120 * time.Second,
+			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
+				// Fresh connection per attempt — the whole point.
+				DisableKeepAlives: true,
+				TLSNextProto:      make(map[string]func(string, *tls.Conn) http.RoundTripper),
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					conn, err := dialer.DialContext(ctx, "tcp4", addr)
+					if err == nil {
+						return conn, nil
+					}
+					// No v4 route (v6-only host, AAAA-only name) —
+					// fall back to whatever the request asked for.
+					return dialer.DialContext(ctx, network, addr)
+				},
+			},
+		}
+	})
+	return rescueClient
 }
 
 // hostHTTPResponse is the plugin-side view of an HTTP response that came back
@@ -219,7 +286,12 @@ func decodeHostHTTPDoResult(result json.RawMessage) (int, http.Header, []byte, e
 }
 
 // hostHTTPDoDirect executes the request via the plugin's own http.Client.
-// Used as a fallback when the host bridge is unavailable (unit tests).
+// Used as a fallback when the host bridge is unavailable (unit tests), and as
+// the primary path for codebuddy.ai / workbuddy.ai endpoints (v0.9.49 — the
+// host bridge's default transport negotiates HTTP/2, which the APISIX gateway
+// drops mid-request). Requests carrying the withHTTPRescue context marker run
+// on rescueHTTPClient (fresh connection, tcp4-first) — billing retries use
+// that after the pooled path failed with a transport error.
 func hostHTTPDoDirect(req *http.Request, bodyBytes []byte) (*hostHTTPResponse, error) {
 	// Rebuild the request since req.Body was already consumed.
 	newReq, err := http.NewRequestWithContext(req.Context(), req.Method, req.URL.String(), bytes.NewReader(bodyBytes))
@@ -227,7 +299,11 @@ func hostHTTPDoDirect(req *http.Request, bodyBytes []byte) (*hostHTTPResponse, e
 		return nil, err
 	}
 	newReq.Header = req.Header.Clone()
-	resp, err := sharedHTTPClient().Do(newReq)
+	client := sharedHTTPClient()
+	if marked, _ := req.Context().Value(httpRescueCtxKey{}).(bool); marked {
+		client = rescueHTTPClient()
+	}
+	resp, err := client.Do(newReq)
 	if err != nil {
 		return nil, err
 	}

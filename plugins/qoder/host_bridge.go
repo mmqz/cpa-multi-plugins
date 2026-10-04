@@ -31,6 +31,13 @@ func sharedHTTPClient() *http.Client {
 		sharedClient = &http.Client{
 			Timeout: 120 * time.Second,
 			Transport: &http.Transport{
+				// v0.8.54: honor HTTPS_PROXY / HTTP_PROXY / NO_PROXY from
+				// the host process env — same as workbuddy v0.9.51. The
+				// direct path bypasses the host bridge, which also bypassed
+				// host proxy policy; deployments that need a proxy for
+				// openapi.qoder.sh (Intl) lost that coverage. No env proxy
+				// set → ProxyFromEnvironment returns nil → unchanged.
+				Proxy:               http.ProxyFromEnvironment,
 				MaxIdleConns:        20,
 				IdleConnTimeout:     90 * time.Second,
 				MaxIdleConnsPerHost: 5,

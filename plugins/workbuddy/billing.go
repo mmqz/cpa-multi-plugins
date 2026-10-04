@@ -182,13 +182,25 @@ func billingHeaders(req *http.Request, sa *storedAuth) {
 }
 
 func billingCall(sa *storedAuth, path string, body any) (json.RawMessage, error) {
-	data, err := billingCallOnce(sa, path, body)
+	data, err := billingCallOnce(sa, path, body, 0)
+	attempts := 1
 	for _, d := range billingRetryDelays {
 		if err == nil || !isTransientBillingErr(err) {
 			break
 		}
 		time.Sleep(d)
-		data, err = billingCallOnce(sa, path, body)
+		// Retry attempts run on the rescue transport (fresh connection per
+		// attempt, tcp4-first dialing): the pooled path just failed with a
+		// transport error, so hammering the exact same socket state is how
+		// 3-for-3 EOF exhaustion happens (field reports, v0.9.51).
+		data, err = billingCallOnce(sa, path, body, attempts)
+		attempts++
+	}
+	if err != nil && isTransientBillingErr(err) {
+		// Transport-class exhaustion: keep the underlying error first (its
+		// `Post "url": EOF` shape stays greppable and transient-classified),
+		// append the actionable deployment hint.
+		return data, fmt.Errorf("%w — billing gateway unreachable after %d attempts (pooled + rescue fresh-conn/v4 paths; if codebuddy.ai/workbuddy.ai needs a proxy from this network, set HTTPS_PROXY on the CPA host process)", err, attempts)
 	}
 	return data, err
 }
@@ -229,7 +241,10 @@ func isTransientBillingErr(err error) bool {
 	return false
 }
 
-func billingCallOnce(sa *storedAuth, path string, body any) (json.RawMessage, error) {
+// billingCallOnce performs one billing HTTP attempt. attempt 0 uses the pooled
+// sharedHTTPClient; attempt >= 1 marks the context so hostHTTPDoDirect routes
+// through rescueHTTPClient (fresh connection per attempt, tcp4-first).
+func billingCallOnce(sa *storedAuth, path string, body any, attempt int) (json.RawMessage, error) {
 	var reader *bytes.Reader
 	if body != nil {
 		raw, _ := json.Marshal(body)
@@ -244,6 +259,9 @@ func billingCallOnce(sa *storedAuth, path string, body any) (json.RawMessage, er
 	// for any legitimate meter/checkin/plan call (all are fast JSON APIs).
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	if attempt > 0 {
+		ctx = withHTTPRescue(ctx)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, reader)
 	if err != nil {
 		return nil, err

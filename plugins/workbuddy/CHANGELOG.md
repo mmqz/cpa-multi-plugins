@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.9.51
+
+### Billing EOF storm: direct path honors env proxy; retries switch to a rescue transport
+
+Follow-up to the v0.9.48/v0.9.49 HTTP/2-EOF fixes. Field reports (2026-10-04)
+showed check-in / credits still failing with
+`Post "https://www.codebuddy.ai/v2/billing/meter/get-user-resource": EOF`
+even though the same endpoint answered 200 from other networks and from
+Python. Protocol negotiation was never the whole story: the billing path
+bypasses the host bridge (v0.9.49), and that direct path carried **no proxy
+policy at all** (`Proxy: nil`, not even the standard environment variables) —
+deployments that need a proxy for cross-border reach to www.codebuddy.ai /
+www.workbuddy.ai were the only traffic left on the raw route. The three
+retries also shared one socket state within a 1.2s window, so any burst
+longer than that exhausted every attempt with the identical EOF.
+
+Three layers now:
+
+1. **Env proxy support.** Both shared transports set
+   `Proxy: http.ProxyFromEnvironment`. `HTTPS_PROXY` / `HTTP_PROXY` /
+   `NO_PROXY` on the CPA host process now apply to every direct call
+   (billing, models, oauth). No env proxy → `ProxyFromEnvironment` returns
+   nil → behavior unchanged for proxyless deployments.
+2. **Rescue transport for retry attempts.** Attempt 0 keeps the pooled
+   client; every retry marks its context (`withHTTPRescue`) and
+   `hostHTTPDoDirect` routes it to a dedicated client with
+   `DisableKeepAlives` (brand-new TCP+TLS per attempt — defeats NAT/conntrack
+   sessions silently dropped mid-life) and tcp4-first dialing (defeats IPv6
+   paths whose handshake succeeds but whose return route blackholes — Happy
+   Eyeballs only protects connect, not data). tcp4 failure falls back to the
+   requested family, so v6-only hosts lose nothing: rescue runs strictly
+   after the pooled path already failed.
+3. **Patient backoff + actionable exhaustion.** `billingRetryDelays` grew to
+   4 attempts over ~4.1s (was 3 over 1.2s). When transport-class failures
+   exhaust every attempt, the surfaced error keeps its greppable
+   `Post "url": EOF` shape (still transient-classified) and appends the
+   attempts count plus the `HTTPS_PROXY` deployment hint, instead of a bare
+   EOF.
+
+Regression tests (`billing_rescue_test.go`): the rescue context marker
+switches transports (observed via the `Connection: close` wire fingerprint),
+an abrupt server close on attempt 1 is recovered by the rescue retry, and
+full exhaustion keeps the original error shape while appending the hint.
+
+
 ## 0.9.47
 
 ### Billing 401/403 gateway pages are classified, no longer masked as JSON parse errors

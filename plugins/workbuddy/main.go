@@ -116,10 +116,12 @@ type loginCtx struct {
 }
 
 var (
-	hostAPI        *C.cliproxy_host_api // captured at init, used for async host calls
-	loginStates    sync.Map             // state(string) -> *loginCtx
-	httpClientOnce sync.Once
-	sharedClient   *http.Client
+	hostAPI          *C.cliproxy_host_api // captured at init, used for async host calls
+	loginStates      sync.Map             // state(string) -> *loginCtx
+	httpClientOnce   sync.Once
+	sharedClient     *http.Client
+	rescueClientOnce sync.Once
+	rescueClient     *http.Client // fresh-conn/tcp4-first transport for billing retries
 )
 
 // loginStatesPruneInterval bounds how often the janitor sweeps abandoned

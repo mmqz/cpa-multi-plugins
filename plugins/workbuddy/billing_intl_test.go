@@ -57,7 +57,7 @@ func TestBillingHeaders_IntlRealm(t *testing.T) {
 	sa := &storedAuth{}
 	sa.Auth.Domain = "codebuddy.ai"
 	sa.Auth.AccessToken = "intl-test-token"
-	if _, err := billingCallOnce(sa, "/probe", nil); err != nil {
+	if _, err := billingCallOnce(sa, "/probe", nil, 0); err != nil {
 		t.Fatalf("billingCallOnce: %v", err)
 	}
 }
