@@ -244,9 +244,20 @@ func hasClaimableDailyRow(status *campaignStatusResponse) bool {
 // rounds refresh at 10:00 UTC+8; 48h comfortably covers a missed day.
 const roundMemoMaxAge = 48 * time.Hour
 
-// roundProbeCooldown rate-limits the bypass probe to one POST per account per
-// window — the same 6h cadence the hub applies to its 同人已领 cooldown.
+// roundProbeCooldown rate-limits the bypass probe to one POST per account
+// per round — the same 6h cadence the hub applies to its 同人已领 cooldown.
+// Armed by CONCLUSIVE verdicts that are stable for the round's lifetime
+// (grant landed / ALREADY_CLAIMED / BLOCKED 同人已领).
 const roundProbeCooldown = 6 * time.Hour
+
+// roundProbeEligibleCooldown is the SHORTER latch for NOT_ELIGIBLE verdicts:
+// unlike claimed/blocked, "not eligible" is not stable for the round — the
+// state flips at the 10:00 UTC+8 refresh (CAMPAIGN_NOT_ACTIVE → CLAIMABLE)
+// and stock may return. 30min keeps one POST per half hour at worst while
+// still never hammering upstream. Field report 2026-10-05: a 6h NOT_ELIGIBLE
+// latch spanning the refresh boundary silenced every probe for the rest of
+// the day even though the round had re-opened.
+const roundProbeEligibleCooldown = 30 * time.Minute
 
 type campaignRoundEntry struct {
 	CampaignID  string
@@ -268,7 +279,15 @@ var roundMemo = &campaignRoundMemo{
 // rememberCampaignRound records the first daily-shaped row of the response.
 // Any status counts (CLAIMABLE / CLAIMED): a claimed row is exactly the id a
 // hidden next round will reuse.
+//
+// v0.8.57: the memo is also hydrated from / flushed to the on-disk round
+// state (round_state.go). A host restart used to wipe the only record of the
+// daily campaign id, permanently disabling the bypass probe on deployments
+// where no account can currently see the row — the mechanism behind the
+// "init 还是有概率不能签到" report (account u673e7fcc, Intl): whether a day
+// worked depended on whether the host happened to restart.
 func rememberCampaignRound(region, uid string, status *campaignStatusResponse) {
+	loadRoundStateOnce()
 	if status == nil {
 		return
 	}
@@ -281,6 +300,7 @@ func rememberCampaignRound(region, uid string, status *campaignStatusResponse) {
 			continue
 		}
 		roundMemo.remember(region, uid, c)
+		saveRoundState()
 		return
 	}
 }
@@ -313,13 +333,33 @@ func (m *campaignRoundMemo) probeFor(region, uid string) (campaign, bool) {
 
 var (
 	roundProbeMu   sync.Mutex
-	roundProbeLast = map[string]time.Time{} // key region:uid
+	roundProbeLast = map[string]roundProbeLatch{} // key region:uid:campaignID
 )
 
+// roundProbeLatch records WHEN a conclusive verdict armed the cooldown and
+// FOR HOW LONG — the TTL depends on the verdict kind, because "not eligible"
+// is not a stable state (it flips at the 10:00 UTC+8 refresh) while
+// claimed/blocked verdicts hold for the round's lifetime.
+type roundProbeLatch struct {
+	At  time.Time
+	TTL time.Duration
+}
+
+// probeCooldownFor maps an upstream verdict to its latch TTL.
+func probeCooldownFor(result string) time.Duration {
+	if result == "NOT_ELIGIBLE" {
+		return roundProbeEligibleCooldown
+	}
+	return roundProbeCooldown
+}
+
 // probeHiddenRound runs the bypass-list verdict probe for one account and
-// returns the normalized claim result, or nil when no fresh id exists or the
-// cooldown forbids another POST. Network/parse errors return nil — the probe
-// is best-effort and must never mask the list-based diagnosis.
+// returns the normalized claim result (nil when no POST happened) plus a
+// panel-renderable NOTE explaining any skip / failure / inconclusive answer.
+// The probe is best-effort and must never mask the list-based diagnosis —
+// but v0.8.57 stops discarding its outcome: a silent nil used to render as
+// the blind "今日暂无可领取权益" with no trace of WHY the authoritative
+// oracle never answered (field report u673e7fcc 2026-10-05).
 //
 // v0.8.40 cooldown fix ("概率性不成功"): the latch used to be stamped BEFORE
 // the probe fired, so one inconclusive attempt (network hiccup, upstream 5xx)
@@ -327,38 +367,57 @@ var (
 // "今日暂无可领取权益" without ever POSTing. Only a CONCLUSIVE upstream
 // verdict (claimed / already / blocked / typed eligibility) now arms the
 // cooldown; inconclusive transport failures leave it free for the next tick.
-func probeHiddenRound(sa *storedAuth) map[string]any {
+//
+// v0.8.57 latch fixes (field report "init 还是有概率不能签到"):
+//   - the latch key now includes the CAMPAIGN ID (region:uid:campaignID) —
+//     a conclusive verdict on round R must not silence the probe for a new
+//     round R+1 that appears after the 10:00 UTC+8 refresh;
+//   - NOT_ELIGIBLE latches for 30min instead of 6h (roundProbeEligibleCooldown):
+//     "not eligible" flips at the refresh, so a morning CAMPAIGN_NOT_ACTIVE /
+//     OUT_OF_STOCK answer must not hold through the afternoon.
+func probeHiddenRound(sa *storedAuth) (map[string]any, string) {
+	loadRoundStateOnce()
 	region := authRegion(sa)
-	key := region + ":" + sa.Account.UID
-	roundProbeMu.Lock()
-	if t, ok := roundProbeLast[key]; ok && time.Since(t) < roundProbeCooldown {
-		roundProbeMu.Unlock()
-		return nil
-	}
-	c, ok := roundMemo.probeFor(region, sa.Account.UID)
+	uid := sa.Account.UID
+	c, ok := roundMemo.probeFor(region, uid)
 	if !ok {
+		return nil, "绕过列表直探未执行：本机尚无已记忆的每日轮次 id（列表从未出现过该活动行），待其出现一次后自动记忆"
+	}
+	key := region + ":" + uid + ":" + c.CampaignID
+	roundProbeMu.Lock()
+	if l, ok := roundProbeLast[key]; ok && time.Since(l.At) < l.TTL {
+		until := l.At.Add(l.TTL).Format("15:04")
 		roundProbeMu.Unlock()
-		return nil
+		return nil, fmt.Sprintf("绕过列表直探冷却中（本账号对该轮次的上一判定已闩住，%s 后重试）", until)
 	}
 	roundProbeMu.Unlock()
 	res, err := claimCampaignByID(sa, &c)
 	if err != nil || res == nil {
-		return nil // transport/parse failure — retryable, no latch
+		brief := ""
+		if err != nil {
+			brief = truncateRedacted(err.Error(), 120)
+		}
+		return nil, "绕过列表直探失败（传输/解析，不冷却，下次签到自动重试）：" + brief
 	}
 	if res["success"] == true {
 		roundProbeMu.Lock()
-		roundProbeLast[key] = time.Now()
+		roundProbeLast[key] = roundProbeLatch{At: time.Now(), TTL: probeCooldownFor("CLAIMED")}
 		roundProbeMu.Unlock()
-		return res
+		return res, ""
 	}
 	switch r, _ := res["result"].(string); r {
 	case "ALREADY_CLAIMED", "BLOCKED", "NOT_ELIGIBLE":
 		roundProbeMu.Lock()
-		roundProbeLast[key] = time.Now()
+		roundProbeLast[key] = roundProbeLatch{At: time.Now(), TTL: probeCooldownFor(r)}
 		roundProbeMu.Unlock()
-		return res
+		return res, ""
 	}
-	return res // inconclusive (http error body etc.) — returned, not latched
+	// Inconclusive (http error body etc.) — returned, not latched; the
+	// upstream message rides along so the panel sees what happened.
+	if m, ok := res["message"].(string); ok && strings.TrimSpace(m) != "" {
+		return res, "绕过列表直探未决：" + truncateRedacted(m, 120)
+	}
+	return res, "绕过列表直探未决（上游无判定）"
 }
 
 // campaignsURL returns the campaigns list URL.
@@ -772,13 +831,29 @@ func claimableCampaign(status *campaignStatusResponse) *campaign {
 // campaigns disappear from /me/campaigns entirely once the activity ends, so
 // an inactive summary is a normal state, not a failure (v0.8.18: surfaced as
 // reason=none instead of an error path).
+//
+// v0.8.57: rows the server ships WITHOUT an actionType count too, when their
+// benefit is credits-shaped — the same family claimableCampaigns already
+// treats as the daily row (v0.8.39). The intl face sometimes drops the
+// actionType field after the 10:00 UTC+8 refresh, and a CLAIMED such row
+// used to fall through every gate into the probe + generic "none" dance
+// (check-in reported 今日暂无可领取权益 for an account that HAD claimed —
+// the probe's own ALREADY_CLAIMED verdict then proved the point one POST
+// later). Reading the state off the list is free and answers the same thing.
 func claimedCampaign(status *campaignStatusResponse) *campaign {
 	if status == nil {
 		return nil
 	}
 	for i := range status.Campaigns {
 		c := &status.Campaigns[i]
-		if strings.EqualFold(c.ActionType, "CLAIM_BENEFIT") && strings.EqualFold(c.ClaimStatus, "CLAIMED") {
+		if !strings.EqualFold(c.ClaimStatus, "CLAIMED") {
+			continue
+		}
+		at := strings.ToUpper(strings.TrimSpace(c.ActionType))
+		if at == "CLAIM_BENEFIT" {
+			return c
+		}
+		if at == "" && campaignBenefitClass(c) == "credits" {
 			return c
 		}
 	}
@@ -1066,7 +1141,13 @@ func performCampaignCheckin(sa *storedAuth) (map[string]any, error) {
 		if landed != nil {
 			return landed, nil
 		}
-		probeRes := probeHiddenRound(sa)
+		// v0.8.57: the probe now reports skips/failures instead of
+		// dying silently — the note rides the notes so even the
+		// fall-through diagnosis says WHY the oracle didn't answer.
+		probeRes, probeNote := probeHiddenRound(sa)
+		if probeNote != "" {
+			notes = append(notes, probeNote)
+		}
 		if probeRes != nil {
 			if success, _ := probeRes["success"].(bool); success {
 				mergeVerdictNotes(probeRes, notes)

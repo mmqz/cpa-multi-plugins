@@ -15,12 +15,20 @@ import (
 	"time"
 )
 
-// check-in schedule: 10:00 and 21:00 local time.
+// check-in schedule: 10:00, 15:00 and 21:00 local time.
 // 10 replaces 9: the CN daily check-in activity opens at 10:00 local
 // (hope0719/qoder-check-in README, 2026-09-18~09-30 activity — "每天
 // 10:00 起可领 100 Credits"); a 09:00 tick hits "活动未开始" and fails.
 // 21 stays as the evening retry/keepalive companion.
-var checkinHours = []int{10, 21}
+// 15 joins in v0.8.57 (field report "init 还是有概率不能签到"): a mid-day
+// compensation tick between the 10:00 refresh and the evening companion —
+// when the 10:00 state was bad (hidden row + cold probe memo, a latched
+// NOT_ELIGIBLE spanning the refresh, upstream grant lag), the account
+// self-heals the same afternoon instead of waiting for 21:00. Every gate
+// in front of the claim is idempotent (TodayCheckedIn / ALREADY_CLAIMED /
+// per-round probe latch), so the extra tick costs a status read per account
+// on the healthy path.
+var checkinHours = []int{10, 15, 21}
 
 // plugin-level config decoded from plugin.register/reconfigure config_yaml.
 var (

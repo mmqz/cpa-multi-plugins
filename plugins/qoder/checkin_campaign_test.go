@@ -51,7 +51,7 @@ func newBillingServer(t *testing.T, region string, respond map[string]func(r *ht
 	// reset them per test so scenarios stay order-independent (a memo
 	// seeded by an earlier test would otherwise fire stray probe POSTs).
 	roundMemo = &campaignRoundMemo{perAccount: map[string]campaignRoundEntry{}, perRegion: map[string]campaignRoundEntry{}}
-	roundProbeLast = map[string]time.Time{}
+	roundProbeLast = map[string]roundProbeLatch{}
 	launchSyncLast = map[string]time.Time{}
 	return srv
 }
