@@ -98,7 +98,7 @@ func TestRoundStateLoadDropsStaleEntries(t *testing.T) {
 		SavedAt: time.Now().UTC().Format(time.RFC3339),
 		PerRegion: map[string]campaignRoundEntry{
 			"intl": {CampaignID: "camp-fresh", CampaignKey: "k1", SeenAt: time.Now().Add(-time.Hour)},
-			"cn":   {CampaignID: "camp-stale", CampaignKey: "k2", SeenAt: time.Now().Add(-72 * time.Hour)},
+			"cn":   {CampaignID: "camp-stale", CampaignKey: "k2", SeenAt: time.Now().Add(-31 * 24 * time.Hour)},
 		},
 	}
 	raw, _ := json.Marshal(st)
@@ -198,22 +198,35 @@ func TestProbeLatchPerRound(t *testing.T) {
 // TestProbeNotesSurface: every silent path of the old probe now returns a
 // panel-renderable note.
 func TestProbeNotesSurface(t *testing.T) {
-	t.Run("cold memo", func(t *testing.T) {
+	t.Run("cold memo fires the builtin seed probe", func(t *testing.T) {
+		prevLast := roundProbeLast
+		t.Cleanup(func() { roundProbeLast = prevLast })
+		roundProbeLast = map[string]roundProbeLatch{}
+
+		claimHits := 0
 		newBillingServer(t, "cn", map[string]func(r *http.Request) (int, string){
 			"/sash/api/v1/me/campaigns": func(r *http.Request) (int, string) {
 				return http.StatusOK, `{"showCampaign":true,"campaigns":[]}`
+			},
+			// The builtin CN seed's claim endpoint — a stale/empty stub
+			// answering the authoritative replay verdict.
+			"/sash/api/v1/me/campaigns/" + builtinRoundSeeds[regionCN].CampaignID + "/claim": func(r *http.Request) (int, string) {
+				claimHits++
+				return http.StatusOK, `{"status":"CLAIMED","replayed":true}`
 			},
 		})
 		res, err := performCheckinCall(cnAuth())
 		if err != nil {
 			t.Fatalf("performCheckinCall: %v", err)
 		}
-		msg, _ := res["message"].(string)
-		if !strings.Contains(msg, "绕过列表直探未执行") || !strings.Contains(msg, "每日轮次 id") {
-			t.Fatalf("cold-memo probe must explain itself, got %q", msg)
+		if claimHits != 1 {
+			t.Fatalf("builtin seed must fire exactly one claim on a cold memo (hits=%d)", claimHits)
 		}
-		if result, _ := res["result"].(string); result != "NOTHING_CLAIMABLE" {
-			t.Fatalf("result = %v, want NOTHING_CLAIMABLE", res["result"])
+		if result, _ := res["result"].(string); result != "ALREADY_CLAIMED" {
+			t.Fatalf("result = %v, want ALREADY_CLAIMED from the seed probe", res["result"])
+		}
+		if result, _ := res["result"].(string); result == "NOTHING_CLAIMABLE" {
+			t.Fatal("seed probe must prevent the blind NOTHING_CLAIMABLE verdict")
 		}
 	})
 

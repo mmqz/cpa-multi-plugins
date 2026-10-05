@@ -240,9 +240,69 @@ func hasClaimableDailyRow(status *campaignStatusResponse) bool {
 // cooldown; ids come exclusively from rows this deployment actually saw.
 // ---------------------------------------------------------------------------
 
-// roundMemoMaxAge bounds how long a seen campaign id stays probeable. Daily
-// rounds refresh at 10:00 UTC+8; 48h comfortably covers a missed day.
-const roundMemoMaxAge = 48 * time.Hour
+// roundMemoMaxAge bounds how long a seen campaign id stays probeable.
+//
+// v0.8.58 correction (live evidence 2026-10-05): the daily round is NOT a
+// new object per day — act-20260930-295 (created Sep 30) was still THE
+// current round on Oct 5, with its startAt/endAt window sliding daily at
+// the 10:00 UTC+8 refresh. The old 48h bound expired VALID ids over every
+// weekend, re-blinding deployments whose lists are identity-filtered (the
+// restart-resilience v0.8.57 added silently died each 48h). A round id's
+// real validity is enforced by the authoritative claim verdict anyway (a
+// dead id answers typed CAMPAIGN_NOT_ACTIVE with a 30-min latch), so the
+// memo bound only needs to outlive the longest normal campaign lifetime:
+// 30 days.
+const roundMemoMaxAge = 30 * 24 * time.Hour
+
+// ---------------------------------------------------------------------------
+// v0.8.58 — round-id SEEDS: the probe's last-resort id source for deployments
+// whose campaigns list is PERMANENTLY identity-filtered (Intl + derived
+// identity; live-verified mechanism 2026-10-05, see machine_identity.go).
+// Such deployments never see the daily row, so nothing ever seeds the memo
+// and the bypass probe stays dead forever — the exact mechanism behind the
+// u673e7fcc "今日无可签领权益" field report.
+//
+// The claim endpoint demands the campaign UUID (live-verified: the act- key
+// form answers 400 FIELD_VALIDATION_FAILED "campaign ID must be a valid
+// UUID"), so seeds are UUIDs. Values live in two layers:
+//
+//  1. checkin_round_seeds config (operator): "intl=<uuid>[,cn=<uuid>]" —
+//     wins whenever set. The operator can read the current round's UUID
+//     off any account that sees the row (official client activity page,
+//     another deployment with QD_UMID_BIN, or the plugin panel's own memo
+//     file ~/.cpa-multi-plugins/qoder_campaign_rounds.json).
+//  2. builtinRoundSeeds (shipped): ids live-verified from THIS plugin's own
+//     captures. The daily round object is LONG-LIVED (act-20260930-295 was
+//     still the current round five days after creation, window sliding
+//     daily), so a verified id keeps working until upstream rotates the
+//     campaign object — at which point the claim answers typed
+//     CAMPAIGN_NOT_ACTIVE (30-min latch), the note says so, and the seed
+//     needs a refresh from a capture that can still see the row.
+//
+// Seed probes never write the memo (a seed is not a SEEN row) and never
+// bypass the authoritative-verdict rules — a wrong/stale seed is harmless by
+// construction.
+var builtinRoundSeeds = map[string]campaignRoundEntry{
+	regionCN: {
+		CampaignID:  "01a0f1cc-d06c-7d4c-8ea0-4b52b24e94a5",
+		CampaignKey: "act-20260930-295", // live: reward 200 + replayed claim 200, 2026-10-05
+	},
+	// regionIntl: no UUID ever captured without a real-identity list read —
+	// operators seed it via checkin_round_seeds (the panel note names the
+	// exact remedy).
+}
+
+// roundSeedFor resolves one region's probe seed: operator config first, then
+// the built-in constant. Returns the source label for the panel note.
+func roundSeedFor(region string) (string, string, bool) {
+	if id := operatorRoundSeed(region); id != "" {
+		return id, "操作员配置 checkin_round_seeds", true
+	}
+	if e, ok := builtinRoundSeeds[region]; ok && e.CampaignID != "" {
+		return e.CampaignID, "内置已验证轮次", true
+	}
+	return "", "", false
+}
 
 // roundProbeCooldown rate-limits the bypass probe to one POST per account
 // per round — the same 6h cadence the hub applies to its 同人已领 cooldown.
@@ -361,6 +421,13 @@ func probeCooldownFor(result string) time.Duration {
 // the blind "今日暂无可领取权益" with no trace of WHY the authoritative
 // oracle never answered (field report u673e7fcc 2026-10-05).
 //
+// v0.8.58: when the memo is empty (deployments whose Intl list is
+// permanently identity-filtered have NEVER seen a daily row, so nothing
+// ever seeds it — the v0.8.57 persistence fix cannot help there), the probe
+// falls back to a round-id SEED: the operator-configured
+// checkin_round_seeds entry first, then the built-in live-verified
+// constant. The claim verdict stays the authority either way.
+//
 // v0.8.40 cooldown fix ("概率性不成功"): the latch used to be stamped BEFORE
 // the probe fired, so one inconclusive attempt (network hiccup, upstream 5xx)
 // silenced every retry for the next 6h — auto check-ins all day reported
@@ -380,8 +447,19 @@ func probeHiddenRound(sa *storedAuth) (map[string]any, string) {
 	region := authRegion(sa)
 	uid := sa.Account.UID
 	c, ok := roundMemo.probeFor(region, uid)
+	seedSource := ""
 	if !ok {
-		return nil, "绕过列表直探未执行：本机尚无已记忆的每日轮次 id（列表从未出现过该活动行），待其出现一次后自动记忆"
+		// v0.8.58: the list has never shown a daily row on this deployment
+		// (identity-filtered Intl lists are the field case) — fall back to
+		// the round-id seed chain before giving up.
+		if s, src, found := roundSeedFor(region); found {
+			c = campaign{CampaignID: s, CampaignKey: s}
+			ok = true
+			seedSource = src
+		}
+	}
+	if !ok {
+		return nil, "绕过列表直探未执行：本机尚无已记忆的每日轮次 id（列表从未出现过该活动行）——可在配置 checkin_round_seeds 填入该区每日轮次的 campaignId（形如 01a0… 的 UUID，非 act- key），或放置官方 runtime-info（QD_UMID_BIN）恢复列表可见性"
 	}
 	key := region + ":" + uid + ":" + c.CampaignID
 	roundProbeMu.Lock()
@@ -398,6 +476,9 @@ func probeHiddenRound(sa *storedAuth) (map[string]any, string) {
 			brief = truncateRedacted(err.Error(), 120)
 		}
 		return nil, "绕过列表直探失败（传输/解析，不冷却，下次签到自动重试）：" + brief
+	}
+	if seedSource != "" {
+		mergeVerdictNotes(res, []string{"轮次 id 来自" + seedSource + "（列表被过滤时的直探种子）"})
 	}
 	if res["success"] == true {
 		roundProbeMu.Lock()

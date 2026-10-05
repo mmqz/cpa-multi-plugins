@@ -72,6 +72,17 @@ var (
 	// claimed here — the flag only covers the cannot-verify bucket.
 	claimUnverified   bool
 	claimUnverifiedMu sync.RWMutex
+
+	// checkinRoundSeeds: config_yaml checkin_round_seeds, v0.8.58. Operator
+	// supplied per-region daily-round campaign UUIDs for the bypass probe's
+	// last-resort fallback ("intl=01a0…,cn=01a0…"). Deployments whose
+	// campaigns list is permanently identity-filtered (Intl + derived
+	// machine identity) never see the daily row, so their probe memo never
+	// seeds — a seed id lets check-in still claim. The upstream claim
+	// verdict stays the authority: a stale seed answers typed
+	// CAMPAIGN_NOT_ACTIVE and is retried after the 30-min latch expires.
+	checkinRoundSeeds   map[string]string
+	checkinRoundSeedsMu sync.RWMutex
 )
 
 // Default URL tries localhost first (works for both bare-metal and Docker
@@ -104,6 +115,7 @@ func configure(raw []byte) {
 	nextMgmtKey := ""
 	nextStreamHeadTimeout := 0
 	nextClaimUnverified := false
+	nextRoundSeeds := ""
 
 	cfgURL, cfgKey := "", ""
 	if len(raw) > 0 {
@@ -154,6 +166,9 @@ func configure(raw []byte) {
 				}
 				if v, present := m["claim_unverified"]; present {
 					nextClaimUnverified = configScalarBool(v)
+				}
+				if v, present := m["checkin_round_seeds"]; present {
+					nextRoundSeeds = configScalarString(v)
 				}
 			}
 			for _, line := range strings.Split(string(req.ConfigYAML), "\n") {
@@ -216,6 +231,10 @@ func configure(raw []byte) {
 					v := strings.TrimSpace(strings.TrimPrefix(line, "claim_unverified:"))
 					nextClaimUnverified = v == "true" || v == "1" || v == "yes" || v == "on"
 				}
+				if strings.HasPrefix(line, "checkin_round_seeds:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "checkin_round_seeds:"))
+					nextRoundSeeds = strings.Trim(v, "\"'")
+				}
 			}
 		}
 	}
@@ -262,6 +281,8 @@ func configure(raw []byte) {
 	claimUnverified = nextClaimUnverified
 	claimUnverifiedMu.Unlock()
 
+	applyRoundSeeds(nextRoundSeeds)
+
 	setStreamHeadTimeout(nextStreamHeadTimeout)
 
 	// management key: config_yaml > env > keep existing. Empty stays empty
@@ -275,6 +296,66 @@ func configure(raw []byte) {
 
 	resolveUsageReport(cfgURL, cfgKey)
 	ensureScheduler()
+}
+
+// parseRoundSeeds turns the config scalar "intl=<uuid>,cn=<uuid>" (or
+// space/semicolon separated) into the per-region map. Entries whose value is
+// not a 36-char UUID shape are dropped silently — a pasted act- key must
+// never ride the claim path (the upstream demands the UUID form; live
+// verified 2026-10-05). Unknown region labels are kept normalized so
+// "global=" maps to intl.
+func parseRoundSeeds(s string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ';' || r == ' ' || r == '\t' }) {
+		k, v, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		region := normalizeRegion(k)
+		id := strings.TrimSpace(v)
+		if !roundSeedUUIDShape(id) {
+			continue
+		}
+		out[region] = strings.ToLower(id)
+	}
+	return out
+}
+
+// roundSeedUUIDShape matches the canonical 8-4-4-4-12 hex UUID the claim
+// endpoint demands.
+func roundSeedUUIDShape(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !strings.ContainsRune("0123456789abcdefABCDEF", r) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// applyRoundSeeds stores the operator's seed map (nil/empty clears it).
+func applyRoundSeeds(s string) {
+	parsed := parseRoundSeeds(s)
+	checkinRoundSeedsMu.Lock()
+	checkinRoundSeeds = parsed
+	checkinRoundSeedsMu.Unlock()
+}
+
+// operatorRoundSeed returns the operator's seed for one region ("" when
+// unset).
+func operatorRoundSeed(region string) string {
+	checkinRoundSeedsMu.RLock()
+	defer checkinRoundSeedsMu.RUnlock()
+	return checkinRoundSeeds[region]
 }
 
 // setStreamHeadTimeout stores the head-gate window in seconds. Negative values

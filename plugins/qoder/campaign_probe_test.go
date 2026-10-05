@@ -280,6 +280,9 @@ func TestRoundMemoFedByListFetch(t *testing.T) {
 
 // TestProbeExcludesExpiredMemo: a memo older than the freshness window must
 // never be probed — the campaign id could have been recycled by a new round.
+// v0.8.58: the window is 30 DAYS now (live evidence: the daily round object
+// is long-lived, window sliding daily — a 5-day-old id is VALID, the old 48h
+// bound expired working ids over every weekend).
 func TestProbeExcludesExpiredMemo(t *testing.T) {
 	roundMemo = &campaignRoundMemo{
 		perAccount: map[string]campaignRoundEntry{},
@@ -288,9 +291,15 @@ func TestProbeExcludesExpiredMemo(t *testing.T) {
 	t.Cleanup(func() {
 		roundMemo = &campaignRoundMemo{perAccount: map[string]campaignRoundEntry{}, perRegion: map[string]campaignRoundEntry{}}
 	})
-	roundMemo.perRegion["cn"] = campaignRoundEntry{CampaignID: "camp-stale", SeenAt: time.Now().Add(-72 * time.Hour)}
+	roundMemo.perRegion["cn"] = campaignRoundEntry{CampaignID: "camp-stale", SeenAt: time.Now().Add(-31 * 24 * time.Hour)}
 	if _, ok := roundMemo.probeFor("cn", "u"); ok {
 		t.Fatal("stale memo must not be probeable")
+	}
+	// A five-day-old id was wrongly expired by the old 48h bound — the exact
+	// field evidence (act-20260930-295 still current Oct 5) — must probe.
+	roundMemo.perRegion["cn"] = campaignRoundEntry{CampaignID: "camp-stale", SeenAt: time.Now().Add(-5 * 24 * time.Hour)}
+	if _, ok := roundMemo.probeFor("cn", "u"); !ok {
+		t.Fatal("5-day-old round id must stay probeable (long-lived round objects)")
 	}
 	_ = fmt.Sprint() // keep fmt imported for future assertions
 }

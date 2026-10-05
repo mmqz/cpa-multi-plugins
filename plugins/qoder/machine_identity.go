@@ -79,6 +79,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
@@ -87,6 +88,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -247,10 +249,51 @@ func derivedMachineIdentity(uid string) machineIdentity {
 		MachineToken:    simulatedMachineToken(uid),
 		MachineType:     simulatedMachineType(uid),
 		MachineCode:     simulatedMachineCode(uid),
-		MachineOS:       machineOSString(),
-		MachineHostname: machineHostname(),
+		MachineOS:       simulatedMachineOS(),
+		MachineHostname: simulatedHostname(),
 		Source:          "derived",
 	}
+}
+
+// simulatedMachineOS / simulatedHostname (v0.8.58): complete the official
+// desktop disguise on the two headers the token shape alone cannot cover.
+//
+// The official desktop client ONLY ships its identity bridge for Windows and
+// macOS builds — its Cosy-MachineOS is always "x86_64_win32" (or the darwin
+// counterpart), and Cosy-MachineHostname is the operator's PC name
+// ("DESKTOP-XXXXXXX" being the Windows default). A container presenting
+// "x86_64_linux" plus a 12-hex container id is a shape NO official client
+// can ever produce — a free structural tell on gateways that validate the
+// identity at all (CN demonstrably does not — live 2026-10-05, full list
+// with derived headers; Intl is the strict one per the dt-RHl0 field
+// verification, and v0.8.48 never live-tested a WELL-FORMED derived
+// identity there, only "no headers" and "real runtime-info"). Presenting
+// the official Windows desktop dialect removes the tell at zero cost: the
+// values are stable per host, never collide across deployments sharing one
+// hostname space, and match what the official client itself sends.
+const simulatedOS = "x86_64_win32"
+
+func simulatedMachineOS() string {
+	return simulatedOS
+}
+
+// simulatedHostname derives a stable, Windows-default-shaped PC name from
+// the real hostname (so one deployment keeps one identity across restarts
+// and accounts) without leaking the container id upstream.
+func simulatedHostname() string {
+	if h, err := os.Hostname(); err == nil {
+		if matched, _ := regexp.MatchString(`(?i)^DESKTOP-[A-Z0-9]{7}$`, strings.TrimSpace(h)); matched {
+			return strings.ToUpper(strings.TrimSpace(h))
+		}
+		sum := sha256.Sum256([]byte("hostname:" + strings.TrimSpace(h)))
+		const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+		out := make([]byte, 7)
+		for i := range out {
+			out[i] = alphabet[int(sum[i])%len(alphabet)]
+		}
+		return "DESKTOP-" + string(out)
+	}
+	return "DESKTOP-QODER" // hub's constant, last resort only
 }
 
 func derivedMachineID(uid, salt string) string {
