@@ -242,12 +242,14 @@ func TestCampaignIdleDiagnosisRendersUpstreamTaxonomy(t *testing.T) {
 	}
 }
 
-// TestCampaignIdleDiagnosisNoTargetedCampaign pins the v0.8.59 u673e7fcc
-// verdict: list VISIBLE, no CLAIM_BENEFIT row in any dialect, server's own
-// claimable flag FALSE — the upstream is not targeting this account with a
-// daily round, and the diagnosis must say so (with the official-client
-// verification path) instead of pushing identity/seed remedies that the
-// 2026-10-08 live isolation disproved.
+// TestCampaignIdleDiagnosisNoTargetedCampaign pins the v0.8.60 u673e7fcc
+// verdict split (live 2026-10-08): a list with no CLAIM_BENEFIT row means
+// something different depending on the identity source. Under a DERIVED
+// (simulated) identity the daily row is device-targeted and filtered — the
+// diagnosis must name the identity gap and the bridge remedy (the SAME
+// account went invisible → visible → claimed +100 under a real
+// runtime-info identity that same day). Under a NATIVE identity the honest
+// audience verdict stands (targeted delivery, official-client check path).
 func TestCampaignIdleDiagnosisNoTargetedCampaign(t *testing.T) {
 	// the exact intl field shape: one CLAIMED marketing VIEW_DETAILS row
 	status := &campaignStatusResponse{
@@ -257,18 +259,35 @@ func TestCampaignIdleDiagnosisNoTargetedCampaign(t *testing.T) {
 			{CampaignID: "01a05bce-e800-7494-a002-806e4438f483", CampaignKey: "act-20260901-493", ActionType: "VIEW_DETAILS", ClaimStatus: "CLAIMED", StartAt: 1788247200, EndAt: 1793462340},
 		},
 	}
+	// derived identity (the test env default): identity-gap diagnosis
 	msg := campaignIdleDiagnosis(status, intlAuth())
-	for _, want := range []string{"claimable=false", "定向投放"} {
+	for _, want := range []string{"模拟身份", "runtime-info", "act-20260901-493"} {
 		if !strings.Contains(msg, want) {
-			t.Fatalf("intl no-target diagnosis missing %q: %q", want, msg)
+			t.Fatalf("intl derived no-row diagnosis missing %q: %q", want, msg)
 		}
 	}
 	if strings.Contains(msg, "checkin_round_seeds") {
-		t.Fatalf("no-target diagnosis must not push seeds for a visible, server-declined list: %q", msg)
+		t.Fatalf("no-row diagnosis must not push seeds for a visible list: %q", msg)
+	}
+	// native identity: the honest audience verdict is reserved for hosts
+	// that already run the official bridge
+	defer func(id *machineIdentity) { machineIdentityOverride = id }(machineIdentityOverride)
+	machineIdentityOverride = &machineIdentity{
+		MachineToken: "P1gAnative-diag-000000000000000000000000000000000000000000000000000000000000",
+		MachineType:  "a82301a7913757cf76",
+		MachineCode:  "3e645ab7002ec7bd6f",
+		Source:       identitySourceNative,
+	}
+	msg = campaignIdleDiagnosis(status, intlAuth())
+	for _, want := range []string{"定向投放", "真机身份"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("intl native no-row diagnosis missing %q: %q", want, msg)
+		}
 	}
 	// a visible daily row (any status) must NOT trigger the branch
+	machineIdentityOverride = nil
 	status.Campaigns = append(status.Campaigns, campaign{CampaignID: "daily", CampaignKey: "act-20260930-516", ActionType: "CLAIM_BENEFIT", ClaimStatus: "CLAIMED", Benefit: &campaignBen{Kind: "CREDITS", Amount: 100}})
-	if msg2 := campaignIdleDiagnosis(status, intlAuth()); strings.Contains(msg2, "claimable=false") {
+	if msg2 := campaignIdleDiagnosis(status, intlAuth()); strings.Contains(msg2, "定向投放，非所有账号可见") {
 		t.Fatalf("a present daily row must not be reported as no-target: %q", msg2)
 	}
 }

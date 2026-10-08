@@ -192,10 +192,22 @@ func machineIdentityFor(region, uid string, force bool) machineIdentity {
 	return id
 }
 
-// computeMachineIdentity tries the official native bridge first and falls
-// back to the stable per-uid derivation.
+// computeMachineIdentity tries the official native bridge first (operator
+// install or QD_UMID_BIN), then the plugin's self-provisioned one (npm
+// extraction, umid_provision.go), and only then falls back to the stable
+// per-uid derivation.
+//
+// v0.8.60 (live 2026-10-08, u673e7fcc Intl): the provisioning leg is what
+// actually fixes container check-in — under a derived identity the daily
+// CLAIM_BENEFIT row was invisible and the claim itself 503'd; under the
+// provisioned official bridge the row appeared and the claim granted +100.
 func computeMachineIdentity(region, uid string) machineIdentity {
 	if exe := runtimeInfoExePath(region); exe != "" {
+		if id := nativeMachineIdentityFrom(exe, uid); id != nil {
+			return *id
+		}
+	}
+	if exe := provisionedRuntimeInfo(); exe != "" {
 		if id := nativeMachineIdentityFrom(exe, uid); id != nil {
 			return *id
 		}
@@ -608,5 +620,5 @@ func machineIdentityHint(sa *storedAuth) string {
 		}
 		return "。本机身份来源：官方 runtime-info.exe（真实机器身份，定向活动可见性最优）"
 	}
-	return "。本机身份来源：官方格式模拟身份（88 位 P1gA 令牌 + 91/00 型机器码，逐字段复刻官方 runtime-info 输出形态，随账号稳定且跨账号隔离）——容器部署的推荐形态；如需真机身份可放置官方安装包内 resources/umid/runtime-info 并以 QD_UMID_BIN 指定其路径"
+	return "。本机身份来源：官方格式模拟身份（88 位 P1gA 令牌 + 91/00 型机器码）——注意：定向活动行（每日 100 积分）对模拟身份不可见、claim 亦会被风控/同人依赖拒绝（真桥对照实弹已证）；插件默认从官方 npm 包自动供给真身份桥（QD_UMID_AUTO=0 可关闭），亦可用 QD_UMID_BIN 指定官方 runtime-info；供给成功后自动切换真机身份"
 }

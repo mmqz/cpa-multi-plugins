@@ -1010,10 +1010,13 @@ func claimCampaignByID(sa *storedAuth, c *campaign) (map[string]any, error) {
 	// claim still rode the machine headers, so the list showed the daily row
 	// while the claim itself was risk-blocked ("签到不了").
 	//
-	// Therefore the claim sends ZERO Cosy-Machine* headers, always — the
-	// browser activity page never sends them either, so this dialect is
-	// universally valid (accounts with real runtime-info identities included:
-	// the server just treats the call as a browser/mobile claim). No retry
+	// Therefore v0.8.53 sent ZERO Cosy-Machine* headers, always — the browser
+	// activity page never sends them either, so the dialect looked universally
+	// valid. (v0.8.63 correction: "universally" proved intl-wrong — the
+	// intl same-person dedup needs a device anchor and 503s
+	// SAME_PERSON_DEPENDENCY_UNAVAILABLE on header-less claims once the daily
+	// row is identity-gated. Derived identities still never ride the claim;
+	// native runtime-info ones now do — see the attach site below.) No retry
 	// dance: exactly one claim POST per attempt keeps the probeHiddenRound
 	// cooldown semantics (one hit per attempt, pinned by the taxonomy tests)
 	// and the upstream's replay idempotency unambiguous.
@@ -1031,9 +1034,24 @@ func claimCampaignByID(sa *storedAuth, c *campaign) (map[string]any, error) {
 	req = req.WithContext(ctx)
 	billingHeaders(req, sa)
 	req.Header.Set("Content-Type", "application/json") // POST with body — official client's WebView JS sets this via fetch
-	// v0.8.53: deliberately NO attachMachineIdentityHeaders here — zero
-	// Cosy-Machine* headers is the dialect the risk layer accepts on the
-	// claim path (see the block comment above).
+	// v0.8.63: NATIVE identities ride the claim; DERIVED ones never do.
+	//
+	// Two live-verified halves of this ruling:
+	//   - 2026-10-04 CN (v0.8.53): a DERIVED Cosy-Machine* set on the claim
+	//     503s with RISK_DEPENDENCY_UNAVAILABLE — the risk layer rejects
+	//     simulated devices. Header-less (browser dialect) claims succeed
+	//     for those accounts.
+	//   - 2026-10-08 Intl (u673e7fcc): a header-less claim on an account
+	//     whose daily row is identity-gated 503s with
+	//     SAME_PERSON_DEPENDENCY_UNAVAILABLE ("campaign service is
+	//     temporarily unavailable") — the same-person dedup has no device
+	//     anchor to evaluate. The official client's own claim carries the
+	//     full Cosy-Machine* set (issue #27 capture).
+	// So the claim presents the real bridge identity when one exists (the
+	// official dialect) and keeps the browser dialect only for derived ones.
+	if mi := machineIdentityFor(authRegion(sa), sa.Account.UID, false); mi.Source == identitySourceNative {
+		attachMachineIdentityHeaders(req, &mi)
+	}
 	resp, err := hostHTTPDo(req)
 	if err != nil {
 		return map[string]any{"success": false, "message": err.Error()}, nil
@@ -1569,17 +1587,16 @@ func campaignIdleDiagnosis(status *campaignStatusResponse, sa *storedAuth) strin
 	if status == nil || len(status.Campaigns) == 0 {
 		return "今日暂无可领取权益（活动列表为空）" + machineIdentityHint(sa)
 	}
-	// v0.8.59 (intl_surface_live_test.go + intl_dialect_live_test.go, live
-	// 2026-10-08): the decisive u673e7fcc field case. The list is VISIBLE
-	// (identical across every identity dialect — machine/derived/no-machine/
-	// web XHR — and every Cosy-Version), carries only marketing VIEW_DETAILS
-	// rows, and the server's own `claimable` flag is FALSE. That flag is the
-	// upstream's authoritative "nothing is targeted at this account right
-	// now": no client-side header, identity or seed can conjure a daily row
-	// the server is not serving (the v0.8.61 identity-filter hypothesis is
-	// disproven — the earlier seeds/UMID remedies were a dead end for this
-	// state). Name it as such, region-aware, with the one verification path
-	// that exists: the official client's own activity surface.
+	// v0.8.60 rewrite (live 2026-10-08, u673e7fcc Intl + provisioned bridge):
+	// the v0.8.59 "server simply does not target this account" reading was
+	// wrong. The list state it described — visible VIEW_DETAILS rows, no
+	// CLAIM_BENEFIT row, claimable=false — is what a DERIVED identity sees:
+	// the daily row is device-targeted, and simulated devices are filtered.
+	// The same account went invisible → visible → claimed +100 the moment a
+	// real runtime-info identity was presented (auto-provisioned from the
+	// official npm bundle). The diagnosis therefore branches on the identity
+	// source first; the honest audience verdict is reserved for hosts that
+	// ALREADY run the official bridge and still see no row.
 	if !status.Claimable && !hasAnyClaimBenefitRow(status) && !hasClaimableDailyRow(status) {
 		region := authRegion(sa)
 		rows := make([]string, 0, len(status.Campaigns))
@@ -1596,7 +1613,19 @@ func campaignIdleDiagnosis(status *campaignStatusResponse, sa *storedAuth) strin
 			}
 			rows = append(rows, fmt.Sprintf("%s·%s", key, at))
 		}
-		line := "上游确认本账号当前无可领取活动（服务端 claimable=false，列表双方言一致可见且无每日领取行，仅余 " + strings.Join(rows, "、") + "）——每日 100 积分为上游定向投放，非所有账号可见，插件侧无法代领未投放的活动"
+		if mi := machineIdentityFor(region, sa.Account.UID, false); mi.Source != identitySourceNative {
+			line := "每日 100 积分行未出现（列表仅余 " + strings.Join(rows, "、") + "）：服务端按真实设备身份投放定向活动，本机仍是官方格式模拟身份（同一账号在官方 runtime-info 身份下实测当日可见并领取成功）"
+			switch {
+			case !umidProvisionEnabled():
+				line += "；本机已关闭身份桥自动供给（QD_UMID_AUTO=0）——可放置官方客户端 resources/umid/runtime-info 并以 QD_UMID_BIN 指定其路径"
+			case umidProvisionLastError() != "":
+				line += "；身份桥自动供给失败（" + umidProvisionLastError() + "），将自动重试；也可用 QD_UMID_BIN 指定官方 runtime-info"
+			default:
+				line += "；插件将从官方 npm 包自动供给身份桥（一次性下载约 31MB），成功后下一次签到即用真机身份"
+			}
+			return line
+		}
+		line := "上游确认本账号当前无可领取活动（真机身份下列表可见但无每日领取行，仅余 " + strings.Join(rows, "、") + "）——每日 100 积分为上游定向投放，非所有账号可见，插件侧无法代领未投放的活动"
 		if region == regionIntl {
 			line += "；如需确认是活动受众问题还是账号风控，请在官方桌面端登录该账号并打开活动页：官方也看不到每日行则属上游受众/风控判定，看得到请把该行 id 反馈到 issue"
 		} else {

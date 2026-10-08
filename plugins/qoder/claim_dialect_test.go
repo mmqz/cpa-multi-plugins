@@ -92,6 +92,56 @@ func TestRewardReadSendsNoMachineHeaders(t *testing.T) {
 	}
 }
 
+// TestClaimPostRidesNativeIdentity — v0.8.60: the other live-verified half
+// of the claim dialect. With a REAL runtime-info identity the claim MUST
+// carry the Cosy-Machine* set (the official client's own claim does —
+// issue #27 capture): the intl same-person dedup 503s
+// SAME_PERSON_DEPENDENCY_UNAVAILABLE on header-less claims once the daily
+// row is identity-gated (live 2026-10-08, u673e7fcc: header-less → 503,
+// native-identity claim → 200 CLAIMED +100).
+func TestClaimPostRidesNativeIdentity(t *testing.T) {
+	defer func(id *machineIdentity) { machineIdentityOverride = id }(machineIdentityOverride)
+	machineIdentityOverride = &machineIdentity{
+		MachineID:       "0f0f0f0f-0000-4000-8000-000000000000",
+		MachineToken:    "P1gAnative-test-token-00000000000000000000000000000000000000000000000000000000000",
+		MachineType:     "a82301a7913757cf76",
+		MachineCode:     "3e645ab7002ec7bd6f",
+		MachineOS:       "x86_64_win32",
+		MachineHostname: "DESKTOP-NATIVE",
+		Source:          identitySourceNative,
+	}
+
+	var claimToken, claimHostname, claimOS string
+	srv := newBillingServer(t, "intl", map[string]func(r *http.Request) (int, string){
+		"/sash/api/v1/me/campaigns": func(r *http.Request) (int, string) {
+			return http.StatusOK, campaignList("CLAIMABLE")
+		},
+		"/sash/api/v1/me/campaigns/camp-cn-daily/claim": func(r *http.Request) (int, string) {
+			claimToken = r.Header.Get("Cosy-MachineToken")
+			claimHostname = r.Header.Get("Cosy-MachineHostname")
+			claimOS = r.Header.Get("Cosy-MachineOS")
+			if n := machineHeaderCount(r); n < 4 {
+				t.Errorf("native-identity claim carried only %d Cosy-Machine* headers, want the full set", n)
+			}
+			return http.StatusOK, `{"status":"CLAIMED","benefit":{"kind":"CREDITS","amount":100}}`
+		},
+		"/sash/api/v1/me/campaigns/" + clientLaunchCampaignKey + "/limited-number": func(r *http.Request) (int, string) {
+			return http.StatusOK, `{"hasNumber":true}`
+		},
+		"/sash/api/v1/me/daily-check-in/status": func(r *http.Request) (int, string) {
+			return http.StatusOK, `{"status":"DISABLED"}`
+		},
+	})
+	_ = srv
+
+	if _, err := performCheckinCall(intlAuth()); err != nil {
+		t.Fatalf("performCheckinCall: %v", err)
+	}
+	if claimToken != machineIdentityOverride.MachineToken || claimHostname != "DESKTOP-NATIVE" || claimOS != "x86_64_win32" {
+		t.Fatalf("claim POST did not ride the native identity: token=%q hostname=%q os=%q — real bridge identities must ride the claim (intl same-person dedup 503s on header-less claims)", claimToken, claimHostname, claimOS)
+	}
+}
+
 // machineHeaderCount counts Cosy-Machine* request headers.
 func machineHeaderCount(r *http.Request) int {
 	n := 0
