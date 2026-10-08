@@ -30,11 +30,17 @@ type Auth struct {
 	APIHost      string // "https://api.trae.com.cn"（ExchangeToken host）
 	MachineID    string // x-machine-id
 	DeviceID     string // x-device-id
-	Variant      string // cn | solo (merged trae-solo-cn); intl handled by intl parser
-	UID          string
-	EnterpriseID string
-	Nickname     string
-	FilePath     string // 落盘路径；refresh 后原子写回
+	// v0.12.73: 登录时上传并绑定到服务端的 EC P-256 设备密钥对（SPKI/PKCS#8 PEM）。
+	// 加载后不变；refresh 的绑定续期（/trae/api/v3/oauth/ExchangeToken + DeviceProof）
+	// 用它签名，使续期出的 JWT 像官方客户端一样绑设备 —— 未绑设备的 JWT 签到
+	// claim 恒遭 9074（magpie#808 mintonight/MiFaZhan 同账号双 token 对照实验定案）。
+	DevicePublicKey  string
+	DevicePrivateKey string
+	Variant          string // cn | solo (merged trae-solo-cn); intl handled by intl parser
+	UID              string
+	EnterpriseID     string
+	Nickname         string
+	FilePath         string // 落盘路径；refresh 后原子写回
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加写锁。
@@ -84,14 +90,16 @@ func (a *Auth) NeedsRefreshLocked(within time.Duration) bool {
 func parseNested(raw []byte) (*Auth, error) {
 	var n struct {
 		Auth struct {
-			AccessToken  string `json:"accessToken"`
-			RefreshToken string `json:"refreshToken"`
-			ExpiresAt    int64  `json:"expiresAt"`
-			Domain       string `json:"domain"`
-			APIHost      string `json:"apiHost"`
-			MachineID    string `json:"machineId"`
-			DeviceID     string `json:"deviceId"`
-			Variant      string `json:"variant"`
+			AccessToken      string `json:"accessToken"`
+			RefreshToken     string `json:"refreshToken"`
+			ExpiresAt        int64  `json:"expiresAt"`
+			Domain           string `json:"domain"`
+			APIHost          string `json:"apiHost"`
+			MachineID        string `json:"machineId"`
+			DeviceID         string `json:"deviceId"`
+			DevicePublicKey  string `json:"devicePublicKey"`
+			DevicePrivateKey string `json:"devicePrivateKey"`
+			Variant          string `json:"variant"`
 		} `json:"auth"`
 		Account struct {
 			UID          string `json:"uid"`
@@ -103,17 +111,19 @@ func parseNested(raw []byte) (*Auth, error) {
 		return nil, fmt.Errorf("storage_parse_error: %w", err)
 	}
 	return &Auth{
-		AccessToken:  n.Auth.AccessToken,
-		RefreshToken: n.Auth.RefreshToken,
-		ExpiresAt:    n.Auth.ExpiresAt,
-		Domain:       n.Auth.Domain,
-		APIHost:      n.Auth.APIHost,
-		MachineID:    n.Auth.MachineID,
-		DeviceID:     n.Auth.DeviceID,
-		Variant:      n.Auth.Variant,
-		UID:          n.Account.UID,
-		EnterpriseID: n.Account.EnterpriseID,
-		Nickname:     n.Account.Nickname,
+		AccessToken:      n.Auth.AccessToken,
+		RefreshToken:     n.Auth.RefreshToken,
+		ExpiresAt:        n.Auth.ExpiresAt,
+		Domain:           n.Auth.Domain,
+		APIHost:          n.Auth.APIHost,
+		MachineID:        n.Auth.MachineID,
+		DeviceID:         n.Auth.DeviceID,
+		DevicePublicKey:  n.Auth.DevicePublicKey,
+		DevicePrivateKey: n.Auth.DevicePrivateKey,
+		Variant:          n.Auth.Variant,
+		UID:              n.Account.UID,
+		EnterpriseID:     n.Account.EnterpriseID,
+		Nickname:         n.Account.Nickname,
 	}, nil
 }
 
@@ -122,33 +132,37 @@ func parseNested(raw []byte) (*Auth, error) {
 //	{"accessToken":...,"uid":...,"machineId":...,"deviceId":...}
 func parseFlat(raw []byte) (*Auth, error) {
 	var f struct {
-		AccessToken  string `json:"accessToken"`
-		RefreshToken string `json:"refreshToken"`
-		ExpiresAt    int64  `json:"expiresAt"`
-		Domain       string `json:"domain"`
-		APIHost      string `json:"apiHost"`
-		MachineID    string `json:"machineId"`
-		DeviceID     string `json:"deviceId"`
-		Variant      string `json:"variant"`
-		UID          string `json:"uid"`
-		EnterpriseID string `json:"enterpriseId"`
-		Nickname     string `json:"nickname"`
+		AccessToken      string `json:"accessToken"`
+		RefreshToken     string `json:"refreshToken"`
+		ExpiresAt        int64  `json:"expiresAt"`
+		Domain           string `json:"domain"`
+		APIHost          string `json:"apiHost"`
+		MachineID        string `json:"machineId"`
+		DeviceID         string `json:"deviceId"`
+		DevicePublicKey  string `json:"devicePublicKey"`
+		DevicePrivateKey string `json:"devicePrivateKey"`
+		Variant          string `json:"variant"`
+		UID              string `json:"uid"`
+		EnterpriseID     string `json:"enterpriseId"`
+		Nickname         string `json:"nickname"`
 	}
 	if err := json.Unmarshal(raw, &f); err != nil {
 		return nil, fmt.Errorf("storage_parse_error: %w", err)
 	}
 	return &Auth{
-		AccessToken:  f.AccessToken,
-		RefreshToken: f.RefreshToken,
-		ExpiresAt:    f.ExpiresAt,
-		Domain:       f.Domain,
-		APIHost:      f.APIHost,
-		MachineID:    f.MachineID,
-		DeviceID:     f.DeviceID,
-		Variant:      f.Variant,
-		UID:          f.UID,
-		EnterpriseID: f.EnterpriseID,
-		Nickname:     f.Nickname,
+		AccessToken:      f.AccessToken,
+		RefreshToken:     f.RefreshToken,
+		ExpiresAt:        f.ExpiresAt,
+		Domain:           f.Domain,
+		APIHost:          f.APIHost,
+		MachineID:        f.MachineID,
+		DeviceID:         f.DeviceID,
+		DevicePublicKey:  f.DevicePublicKey,
+		DevicePrivateKey: f.DevicePrivateKey,
+		Variant:          f.Variant,
+		UID:              f.UID,
+		EnterpriseID:     f.EnterpriseID,
+		Nickname:         f.Nickname,
 	}, nil
 }
 
@@ -203,6 +217,14 @@ func (a *Auth) saveAtomicLocked() error {
 		"apiHost":      a.APIHost,
 		"machineId":    a.MachineID,
 		"deviceId":     a.DeviceID,
+	}
+	// v0.12.73: 设备密钥对随文件回写 —— 此前的写回把它们丢掉，登录辛苦绑定
+	// 的公钥在首次 refresh 后即失传，后续绑定续期无从签名（9074 根因之一）。
+	if a.DevicePublicKey != "" {
+		authDoc["devicePublicKey"] = a.DevicePublicKey
+	}
+	if a.DevicePrivateKey != "" {
+		authDoc["devicePrivateKey"] = a.DevicePrivateKey
 	}
 	if a.Variant != "" {
 		authDoc["variant"] = a.Variant

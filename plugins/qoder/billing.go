@@ -31,19 +31,19 @@ func billingBaseFor(sa *storedAuth) string {
 
 // billingClientType/Version are the desktop client's Cosy identity headers.
 //
-// v0.8.47 (user-provided working Python script + official client main.log
-// capture, 2026-10-03): the official client's actual request log shows
-//
-//	"Cosy-ClientType":"10", "Cosy-Version":"0.3.4"
-//
-// — Cosy-Version is the PROTOCOL version, NOT the app version (package.json's
-// 0.4.3 is the Electron app version, a different thing). The previous 0.4.3
-// value was set in v0.8.35 from a misreading of the asar; the user's working
-// script confirms 0.3.4 is the correct value that returns the full campaigns
-// list including the daily CLAIM_BENEFIT 100-Credits row.
+// History: v0.8.35 set Cosy-Version to 0.4.3 (asar package.json app version);
+// v0.8.47's official-client main.log capture showed 0.3.4 and concluded the
+// header was a PROTOCOL version, not the app version. v0.8.59 (H-series live
+// isolation, intl_dialect_live_test.go 2026-10-08) proved the campaigns list
+// is INSENSITIVE to this value (0.3.4 / 0.4.3 / 0.5.0 return byte-identical
+// envelopes — the v0.8.47 "0.3.4 restores the daily row" causality was
+// coincidental), and issue #27's captured desktop client sends 0.4.3 on both
+// regions. Aligned back to 0.4.3: the value rides every billing request as an
+// identity header, and being a full minor behind the shipping client is a
+// pointless risk variable.
 const (
 	billingClientType = "10"
-	billingClientVer  = "0.3.4"
+	billingClientVer  = "0.4.3"
 )
 
 // billingHeaders sets the shared billing auth + identity headers.

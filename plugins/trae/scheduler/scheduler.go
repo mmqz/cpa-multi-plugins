@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mmqz/cpa-multi-plugins/plugins/trae/auth"
 	"github.com/mmqz/cpa-multi-plugins/plugins/trae/pool"
 	"github.com/mmqz/cpa-multi-plugins/plugins/trae/upstream"
 )
@@ -149,7 +150,10 @@ func (s *Scheduler) RunCheckinNow() {
 		// 未签到状态不再被静默吞掉。
 		// v0.12.65: 本轮 attempt 生成一个全新签到设备号，贯穿 status→claim→回查
 		// （随机 16 位数字串实测可领、登录 hex32 必败 9074，见 upstream.NewCheckinDeviceID）。
-		did := upstream.NewCheckinDeviceID()
+		// v0.12.73: 账号稳定签到设备号（upstream.CheckinDeviceFor —— 与绑定续期
+		// DeviceInfo 同一身份；9074 根因是 token 未绑设备而非设备号形状），
+		// 持续 9074 时由 rotateCheckinDevice 轮换（trae-checkin 模型）。
+		did := upstream.CheckinDeviceFor(a)
 		status, err := s.cfg.Upstream.CheckinStatus(a, did)
 		if err != nil {
 			if isBizRateLimit(err) {
@@ -225,6 +229,20 @@ func (s *Scheduler) RunCheckinNow() {
 
 	// v0.12.33: 本轮有 9074 → 当日指数退避自动重试；无 9074 → 复位并撤销挂起定时器。
 	s.scheduleCheckinRetry(rateLimited)
+}
+
+// rotateCheckinDevice 9074 持续时的签到设备号轮换（trae-checkin 模型：
+// 被过度使用的 device_id 会持续 9074，换号拉开间隔即解）。轮换即落盘，
+// 下次绑定续期以上传 DeviceInfo.DeviceID 的方式重绑新号。
+func (s *Scheduler) rotateCheckinDevice(uid string, a *auth.Auth) {
+	if !upstream.RotateCheckinDevice(a) {
+		return
+	}
+	if err := a.SaveAtomic(); err != nil {
+		log.Printf("checkin %s: rotated checkin device but save failed: %v", uid, err)
+		return
+	}
+	log.Printf("checkin %s: rotated checkin device id after 9074", uid)
 }
 
 // checkinRetryDelay 返回第 attempt 次重试的退避时长：10m 起指数翻倍，2h 封顶。

@@ -13,7 +13,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -243,6 +242,41 @@ func TestCampaignIdleDiagnosisRendersUpstreamTaxonomy(t *testing.T) {
 	}
 }
 
+// TestCampaignIdleDiagnosisNoTargetedCampaign pins the v0.8.59 u673e7fcc
+// verdict: list VISIBLE, no CLAIM_BENEFIT row in any dialect, server's own
+// claimable flag FALSE — the upstream is not targeting this account with a
+// daily round, and the diagnosis must say so (with the official-client
+// verification path) instead of pushing identity/seed remedies that the
+// 2026-10-08 live isolation disproved.
+func TestCampaignIdleDiagnosisNoTargetedCampaign(t *testing.T) {
+	// the exact intl field shape: one CLAIMED marketing VIEW_DETAILS row
+	status := &campaignStatusResponse{
+		ShowCampaign: true,
+		CampaignURL:  "https://openapi.qoder.sh/growth-page/activity-iframe",
+		Campaigns: []campaign{
+			{CampaignID: "01a05bce-e800-7494-a002-806e4438f483", CampaignKey: "act-20260901-493", ActionType: "VIEW_DETAILS", ClaimStatus: "CLAIMED", StartAt: 1788247200, EndAt: 1793462340},
+		},
+	}
+	msg := campaignIdleDiagnosis(status, intlAuth())
+	for _, want := range []string{"claimable=false", "定向投放"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("intl no-target diagnosis missing %q: %q", want, msg)
+		}
+	}
+	if strings.Contains(msg, "checkin_round_seeds") {
+		t.Fatalf("no-target diagnosis must not push seeds for a visible, server-declined list: %q", msg)
+	}
+	// a visible daily row (any status) must NOT trigger the branch
+	status.Campaigns = append(status.Campaigns, campaign{CampaignID: "daily", CampaignKey: "act-20260930-516", ActionType: "CLAIM_BENEFIT", ClaimStatus: "CLAIMED", Benefit: &campaignBen{Kind: "CREDITS", Amount: 100}})
+	if msg2 := campaignIdleDiagnosis(status, intlAuth()); strings.Contains(msg2, "claimable=false") {
+		t.Fatalf("a present daily row must not be reported as no-target: %q", msg2)
+	}
+}
+
+func intlAuth() *storedAuth {
+	return &storedAuth{Auth: storedTokens{AccessToken: "dt-intl", Domain: domainIntl, Region: regionIntl}, Account: storedAccount{UID: "uid-diag"}}
+}
+
 // TestRoundMemoFedByListFetch: every campaigns read must refresh the probe
 // memo with the daily-shaped rows the server returned (any status), so a
 // later hidden round has a real id to POST.
@@ -280,9 +314,11 @@ func TestRoundMemoFedByListFetch(t *testing.T) {
 
 // TestProbeExcludesExpiredMemo: a memo older than the freshness window must
 // never be probed — the campaign id could have been recycled by a new round.
-// v0.8.58: the window is 30 DAYS now (live evidence: the daily round object
-// is long-lived, window sliding daily — a 5-day-old id is VALID, the old 48h
-// bound expired working ids over every weekend).
+// v0.8.62: the window is 26h (live correction 2026-10-08: the daily round id
+// ROTATES — Oct 5's act-20260930-295 was dead by Oct 8, whose round is
+// act-20260930-516 with a fresh ~24h window; the v0.8.58 "long-lived object"
+// reading was wrong). Yesterday's id must not be probed past its window;
+// today's id (seen this morning) must stay probeable.
 func TestProbeExcludesExpiredMemo(t *testing.T) {
 	roundMemo = &campaignRoundMemo{
 		perAccount: map[string]campaignRoundEntry{},
@@ -291,17 +327,20 @@ func TestProbeExcludesExpiredMemo(t *testing.T) {
 	t.Cleanup(func() {
 		roundMemo = &campaignRoundMemo{perAccount: map[string]campaignRoundEntry{}, perRegion: map[string]campaignRoundEntry{}}
 	})
+	// 31 days and 5 days are both past the 26h window — dead rounds either way.
 	roundMemo.perRegion["cn"] = campaignRoundEntry{CampaignID: "camp-stale", SeenAt: time.Now().Add(-31 * 24 * time.Hour)}
 	if _, ok := roundMemo.probeFor("cn", "u"); ok {
 		t.Fatal("stale memo must not be probeable")
 	}
-	// A five-day-old id was wrongly expired by the old 48h bound — the exact
-	// field evidence (act-20260930-295 still current Oct 5) — must probe.
 	roundMemo.perRegion["cn"] = campaignRoundEntry{CampaignID: "camp-stale", SeenAt: time.Now().Add(-5 * 24 * time.Hour)}
-	if _, ok := roundMemo.probeFor("cn", "u"); !ok {
-		t.Fatal("5-day-old round id must stay probeable (long-lived round objects)")
+	if _, ok := roundMemo.probeFor("cn", "u"); ok {
+		t.Fatal("5-day-old round id must be expired (the id rotated daily, live-verified)")
 	}
-	_ = fmt.Sprint() // keep fmt imported for future assertions
+	// an id seen within the current daily window stays probeable
+	roundMemo.perRegion["cn"] = campaignRoundEntry{CampaignID: "camp-today", SeenAt: time.Now().Add(-2 * time.Hour)}
+	if c, ok := roundMemo.probeFor("cn", "u"); !ok || c.CampaignID != "camp-today" {
+		t.Fatalf("2h-old round id must stay probeable, got %+v %v", c, ok)
+	}
 }
 
 // seedRoundMemo pushes a previously-seen daily row into the memo the way a

@@ -242,17 +242,18 @@ func hasClaimableDailyRow(status *campaignStatusResponse) bool {
 
 // roundMemoMaxAge bounds how long a seen campaign id stays probeable.
 //
-// v0.8.58 correction (live evidence 2026-10-05): the daily round is NOT a
-// new object per day — act-20260930-295 (created Sep 30) was still THE
-// current round on Oct 5, with its startAt/endAt window sliding daily at
-// the 10:00 UTC+8 refresh. The old 48h bound expired VALID ids over every
-// weekend, re-blinding deployments whose lists are identity-filtered (the
-// restart-resilience v0.8.57 added silently died each 48h). A round id's
-// real validity is enforced by the authoritative claim verdict anyway (a
-// dead id answers typed CAMPAIGN_NOT_ACTIVE with a 30-min latch), so the
-// memo bound only needs to outlive the longest normal campaign lifetime:
-// 30 days.
-const roundMemoMaxAge = 30 * 24 * time.Hour
+// History: v0.8.57's 48h bound expired ids over weekends; v0.8.58 concluded
+// the round was "long-lived, window sliding daily" (act-20260930-295 seen as
+// current on Oct 5) and stretched the bound to 30 days. LIVE CORRECTION
+// 2026-10-08 (CN probe, plugin live harness): the current round that day is
+// act-20260930-516 with a fresh ~24h window — the Oct 5 id is already DEAD.
+// The series key stays act-20260930-*, but each daily window is a NEW object
+// with a NEW uuid; a remembered id is only good until the next 10:00 UTC+8
+// refresh. The honest bound is one full daily window plus slack: 26h. A
+// dead id's probe still answers authoritatively (CAMPAIGN_NOT_ACTIVE, 30-min
+// latch) but wastes the attempt and can mislabel the panel — don't probe
+// ids past their window.
+const roundMemoMaxAge = 26 * time.Hour
 
 // ---------------------------------------------------------------------------
 // v0.8.58 — round-id SEEDS: the probe's last-resort id source for deployments
@@ -459,7 +460,14 @@ func probeHiddenRound(sa *storedAuth) (map[string]any, string) {
 		}
 	}
 	if !ok {
-		return nil, "绕过列表直探未执行：本机尚无已记忆的每日轮次 id（列表从未出现过该活动行）——可在配置 checkin_round_seeds 填入该区每日轮次的 campaignId（形如 01a0… 的 UUID，非 act- key），或放置官方 runtime-info（QD_UMID_BIN）恢复列表可见性"
+		// v0.8.59: the note no longer claims QD_UMID_BIN would "restore list
+		// visibility" — the 2026-10-08 live isolation (intl_surface /
+		// intl_dialect live tests) proved the campaigns list is identical
+		// across every identity dialect, so identity is not a list-visibility
+		// lever. A seed is the one remaining probe source: a known-good round
+		// UUID (valid until its 10:00 UTC+8 window closes) gets a direct
+		// authoritative claim regardless of what the list shows.
+		return nil, "绕过列表直探未执行：本机尚无已记忆的每日轮次 id（列表从未出现过该活动行）——若能从任一可见该行的渠道取得当日轮次 campaignId（01a0… 形 UUID，仅当日有效），可配置 checkin_round_seeds 直探领取"
 	}
 	key := region + ":" + uid + ":" + c.CampaignID
 	roundProbeMu.Lock()
@@ -1560,6 +1568,41 @@ func attemptViewDetailsClaims(sa *storedAuth, status *campaignStatusResponse) (m
 func campaignIdleDiagnosis(status *campaignStatusResponse, sa *storedAuth) string {
 	if status == nil || len(status.Campaigns) == 0 {
 		return "今日暂无可领取权益（活动列表为空）" + machineIdentityHint(sa)
+	}
+	// v0.8.59 (intl_surface_live_test.go + intl_dialect_live_test.go, live
+	// 2026-10-08): the decisive u673e7fcc field case. The list is VISIBLE
+	// (identical across every identity dialect — machine/derived/no-machine/
+	// web XHR — and every Cosy-Version), carries only marketing VIEW_DETAILS
+	// rows, and the server's own `claimable` flag is FALSE. That flag is the
+	// upstream's authoritative "nothing is targeted at this account right
+	// now": no client-side header, identity or seed can conjure a daily row
+	// the server is not serving (the v0.8.61 identity-filter hypothesis is
+	// disproven — the earlier seeds/UMID remedies were a dead end for this
+	// state). Name it as such, region-aware, with the one verification path
+	// that exists: the official client's own activity surface.
+	if !status.Claimable && !hasAnyClaimBenefitRow(status) && !hasClaimableDailyRow(status) {
+		region := authRegion(sa)
+		rows := make([]string, 0, len(status.Campaigns))
+		for i := range status.Campaigns {
+			c := &status.Campaigns[i]
+			key := c.CampaignKey
+			if key == "" {
+				key = c.CampaignID
+			}
+			at := strings.ToUpper(strings.TrimSpace(c.ActionType))
+			if at == "" {
+				rows = append(rows, key)
+				continue
+			}
+			rows = append(rows, fmt.Sprintf("%s·%s", key, at))
+		}
+		line := "上游确认本账号当前无可领取活动（服务端 claimable=false，列表双方言一致可见且无每日领取行，仅余 " + strings.Join(rows, "、") + "）——每日 100 积分为上游定向投放，非所有账号可见，插件侧无法代领未投放的活动"
+		if region == regionIntl {
+			line += "；如需确认是活动受众问题还是账号风控，请在官方桌面端登录该账号并打开活动页：官方也看不到每日行则属上游受众/风控判定，看得到请把该行 id 反馈到 issue"
+		} else {
+			line += "；如官方客户端活动页可见每日行而插件列表持续没有，请把该行 id 反馈到 issue"
+		}
+		return line
 	}
 	reasons := map[string]string{
 		"REDEMPTION_CODE_OUT_OF_STOCK": "名额已发完（次日 10:00 后可再试）",

@@ -744,6 +744,13 @@ func handleManualCheckin(req pluginapi.ManagementRequest) map[string]any {
 				entry["error"] = "checkin_claim: " + err.Error()
 				// v0.12.33: 手动签到撞 9074 也纳入当日退避重试（与调度器同节奏）。
 				notifyCheckinRateLimited(err)
+				// v0.12.73: 9074 持续时轮换签到设备号并落盘（trae-checkin 模型）。
+				var ue9074 *upstream.Error
+				if errors.As(err, &ue9074) && upstream.IsRateLimit9074(ue9074.BizCode) && upstream.RotateCheckinDevice(a) {
+					if serr := hostAuthSave(credentialFileName(a.Variant, a.UID), storageJSONForAuth(a)); serr != nil {
+						entry["rotate_save_error"] = serr.Error()
+					}
+				}
 			} else {
 				claimAccepted = claim.Code == 0
 				entry["claim_code"] = claim.Code
@@ -1282,6 +1289,10 @@ func storageJSONForAuth(a *auth.Auth) []byte {
 			// v0.12.6: keep the parsed variant — dropping it made a solo
 			// account degrade to cn on refresh/import.
 			"variant": a.Variant,
+			// v0.12.73: 设备密钥对随宿主副本回写 —— 绑定续期靠它签名，丢了
+			// 就只能走 /cloudide 裸续期（9074 根因）。
+			"devicePublicKey":  a.DevicePublicKey,
+			"devicePrivateKey": a.DevicePrivateKey,
 		},
 		"account": map[string]any{
 			"uid":          a.UID,

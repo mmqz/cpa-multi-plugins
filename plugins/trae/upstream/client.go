@@ -284,6 +284,16 @@ func (c *Client) refreshLocked(a *auth.Auth) error {
 	if strings.TrimSpace(a.RefreshToken) == "" {
 		return fmt.Errorf("no refreshToken")
 	}
+	// v0.12.73: 绑定续期优先 —— /trae/api/v3/oauth/ExchangeToken（DeviceInfo +
+	// DeviceProof，设备 P-256 私钥签名）。/cloudide 裸续期出的 JWT 不绑设备，
+	// 签到 claim 恒遭 9074（status 正常）——magpie#808 同账号双 token 对照实验
+	// 与 qilimixingkong/trae-checkin §2.8 交叉定案。绑定续期失败（含密钥缺失）
+	// 落回旧 /cloudide 路径，不比旧版更差。
+	if err := c.boundExchangeLocked(a); err != nil {
+		log.Printf("exchange refresh (bound) unavailable for uid=%s variant=%q: %v — legacy path", a.UID, a.Variant, err)
+	} else {
+		return nil
+	}
 	lineageClient := ClientIDFor(strings.ToLower(strings.TrimSpace(a.Variant)))
 	hosts := exchangeHosts(a.APIHost, c.OAuthHost)
 	body := map[string]any{
@@ -665,12 +675,55 @@ func NewCheckinDeviceID() string {
 }
 
 // checkinDeviceArg variadic 归一：显式传入取首值（同一轮 attempt 的
-// status→claim→回查配对同一设备号，两者是配对的校验参数），否则现生成。
-func checkinDeviceArg(deviceID []string) string {
+// status→claim→回查配对同一设备号，两者是配对的校验参数），否则取账号
+// 稳定签到设备号（v0.12.73：CheckinDeviceFor —— 与绑定续期的 DeviceInfo
+// 同一身份，官方客户端 guaranteedDeviceId 语义），旧文件无合规形状时现生成。
+func checkinDeviceArg(a *auth.Auth, deviceID []string) string {
 	if len(deviceID) > 0 && deviceID[0] != "" {
 		return deviceID[0]
 	}
+	return CheckinDeviceFor(a)
+}
+
+// isNumericIDShape 报告 s 是否为官方 device_id 验证形状（8-24 位纯数字，
+// main.newDeviceID 注释引用的 normalize_device_id → is_numeric_id(8,24)）。
+func isNumericIDShape(s string) bool {
+	if len(s) < 8 || len(s) > 24 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// CheckinDeviceFor 返回账号的稳定签到设备号。a.DeviceID 为官方数字形状时
+// 直接复用（与登录、绑定续期 DeviceInfo 同一设备身份——官方客户端一个设备
+// 一个稳定 id，trae-checkin「成功即固化」模型）；旧文件遗留的 hex32 等形状
+// 实测必败 9074（v0.12.65 证据矩阵），回退全新随机 16 位数字串。
+func CheckinDeviceFor(a *auth.Auth) string {
+	if a != nil {
+		if d := strings.TrimSpace(a.DeviceID); isNumericIDShape(d) {
+			return d
+		}
+	}
 	return NewCheckinDeviceID()
+}
+
+// RotateCheckinDevice 把账号签到设备号轮换为全新 16 位数字串（9074 持续时的
+// trae-checkin 模型：被过度使用的 device_id 会持续 9074，换号拉开间隔即解）。
+// 轮换后的 id 在下次绑定续期时作为 DeviceInfo.DeviceID 上传重绑。持 a 写锁
+// 改写；调用方负责 SaveAtomic 落盘。
+func RotateCheckinDevice(a *auth.Auth) bool {
+	if a == nil {
+		return false
+	}
+	a.Lock()
+	defer a.Unlock()
+	a.DeviceID = NewCheckinDeviceID()
+	return true
 }
 
 // ugCheckinRequest 构造签到请求（抓包指纹公共头 + 指定方案的 Authorization）。
@@ -719,7 +772,7 @@ func (c *Client) ugCheckinOnce(a *auth.Auth, method, url, body, scheme, deviceID
 }
 
 func (c *Client) CheckinStatus(a *auth.Auth, deviceID ...string) (*CheckinStatusResult, error) {
-	did := checkinDeviceArg(deviceID)
+	did := checkinDeviceArg(a, deviceID)
 	bodies := ugCheckinReqSourcesFor(a.Variant)
 	attempted := make([]string, 0, len(bodies)*2) // v0.12.45: 实际尝试的 body×scheme
 	var lastBiz *Error
@@ -784,7 +837,7 @@ type CheckinClaimResult struct {
 }
 
 func (c *Client) CheckinClaim(a *auth.Auth, deviceID ...string) (*CheckinClaimResult, error) {
-	did := checkinDeviceArg(deviceID)
+	did := checkinDeviceArg(a, deviceID)
 	bodies := ugCheckinReqSourcesFor(a.Variant)
 	attempted := make([]string, 0, len(bodies)*2) // v0.12.45: 实际尝试的 body×scheme
 	var lastBiz *Error
