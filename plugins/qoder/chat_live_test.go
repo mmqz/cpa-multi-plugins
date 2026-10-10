@@ -33,10 +33,27 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+// liveChatClient picks the HTTP client for one live chat leg. Default is the
+// plugin's shared pooled client (120s overall timeout — the production
+// direct-fallback transport). QD_CHAT_TIMEOUT=<seconds> switches to a
+// dedicated client with that overall window, for upstreams that hold requests
+// in the 10605 queue longer than 120s (the discharge, if any, happens on the
+// same connection).
+func liveChatClient() *http.Client {
+	if v := strings.TrimSpace(os.Getenv("QD_CHAT_TIMEOUT")); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			return &http.Client{Timeout: time.Duration(secs) * time.Second}
+		}
+	}
+	return sharedHTTPClient()
+}
 
 // liveChatPost sends one already-built upstream body through the plugin's
 // production dialect (same headers/encoding/transport pool as the direct
@@ -54,7 +71,7 @@ func liveChatPost(t *testing.T, sa *storedAuth, body []byte, limit int64) (int, 
 		t.Fatalf("cosy headers: %v", err)
 	}
 	start := time.Now()
-	resp, err := sharedHTTPClient().Do(req)
+	resp, err := liveChatClient().Do(req)
 	if err != nil {
 		t.Fatalf("transport: %v (after %s)", err, time.Since(start).Truncate(time.Millisecond))
 	}
