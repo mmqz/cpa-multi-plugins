@@ -331,6 +331,20 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 			assistantCarriesToolCalls(m) && isEmptyAssistantBody(m) {
 			m.Content, m.rawContent, m.contentSet = "Calling tools.", "", true
 		}
+		// OpenAI's "developer" role (o1+/gpt-5 era successor of "system") is
+		// rejected by the gateway — "developer is not one of ['system',
+		// 'assistant', 'user', 'tool', 'function']" (issue #34). The two
+		// independent authorities agree on the mapping: the reference proxy
+		// ships normalize_roles() doing exactly developer→system ("OpenAI 新的
+		// developer 角色等价于 system"), and the gateway's own validator
+		// enumerates the accepted set. Rewritten on the loop's value copy,
+		// never in the caller's request; content and every raw member (name,
+		// tool_calls, ...) ride along untouched. slim-mode detection above
+		// already counts developer as instruction-bearing, so placement here
+		// covers both template and slim paths of execute + execute_stream.
+		if m.Role == "developer" {
+			m.Role = "system"
+		}
 		outMsgs = append(outMsgs, m)
 	}
 	base["messages"] = outMsgs
