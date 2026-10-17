@@ -127,7 +127,10 @@ func ParseSOLOLine(eventName, dataLine string) (*SOLOEvent, error) {
 			ev.ToolCalls, _ = json.Marshal(tc)
 		}
 	case "token_usage":
-		ev.Usage = raw
+		// 用量归一化只做在解析边界这一处（老师 sse.py:1750-1752 同样是
+		// "解析时归一次"，下游 emit 不再重复处理）：SOLO 把 reasoning_tokens
+		// 平铺在顶层，这里搬进宿主认的 details 位。
+		ev.Usage = NormalizeUsageForHost(raw)
 	case "done":
 		if v, ok := raw["finish_reason"].(string); ok {
 			ev.FinishReason = v
@@ -258,6 +261,8 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		},
 	}
 	if usage != nil {
+		// 已在 ParseSOLOLine 的 token_usage 分支归一化（解析边界只做一次），
+		// 这里原样交出即可。
 		resp["usage"] = usage
 	}
 	return resp, nil
@@ -387,6 +392,7 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 			choice["finish_reason"] = finish
 		}
 		if pendingUsage != nil {
+			// 已在 ParseSOLOLine 归一化，与 Aggregate / sse_convert 同一形状。
 			chunk["usage"] = pendingUsage
 			pendingUsage = nil
 		}
@@ -475,6 +481,13 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 		}
 		if err == io.EOF {
 			break
+		}
+	}
+	if pendingUsage != nil {
+		// token_usage 之后上游直接 EOF（没有 done）：把这条用量挂在终结帧上
+		// 补发出去，否则整段思考白记（writeChunk 会带上并清空 pendingUsage）。
+		if err := writeChunk(map[string]any{}, "stop"); err != nil {
+			return err
 		}
 	}
 	if !sawDone {

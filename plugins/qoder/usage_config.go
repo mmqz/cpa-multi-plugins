@@ -170,6 +170,8 @@ func configure(raw []byte) {
 				if v, present := m["checkin_round_seeds"]; present {
 					nextRoundSeeds = configScalarString(v)
 				}
+				// 【本地补丁·档位管家】解析 models[].reasoning 钉子表（见 pinned_effort.go）。
+				setPinnedEffortsFromModels(m["models"])
 			}
 			for _, line := range strings.Split(string(req.ConfigYAML), "\n") {
 				line = strings.TrimSpace(line)

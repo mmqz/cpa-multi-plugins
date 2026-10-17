@@ -83,6 +83,14 @@ var (
 	// status instead of a lossy in-band text error on an already-200 stream.
 	streamHeadTimeout   = 0
 	streamHeadTimeoutMu sync.RWMutex
+
+	// contextProjection gates the rule-based request projection
+	// (context_projection.go). Default OFF: with the switch off the upstream
+	// body is byte-identical to before — the projection is the opt-in escape
+	// hatch for oversized agent histories, mirroring the mature reference
+	// proxies' preserve-by-default stance.
+	contextProjection   = false
+	contextProjectionMu sync.RWMutex
 )
 
 // pinnedModelIDsForRealm snapshots the pinned ID list for a realm (nil when
@@ -118,7 +126,8 @@ func configure(raw []byte) {
 	nextMgmtKey := ""
 	nextLoginPlatform := ""    // sticky: empty = keep current (issue #24)
 	nextLoginRegion := ""      // sticky: empty = keep current (issue #24)
-	nextStreamHeadTimeout := 0 // default off: 0 seconds
+	nextStreamHeadTimeout := 0    // default off: 0 seconds
+	nextContextProjection := false // default off: request body untouched
 
 	nextPinned := map[string][]string{}
 	cfgURL, cfgKey := "", ""
@@ -174,6 +183,11 @@ func configure(raw []byte) {
 						nextStreamHeadTimeout = n
 					}
 				}
+				if v, present := m["context_projection"]; present {
+					nextContextProjection = configScalarBool(v)
+				}
+				// 【本地补丁·档位管家】解析 models[].reasoning 钉子表（见 pinned_effort.go）。
+				setPinnedEffortsFromModels(m["models"])
 			}
 			for _, line := range strings.Split(string(req.ConfigYAML), "\n") {
 				line = strings.TrimSpace(line)
@@ -236,6 +250,12 @@ func configure(raw []byte) {
 					if n, err := strconv.Atoi(v); err == nil && n > 0 {
 						nextStreamHeadTimeout = n
 					}
+				}
+				if strings.HasPrefix(line, "context_projection:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "context_projection:"))
+					v = strings.Trim(v, "\"'")
+					nextContextProjection = strings.EqualFold(v, "true") ||
+						v == "1" || strings.EqualFold(v, "yes") || strings.EqualFold(v, "on")
 				}
 				if strings.HasPrefix(line, "models_cn:") {
 					if ids := parsePinnedModelList(strings.TrimPrefix(line, "models_cn:")); len(ids) > 0 {
@@ -306,6 +326,10 @@ func configure(raw []byte) {
 	streamHeadTimeoutMu.Lock()
 	streamHeadTimeout = nextStreamHeadTimeout
 	streamHeadTimeoutMu.Unlock()
+
+	contextProjectionMu.Lock()
+	contextProjection = nextContextProjection
+	contextProjectionMu.Unlock()
 
 	// management key: config_yaml > env > keep existing. Empty stays empty
 	// (plugin-layer auth disabled, host middleware still guards).
@@ -427,6 +451,14 @@ func loadedStreamHeadTimeout() int {
 		return streamHeadTimeout
 	}
 	return 0
+}
+
+// loadedContextProjection reports whether the opt-in request projection is on
+// (context_projection.go). Default false.
+func loadedContextProjection() bool {
+	contextProjectionMu.RLock()
+	defer contextProjectionMu.RUnlock()
+	return contextProjection
 }
 
 // platformForAuth returns the login platform recorded for an existing

@@ -23,6 +23,10 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	// 用量归一化与 CN 侧共用同一份规则（upstream/usage_shape.go）。
+	// 本包与目标包同名（都叫 upstream），必须起别名。
+	cnusage "github.com/mmqz/cpa-multi-plugins/plugins/trae/upstream"
 )
 
 const (
@@ -425,18 +429,10 @@ func (c *Client) Execute(ctx context.Context, a *Auth, model string, messages []
 		},
 	}
 	if usage != nil {
-		if pt, ok := usage["prompt_tokens"].(float64); ok {
-			ct := getFloat(usage, "completion_tokens")
-			tt := getFloat(usage, "total_tokens")
-			if tt == 0 {
-				tt = pt + ct
-			}
-			resp["usage"] = map[string]any{
-				"prompt_tokens":     int64(pt),
-				"completion_tokens": int64(ct),
-				"total_tokens":      int64(tt),
-			}
-		}
+		// 用量归一化（upstream/usage_shape.go）：原实现只挑 prompt /
+		// completion / total 三项，顶层 reasoning_tokens 在这里被丢掉——
+		// 国际版流式与非流式记账恒 0 的根因。归一化后与 CN 侧同一形状。
+		resp["usage"] = cnusage.NormalizeUsageForHost(usage)
 	}
 	return resp, nil
 }
@@ -538,29 +534,19 @@ func (c *Client) ExecuteStream(ctx context.Context, a *Auth, model string, messa
 				"error":   map[string]any{"message": fmt.Sprintf("trae %v: %s", code, msg), "type": "api_error"},
 			})
 		} else {
-			_ = emit(map[string]any{
+			// 与 CN 侧同形（老师 sse.py:1958-1966）：usage 挂进带 finish_reason
+			// 的同一帧，不另起 usage-only chunk。
+			finish := map[string]any{
 				"id":      id,
 				"object":  "chat.completion.chunk",
 				"created": created,
 				"model":   model,
 				"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
-			})
-			if usage != nil {
-				pt := getFloat(usage, "prompt_tokens")
-				ct := getFloat(usage, "completion_tokens")
-				tt := getFloat(usage, "total_tokens")
-				if tt == 0 {
-					tt = pt + ct
-				}
-				_ = emit(map[string]any{
-					"id":      id,
-					"object":  "chat.completion.chunk",
-					"created": created,
-					"model":   model,
-					"choices": []any{},
-					"usage":   map[string]any{"prompt_tokens": int64(pt), "completion_tokens": int64(ct), "total_tokens": int64(tt)},
-				})
 			}
+			if usage != nil {
+				finish["usage"] = cnusage.NormalizeUsageForHost(usage)
+			}
+			_ = emit(finish)
 		}
 		_, _ = io.WriteString(pw, "data: [DONE]\n\n")
 	}()

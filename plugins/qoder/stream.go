@@ -427,6 +427,9 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		if cleaned == "" {
 			continue
 		}
+		// 用量归一化（usage_shape.go）：reasoning / cache 明细双写进宿主
+		// 各版本都认的位置；不含 usage 的帧原样返回。
+		cleaned = normalizeChunkUsage(cleaned)
 		outgoing := []byte(cleaned)
 		if sseFramed {
 			outgoing = []byte("data: " + cleaned)
@@ -533,6 +536,8 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 		if cleaned == "" {
 			continue
 		}
+		// 用量归一化（usage_shape.go）：同步回退路径与异步泵同一口径。
+		cleaned = normalizeChunkUsage(cleaned)
 		if sseFramed {
 			cleaned = "data: " + cleaned
 		}
@@ -737,7 +742,10 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 		}},
 	}
 	if usage != nil {
-		result["usage"] = usage
+		// 非流式折叠：usage 归一化后再交给宿主（usage_shape.go）——
+		// 引擎 8.0.23 的非流式 /v1/responses 转换只认 output_tokens_details，
+		// 双写后客户端与账本都能看到真实推理数。
+		result["usage"] = normalizeUsageMap(usage)
 	}
 	out, err := json.Marshal(result)
 	if err != nil {

@@ -116,8 +116,10 @@ func TestBuildQoderBodyReasoningEffortInjection(t *testing.T) {
 		if params == nil {
 			t.Fatalf("effort %q: parameters missing", effort)
 		}
-		if v, _ := params["enable_thinking"].(bool); !v {
-			t.Errorf("effort %q: enable_thinking missing", effort)
+		// 老师口径（qoder_proxy.py:3944-3961）：只写 reasoning_effort，
+		// 全仓不使用 enable_thinking。
+		if _, why := params["enable_thinking"]; why {
+			t.Errorf("effort %q: enable_thinking must not be injected", effort)
 		}
 		want := strings.ToLower(strings.TrimSpace(effort))
 		if v, _ := params["reasoning_effort"].(string); v != want {
@@ -129,48 +131,47 @@ func TestBuildQoderBodyReasoningEffortInjection(t *testing.T) {
 	}
 }
 
-func TestBuildQoderBodyReasoningEffortInvalidIgnored(t *testing.T) {
-	for _, effort := range []string{"", "ultra", "off", "10"} {
+func TestBuildQoderBodyReasoningEffortClamped(t *testing.T) {
+	// 老师规则（qoder_proxy.py:2608-2651）：关闭类照发 none；乱值落默认档；
+	// 空值不下发。qmodel_38max 的官方目录档位是 low/medium/xhigh、默认 medium。
+	cases := []struct {
+		effort string
+		want   string // "" = 不下发
+	}{
+		{"", ""},
+		{"ultra", "medium"},
+		{"off", "none"},
+		{"none", "none"},
+		{"10", "medium"},
+		{"high", "medium"}, // qmodel_38max 没有 high，最近档 + 同距偏默认 → medium
+	}
+	for _, c := range cases {
 		req := &openAIRequest{
 			Model:           "qmodel_38max",
 			Messages:        []openAIMessage{{Role: "user", Content: "hi"}},
-			ReasoningEffort: effort,
+			ReasoningEffort: c.effort,
 		}
 		raw, err := buildQoderBody(req, "qmodel_38max", "personal_professional_trial")
 		if err != nil {
-			t.Fatalf("build(%q): %v", effort, err)
+			t.Fatalf("build(%q): %v", c.effort, err)
 		}
 		var m map[string]any
 		if err := json.Unmarshal(raw, &m); err != nil {
-			t.Fatalf("json(%q): %v", effort, err)
+			t.Fatalf("json(%q): %v", c.effort, err)
 		}
 		params, _ := m["parameters"].(map[string]any)
 		if params == nil {
+			if c.want != "" {
+				t.Errorf("effort %q: parameters missing", c.effort)
+			}
 			continue
 		}
 		if _, why := params["enable_thinking"]; why {
-			t.Errorf("effort %q: enable_thinking must not be injected", effort)
+			t.Errorf("effort %q: enable_thinking must not be injected", c.effort)
 		}
-		if _, why := params["reasoning_effort"]; why {
-			t.Errorf("effort %q: reasoning_effort must not be injected", effort)
-		}
-	}
-}
-
-func TestNormalizeReasoningEffort(t *testing.T) {
-	if got := normalizeReasoningEffort("  XHigh "); got != "xhigh" {
-		t.Errorf("normalizeReasoningEffort trim/case = %q", got)
-	}
-	// v0.8.17: the catalog advertises high/max for some models (DeepSeek-Flash
-	// low/high/max), so those dials are now legal instead of dropped.
-	for _, good := range []string{"high", "max"} {
-		if got := normalizeReasoningEffort(good); got != good {
-			t.Errorf("normalizeReasoningEffort(%q) = %q, want passthrough", good, got)
-		}
-	}
-	for _, bad := range []string{"", "ultra", "10"} {
-		if got := normalizeReasoningEffort(bad); got != "" {
-			t.Errorf("normalizeReasoningEffort(%q) = %q, want empty", bad, got)
+		got, _ := params["reasoning_effort"].(string)
+		if got != c.want {
+			t.Errorf("effort %q: reasoning_effort = %q, want %q", c.effort, got, c.want)
 		}
 	}
 }

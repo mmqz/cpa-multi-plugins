@@ -85,23 +85,19 @@ func convertSOLOStreamToOpenAI(r io.Reader, model string, onErr func(*upstream.S
 					case "token_usage":
 						pendingUsage = ev.Usage
 					case "done":
-						emit(map[string]any{
+						// 老师口径（Trae2api-cn sse.py:1958-1966）：usage 挂在带
+						// finish_reason 的同一帧上，不另起 usage-only chunk——
+						// 只读终结帧的客户端/账本也拿得到用量。pendingUsage 在
+						// ParseSOLOLine 里已经归一化过。
+						finishChunk := map[string]any{
 							"id": id, "object": "chat.completion.chunk", "created": created, "model": model,
 							"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": ev.FinishReason}},
-						})
-						if pendingUsage != nil {
-							pt := getFloatVal(pendingUsage, "prompt_tokens")
-							ct := getFloatVal(pendingUsage, "completion_tokens")
-							tt := getFloatVal(pendingUsage, "total_tokens")
-							if tt == 0 {
-								tt = pt + ct
-							}
-							emit(map[string]any{
-								"id": id, "object": "chat.completion.chunk", "created": created, "model": model,
-								"choices": []any{},
-								"usage":   map[string]any{"prompt_tokens": int64(pt), "completion_tokens": int64(ct), "total_tokens": int64(tt)},
-							})
 						}
+						if pendingUsage != nil {
+							finishChunk["usage"] = pendingUsage
+							pendingUsage = nil
+						}
+						emit(finishChunk)
 						sawDone = true
 					case "error":
 						se := &upstream.SOLOStreamError{Code: ev.ErrorCode, Msg: ev.ErrorMessage}
@@ -127,6 +123,16 @@ func convertSOLOStreamToOpenAI(r io.Reader, model string, onErr func(*upstream.S
 			if err != nil {
 				break
 			}
+		}
+		// token_usage 之后上游直接 EOF（没有 done）：这条用量照样要交给宿主，
+		// 否则整段思考白记。补一个带 finish_reason 的用量帧（与正常终结帧同形）。
+		if pendingUsage != nil {
+			emit(map[string]any{
+				"id": id, "object": "chat.completion.chunk", "created": created, "model": model,
+				"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+				"usage":   pendingUsage,
+			})
+			pendingUsage = nil
 		}
 		// v0.12.36: no "data: [DONE]" here — the host appends the final
 		// "data: [DONE]\n\n" itself when the chunk channel closes

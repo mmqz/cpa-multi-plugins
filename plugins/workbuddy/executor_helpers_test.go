@@ -61,3 +61,35 @@ func TestRewriteSystemForUpstream_InvalidJSONPassthrough(t *testing.T) {
 		t.Fatal("invalid JSON should pass through")
 	}
 }
+
+func TestForceStreamBody_SetsIncludeUsage(t *testing.T) {
+	in := []byte(`{"model":"glm","messages":[]}`)
+	out := forceStreamBody(in, nil)
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatal(err)
+	}
+	opts, ok := obj["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream_options missing or wrong type: %s", out)
+	}
+	if opts["include_usage"] != true {
+		t.Fatalf("include_usage must be true: %s", out)
+	}
+}
+
+func TestPrepareUpstreamBody_PreservesStreamOptions(t *testing.T) {
+	in := []byte(`{"model":"glm","messages":[],"stream_options":{"trace":"keep"}}`)
+	out := prepareUpstreamBody(in, nil, &storedAuth{}, "m")
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatal(err)
+	}
+	opts, ok := obj["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream_options missing or wrong type: %s", out)
+	}
+	if opts["include_usage"] != true || opts["trace"] != "keep" {
+		t.Fatalf("stream_options not preserved: %s", out)
+	}
+}

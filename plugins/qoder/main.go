@@ -773,6 +773,16 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "payload parse: "+err.Error())
 		return nil, fmt.Errorf("payload parse: %w", err)
 	}
+	// 【本地补丁·档位管家·让路版】客户端带了自己的档（有效值）→ 听它的；没带、或带的是上游不认的值 → 用管家钉的档兜底（2026-10-15 用户定）。
+	clientEff := qwReq.ReasoningEffort
+	pin := pinnedReasoningEffort(stripProviderPrefix(req.Model))
+	if pin != "" && !effortIsExplicit(clientEff) {
+		qwReq.ReasoningEffort = pin
+	}
+	// 诊断日志（tierprobe）：client=客户端原值 pin=钉子 final=按官方目录归一化后真正发往上游的值
+	qwReq.Region = authRegion(sa)
+	finalEff, _ := normalizeReasoningEffortFor(upstreamModel, qwReq.Region, qwReq.ReasoningEffort)
+	logTierProbe(req.Model, clientEff, pin, finalEff)
 	body, err := buildQoderBody(qwReq, upstreamModel, uiUserType(nil))
 	if err != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "body build: "+err.Error())
@@ -860,6 +870,16 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "payload parse: "+err.Error())
 		return nil, fmt.Errorf("payload parse: %w", err)
 	}
+	// 【本地补丁·档位管家·让路版】客户端带了自己的档（有效值）→ 听它的；没带、或带的是上游不认的值 → 用管家钉的档兜底（2026-10-15 用户定）。
+	clientEff := qwReq.ReasoningEffort
+	pin := pinnedReasoningEffort(stripProviderPrefix(req.Model))
+	if pin != "" && !effortIsExplicit(clientEff) {
+		qwReq.ReasoningEffort = pin
+	}
+	// 诊断日志（tierprobe）：client=客户端原值 pin=钉子 final=按官方目录归一化后真正发往上游的值
+	qwReq.Region = authRegion(sa)
+	finalEff, _ := normalizeReasoningEffortFor(upstreamModel, qwReq.Region, qwReq.ReasoningEffort)
+	logTierProbe(req.Model, clientEff, pin, finalEff)
 	body, err := buildQoderBody(qwReq, upstreamModel, uiUserType(nil))
 	if err != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "body build: "+err.Error())

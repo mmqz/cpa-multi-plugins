@@ -151,6 +151,11 @@ func buildModelGroup(region string, entries []*regionCatalogEntry, refresh bool)
 
 	if refresh {
 		if pick := pickRefreshCredential(entries); pick != nil {
+			// 2026-10-18: refresh=1 必须真的绕过内存目录缓存——否则 TTL 内命中
+			// 缓存会直接返回、不调上游也不落盘。宿主刷新凭据时会把 model_cache
+			// 冲掉（实测 05:56:21 落盘 14 个、05:56:34 被写成空），此后「更新」
+			// 若还命中缓存，目录就永远补不回来，档位管家只能退回假五档。
+			dropDynamicModelsCache()
 			models := fetchDynamicModelsFromStorage(pick.storage)
 			if len(models) > 0 {
 				g.Models = modelGroupEntries(models)

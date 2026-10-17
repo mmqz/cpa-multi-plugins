@@ -25,7 +25,7 @@ import (
 // present. Aliases use the qoder/ prefix in AuthAttributes; bare IDs work
 // too.
 func wbModels() []pluginapi.ModelInfo {
-	return []pluginapi.ModelInfo{
+	out := []pluginapi.ModelInfo{
 		{ID: "auto", Name: "Auto", ContextLength: 200000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "ultimate", Name: "Ultimate", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "performance", Name: "Performance", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
@@ -42,6 +42,12 @@ func wbModels() []pluginapi.ModelInfo {
 		{ID: "dfmodel", Name: "DeepSeek-Flash", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 		{ID: "mmodel", Name: "MiniMax-M3", ContextLength: 1000000, MaxCompletionTokens: 8192, OwnedBy: providerName, SupportedGenerationMethods: []string{"chat"}},
 	}
+	// 按官方目录（model_efforts.go 的 cn 快照）挂思考档位集合：页面与
+	// /v1/models 据此画"能设哪些档"，没有档位信息的模型如实留空。
+	for i := range out {
+		out[i].Thinking = thinkingForModel(out[i].ID, regionCN, nil)
+	}
+	return out
 }
 
 func cachedDynamicModels(accountKey string) ([]pluginapi.ModelInfo, bool) {
@@ -264,13 +270,14 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 		return nil, fmt.Errorf("no chat scene in models response")
 	}
 	var models []struct {
-		Key            string  `json:"key"`
-		DisplayName    string  `json:"display_name"`
-		Enable         bool    `json:"enable"`
-		IsReasoning    bool    `json:"is_reasoning"`
-		IsVL           bool    `json:"is_vl"`
-		MaxInputTokens int64   `json:"max_input_tokens"`
-		PriceFactor    float64 `json:"price_factor"`
+		Key            string         `json:"key"`
+		DisplayName    string         `json:"display_name"`
+		Enable         bool           `json:"enable"`
+		IsReasoning    bool           `json:"is_reasoning"`
+		IsVL           bool           `json:"is_vl"`
+		MaxInputTokens int64          `json:"max_input_tokens"`
+		PriceFactor    float64        `json:"price_factor"`
+		ThinkingConfig map[string]any `json:"thinking_config"`
 	}
 	if err := json.Unmarshal(chatRaw, &models); err != nil {
 		return nil, fmt.Errorf("chat scene parse: %w", err)
@@ -291,6 +298,9 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 			MaxCompletionTokens:        8192,
 			OwnedBy:                    providerName,
 			SupportedGenerationMethods: []string{"chat"},
+			// 目录下发的 thinking_config 优先（老师 qoder_proxy.py:2570-2578）；
+			// 没下发的模型回落到官方目录快照（model_efforts.go）。
+			Thinking: thinkingForModel(m.Key, authRegion(sa), m.ThinkingConfig),
 		})
 	}
 	if len(out) == 0 {

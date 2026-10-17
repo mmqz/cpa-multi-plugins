@@ -360,6 +360,9 @@ func pumpStreamFrames(scanner *bufio.Scanner, sink streamSink, gate *streamHeadG
 			continue
 		}
 		cleaned = fixFinishReasonToolCalls(cleaned, toolSeen)
+		// 用量归一化（usage_shape.go）：reasoning / cache 明细双写进宿主
+		// 各版本都认的位置；不含 usage 的帧原样返回，热路径零开销。
+		cleaned = normalizeChunkUsage(cleaned)
 		payload := cleaned
 		if sseFramed {
 			payload = "data: " + cleaned
@@ -499,6 +502,8 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 			continue
 		}
 		cleaned = fixFinishReasonToolCalls(cleaned, toolSeen)
+		// 用量归一化（usage_shape.go）：同异步泵，双写双位置。
+		cleaned = normalizeChunkUsage(cleaned)
 		if sseFramed {
 			cleaned = "data: " + cleaned
 		}
@@ -731,7 +736,10 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 		}},
 	}
 	if usage != nil {
-		result["usage"] = usage
+		// 非流式折叠：usage 归一化后再交给宿主（usage_shape.go）——
+		// 宿主 8.0.23 的非流式 /v1/responses 转换只认 output_tokens_details，
+		// 双写后客户端与账本都能看到真实推理数。
+		result["usage"] = normalizeUsageMap(usage)
 	}
 	out, err := json.Marshal(result)
 	if err != nil {

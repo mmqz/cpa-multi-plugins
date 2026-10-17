@@ -111,7 +111,9 @@ func forwardUsageToCPAMP(alias, model, authID string, started time.Time, detail 
 	}
 	total := detail.TotalTokens
 	if total == 0 {
-		total = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+		// 与 normalizeUsageDetail / usage_shape.go 同一口径：reasoning 已含在
+		// output 里，不再另加（重复相加会把账吹大）。
+		total = detail.InputTokens + detail.OutputTokens
 	}
 	failBody := ""
 	failCode := 200
@@ -170,8 +172,10 @@ func forwardUsageToCPAMP(alias, model, authID string, started time.Time, detail 
 }
 
 func normalizeUsageDetail(d usage.Detail) usage.Detail {
+	// total = 输入 + 输出；reasoning 已包含在 output 里，不再另加
+	// （重复相加会吹大账，见 usage_shape.go 的同一口径）。
 	if d.TotalTokens == 0 {
-		if total := d.InputTokens + d.OutputTokens + d.ReasoningTokens; total > 0 {
+		if total := d.InputTokens + d.OutputTokens; total > 0 {
 			d.TotalTokens = total
 		}
 	}
@@ -180,22 +184,16 @@ func normalizeUsageDetail(d usage.Detail) usage.Detail {
 
 // usageDetailFromMap converts an OpenAI-style "usage" JSON object into a
 // usage.Detail, tolerating both snake_case naming and numeric jitter.
+// reasoning / cached 走 usage_shape.go 的兜底链——上游把数放在
+// completion_tokens_details、output_tokens_details 还是顶层平铺，都要读得到。
 func usageDetailFromMap(m map[string]any) usage.Detail {
 	if len(m) == 0 {
 		return usage.Detail{}
 	}
 	num := func(keys ...string) int64 {
 		for _, k := range keys {
-			if v, ok := m[k]; ok {
-				switch n := v.(type) {
-				case float64:
-					return int64(n)
-				case int64:
-					return n
-				case json.Number:
-					i, _ := n.Int64()
-					return i
-				}
+			if v, ok := usageField(m, k); ok {
+				return v
 			}
 		}
 		return 0
@@ -207,10 +205,13 @@ func usageDetailFromMap(m map[string]any) usage.Detail {
 		CachedTokens:    num("cached_tokens"),
 		CacheReadTokens: num("cache_read_input_tokens"),
 	}
-	if ct, ok := m["completion_tokens_details"].(map[string]any); ok {
-		if v, ok2 := ct["reasoning_tokens"].(float64); ok2 {
-			d.ReasoningTokens = int64(v)
-		}
+	if rea, ok := readUsageReasoning(m); ok {
+		d.ReasoningTokens = rea
+	}
+	// 只在两个缓存口径都还空着时回填：CacheReadTokens 已有值时不再把它
+	// 复制进 CachedTokens，避免同一笔缓存被记两次（CPAMP 两个字段分开收）。
+	if cached, ok := readUsageCached(m); ok && d.CachedTokens == 0 && d.CacheReadTokens == 0 {
+		d.CachedTokens = cached
 	}
 	return d
 }

@@ -62,11 +62,26 @@ func TestForceMaxThinking_Hy4ModelCaseInsensitive(t *testing.T) {
 	}
 }
 
+// 2026-10-18 按老师 WorkBuddy2API 源码对齐（core/responses_adapter.py:79-84）：
+// 非 hy3/hy4 模型一律钉 max——上游对 GLM/DeepSeek 只认 high 与 max，low/medium/
+// 不传档时上游不思考，账本里就是 0（GLM 历史 high 3 笔全 0 的根因）。
 func TestForceMaxThinking_NonHy3Model(t *testing.T) {
 	obj := map[string]any{"model": "glm-5.2"}
-	changed := forceMaxThinking(obj)
-	if changed {
-		t.Fatal("should not change non-hy3 model")
+	if !forceMaxThinking(obj) {
+		t.Fatal("non-hy model must be pinned to max")
+	}
+	if obj["reasoning_effort"] != "max" {
+		t.Fatalf("non-hy model effort = %v, want max", obj["reasoning_effort"])
+	}
+	// 客户端自己的档位也被覆盖（老师：不依赖客户端传参）。
+	low := map[string]any{"model": "glm-5.3-flash", "reasoning_effort": "low"}
+	if !forceMaxThinking(low) || low["reasoning_effort"] != "max" {
+		t.Fatalf("client low must be overridden to max, got %v", low["reasoning_effort"])
+	}
+	// 已经是 max 的不再改动。
+	maxed := map[string]any{"model": "glm-5.3-flash", "reasoning_effort": "max"}
+	if forceMaxThinking(maxed) {
+		t.Fatal("already-max body must not be reported as changed")
 	}
 }
 

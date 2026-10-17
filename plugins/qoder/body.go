@@ -194,10 +194,12 @@ type openAIRequest struct {
 	Model    string          `json:"model"`
 	Messages []openAIMessage `json:"messages"`
 	Stream   bool            `json:"stream"`
-	// ReasoningEffort is the OpenAI-style thinking dial. Upstream thinking_config
-	// accepts low/medium/xhigh (2026-09-18 probe); empty or invalid leaves the
-	// parameters block untouched so upstream applies its own default (medium).
+	// ReasoningEffort is the OpenAI-style thinking dial. 档位按官方目录钳制
+	// （model_efforts.go）：none 照发、乱值落默认档、无档位表的模型不下发。
 	ReasoningEffort string `json:"reasoning_effort"`
+	// Region is the account realm (cn/intl) used to pick the model's effort
+	// contract from the official catalog. Never decoded from client JSON.
+	Region string `json:"-"`
 	// Tools is the client's OpenAI tools array, forwarded verbatim when present.
 	Tools json.RawMessage `json:"tools,omitempty"`
 }
@@ -257,23 +259,6 @@ func runeSafePrefix(s string, n int) string {
 		return s
 	}
 	return string(r[:n])
-}
-
-// normalizeReasoningEffort validates the OpenAI-style reasoning_effort dial.
-// v0.8.17 (fork libo0118/qoder-custom review): the catalog's
-// thinking_config.enabled.efforts advertise per-model level sets that include
-// "high" and "max" (e.g. DeepSeek-Flash low/high/max, Qwen3.8-Max
-// low/medium/xhigh) — the old low/medium/xhigh whitelist silently dropped the
-// high/max dials and callers got upstream defaults instead. Levels are
-// normalized to the union of advertised values without conflating
-// high/max/xhigh; anything else returns "" = inject nothing.
-func normalizeReasoningEffort(s string) string {
-	effort := strings.ToLower(strings.TrimSpace(s))
-	switch effort {
-	case "low", "medium", "high", "xhigh", "max":
-		return effort
-	}
-	return ""
 }
 
 // buildQoderBody renders the upstream agent_chat_generation body for one request.
@@ -413,16 +398,16 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 		biz["name"] = runeSafePrefix(prompt, 30)
 	}
 
-	// Reasoning dial: inject upstream thinking parameters only when the client
-	// supplied a valid reasoning_effort. Absent/invalid keeps upstream defaults;
-	// the template parameters (max_tokens) are preserved either way.
-	if effort := normalizeReasoningEffort(req.ReasoningEffort); effort != "" {
+	// Reasoning dial：只写 parameters.reasoning_effort（老师 qoder_proxy.py:3944-3961；
+	// 老师全仓不使用 enable_thinking，2026-10-18 按其源码去掉该字段）。
+	// 档位按官方目录钳制：none 照发，未命中落最近档（同距偏默认档），
+	// 无档位表的模型不下发。模板里的 max_tokens 两端都保留。
+	if effort, inject := normalizeReasoningEffortFor(modelKey, req.Region, req.ReasoningEffort); inject {
 		params, _ := base["parameters"].(map[string]any)
 		if params == nil {
 			params = map[string]any{}
 			base["parameters"] = params
 		}
-		params["enable_thinking"] = true
 		params["reasoning_effort"] = effort
 	}
 
