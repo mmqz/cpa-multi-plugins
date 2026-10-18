@@ -174,7 +174,7 @@ func runPump(url string, gate *streamHeadGate) {
 		panic(err)
 	}
 	pumpUpstreamStream(req, nil, "stream-head-gate", false,
-		"qmodel_preview", "qmodel_preview", "", time.Now(), "", "", gate)
+		"qmodel_preview", "qmodel_preview", "", time.Now(), "", "", gate, nil)
 }
 
 // startPump runs the pump in the goroutine shape handleExecStream uses, and

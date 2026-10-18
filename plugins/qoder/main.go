@@ -893,7 +893,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	// No async stream id → fall back to synchronous chunk collection.
 	if req.StreamID == "" {
 		collector := &sseUsageCollector{}
-		chunks, statusCode, errCollect := collectUpstreamStreamQoder(encodedBody, sa, upstreamModel, sseFramed, collector)
+		chunks, statusCode, errCollect := collectUpstreamStreamQoder(encodedBody, sa, upstreamModel, sseFramed, collector, parseToolSpecs(qwReq.Tools))
 		if errCollect != nil {
 			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, errCollect.Error())
 			recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, errCollect.Error())
@@ -931,7 +931,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	// hand-off: the pump owns the verdict channel and never blocks on us.
 	headTimeout := streamHeadTimeout()
 	gate := newStreamHeadGate(headTimeout)
-	go pumpUpstreamStream(httpReq, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, cooldownModel, gate)
+	go pumpUpstreamStream(httpReq, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, cooldownModel, gate, parseToolSpecs(qwReq.Tools))
 	if verdict, decided := gate.awaitHandoff(headTimeout); decided && verdict.err != nil {
 		// Nothing was delivered, so the host can rotate/cool on a real status
 		// instead of accepting a successful-looking empty answer. The status is

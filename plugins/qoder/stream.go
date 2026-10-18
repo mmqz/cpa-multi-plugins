@@ -311,7 +311,7 @@ func streamChunkAnswers(chunk string) bool {
 // non-nil gate and blocks in awaitHandoff until the pump reports. Until then
 // this function reads without emitting (see release below). gate == nil — the
 // default, stream_head_timeout 0 — keeps the historical behavior byte for byte.
-func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID, cooldownModel string, gate *streamHeadGate) {
+func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID, cooldownModel string, gate *streamHeadGate, specs []toolSpec) {
 	// Always close the host stream exactly once on every exit path.
 	closed := false
 	closeOnce := func() {
@@ -395,6 +395,34 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		return
 	}
 	collector := &sseUsageCollector{}
+	guard := newTextCallGuard(specs) // 文字版调用认领（v0.8.22）
+	// sendOne 走一帧（守卫过滤后的产物也走这里）：head 阶段先攒着，开门后直发。
+	// 返回 false＝已报错返回（客户端断了或开门发帧失败）。
+	sendOne := func(cleaned string) bool {
+		outgoing := []byte(cleaned)
+		if sseFramed {
+			outgoing = []byte("data: " + cleaned)
+		}
+		if !released {
+			head = append(head, outgoing)
+			// Hold the head open until a frame really starts answering: a
+			// role-only opener must keep a later failure reportable.
+			if !streamChunkAnswers(cleaned) {
+				return true
+			}
+			if err := release(); err != nil {
+				publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
+				return false
+			}
+			return true
+		}
+		if err := streamEmitSink(streamID, outgoing); err != nil {
+			// Client disconnected / host closed stream — abort; do not report success.
+			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
+			return false
+		}
+		return true
+	}
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	seenPayload := false
@@ -430,26 +458,18 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		// 用量归一化（usage_shape.go）：reasoning / cache 明细双写进宿主
 		// 各版本都认的位置；不含 usage 的帧原样返回。
 		cleaned = normalizeChunkUsage(cleaned)
-		outgoing := []byte(cleaned)
-		if sseFramed {
-			outgoing = []byte("data: " + cleaned)
-		}
-		if !released {
-			head = append(head, outgoing)
-			// Hold the head open until a frame really starts answering: a
-			// role-only opener must keep a later failure reportable.
-			if !streamChunkAnswers(cleaned) {
-				continue
-			}
-			if err := release(); err != nil {
-				publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
+		// 文字版调用认领（v0.8.22）：Qwen 偶尔把工具调用写成正文（开头
+		// "Calling tools." + XML 尾巴），先攒住、认出来再换成标准调用；
+		// 认不出原样放过（见 textcall.go）。
+		for _, piece := range guard.Filter(cleaned) {
+			if !sendOne(piece) {
 				return
 			}
-			continue
 		}
-		if err := streamEmitSink(streamID, outgoing); err != nil {
-			// Client disconnected / host closed stream — abort; do not report success.
-			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
+	}
+	// 守卫里还攒着没走成调用的文字 → 一个字不少地放出去（排在 head 帧之后）。
+	for _, piece := range guard.Flush() {
+		if !sendOne(piece) {
 			return
 		}
 	}
@@ -497,7 +517,7 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 // (no async stream id): drain the upstream nested SSE, unwrap the inner
 // OpenAI chunks, return them as a slice. The collector, when non-nil,
 // observes the unwrapped inner chunks for usage extraction.
-func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey string, sseFramed bool, collector *sseUsageCollector) ([]pluginapi.ExecutorStreamChunk, int, error) {
+func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey string, sseFramed bool, collector *sseUsageCollector, specs []toolSpec) ([]pluginapi.ExecutorStreamChunk, int, error) {
 	httpReq, err := http.NewRequest(http.MethodPost, endpointChatFor(sa), strings.NewReader(encodedBody))
 	if err != nil {
 		return nil, 0, err
@@ -517,6 +537,7 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 		return nil, statusCode, upstreamStatusError(statusCode, chatUpstreamError(statusCode, string(payload)))
 	}
 	chunks := make([]pluginapi.ExecutorStreamChunk, 0, 64)
+	guard := newTextCallGuard(specs) // 文字版调用认领（v0.8.22）
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	seenPayload := false
@@ -538,10 +559,20 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 		}
 		// 用量归一化（usage_shape.go）：同步回退路径与异步泵同一口径。
 		cleaned = normalizeChunkUsage(cleaned)
-		if sseFramed {
-			cleaned = "data: " + cleaned
+		// 文字版调用认领（v0.8.22）：与异步泵同一条规矩（见 textcall.go）。
+		for _, piece := range guard.Filter(cleaned) {
+			if sseFramed {
+				piece = "data: " + piece
+			}
+			chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: json.RawMessage(piece)})
 		}
-		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: json.RawMessage(cleaned)})
+	}
+	// 守卫里攒着没走成调用的文字 → 一个字不少地吐回。
+	for _, piece := range guard.Flush() {
+		if sseFramed {
+			piece = "data: " + piece
+		}
+		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: json.RawMessage(piece)})
 	}
 	if err := scanner.Err(); err != nil {
 		return chunks, 0, upstreamReadError(err)
