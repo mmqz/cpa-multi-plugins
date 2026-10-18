@@ -480,7 +480,7 @@ func prependThoughtInPlace(msg map[string]any, thoughtBlock string) bool {
 // system message that is not first no longer suppresses the injection;
 // the Global-only gate is unchanged so CN traffic stays byte-identical.
 func ensureSystemMessageInPlace(obj map[string]any, sa *storedAuth) bool {
-	if sa == nil || !isGlobalDomain(sa.Auth.Domain) {
+	if sa == nil || !(isGlobalDomain(sa.Auth.Domain) || isIntlDomain(sa.Auth.Domain)) {
 		return false
 	}
 	messages, ok := obj["messages"].([]any)
@@ -668,7 +668,7 @@ func ensureSystemMessage(payload []byte, sa *storedAuth) []byte {
 		return payload
 	}
 	// Only inject for Global; CN doesn't need it and we minimize diff.
-	if sa == nil || !isGlobalDomain(sa.Auth.Domain) {
+	if sa == nil || !(isGlobalDomain(sa.Auth.Domain) || isIntlDomain(sa.Auth.Domain)) {
 		return payload
 	}
 	var obj map[string]any
