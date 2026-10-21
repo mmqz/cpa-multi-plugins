@@ -36,9 +36,10 @@ func TestErrorEnvelopeForPlainErrorOmitsStatus(t *testing.T) {
 	}
 }
 
-// TestUpstreamStatusErrorPolicy locks the 0.9.17 pass-through matrix:
-// account-level statuses wrap (host cooldown applies), request/IP-level
-// shapes stay plain (only the 1-minute transient default).
+// TestUpstreamStatusErrorPolicy locks the pass-through matrix:
+// account-level statuses wrap (host cooldown applies); request-level
+// deterministic shapes wrap 400 so the host stops the rotation at once
+// (2026-10-22); everything else stays plain.
 func TestUpstreamStatusErrorPolicy(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -50,11 +51,11 @@ func TestUpstreamStatusErrorPolicy(t *testing.T) {
 		{"401 dead token", 401, `{"code":11101,"msg":"unauthorized"}`, 401},
 		{"429 free quota drained", 429, `{"code":11120,"msg":"model quota exceeded"}`, 429},
 		{"403 business envelope", 403, `{"code":11140,"msg":"request illegal"}`, 403},
-		{"413 prompt too long", 413, `<html>413</html>`, 0},
-		{"404 with 11115", 404, `{"code":11115,"msg":"prompt is too long"}`, 0},
-		{"400 channel risk 11128", 400, `{"code":11128,"msg":"channel risk"}`, 0},
-		{"400 model not registered", 400, `{"code":11102,"msg":"model [x] service info not found"}`, 0},
-		{"403 waf no envelope", 403, `<html>challenge</html>`, 0},
+		{"413 prompt too long", 413, `<html>413</html>`, 400},
+		{"404 with 11115", 404, `{"code":11115,"msg":"prompt is too long"}`, 400},
+		{"400 channel risk 11128", 400, `{"code":11128,"msg":"channel risk"}`, 400},
+		{"400 model not registered", 400, `{"code":11102,"msg":"model [x] service info not found"}`, 400},
+		{"403 waf no envelope", 403, `<html>challenge</html>`, 400},
 		{"400 plain business", 400, `{"code":11199,"msg":"bad request"}`, 0},
 		{"500 server", 500, `oops`, 0},
 	}

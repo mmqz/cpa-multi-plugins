@@ -155,12 +155,18 @@ func (e *statusError) Unwrap() error   { return e.err }
 // cooldown — unchanged from pre-0.9.17 behavior).
 func upstreamStatusError(status int, payload string, err error) error {
 	switch {
+	case isModelScopedRateLimit(status, payload):
+		// 模型级限流是「排队」，不是坏号：保持无状态，让宿主换号试试，
+		// 全排上队再由门面按重置时间等。
+		return err
 	case isPromptTooLong(status, payload),
 		isChannelRiskControl(status, payload),
 		isModelNotRegistered(status, payload),
-		isModelScopedRateLimit(status, payload),
 		isWafBlocked(status, payload):
-		return err
+		// 2026-10-22 用户定：这四类都是请求级的确定性错——换哪个号一样坏。
+		// 带 400 回去，宿主的 isRequestInvalidError 一命中就停，不再七个号
+		// 各打一遍；400 属于 request fault，不惩罚账号。
+		return &statusError{status: http.StatusBadRequest, err: err}
 	case status == http.StatusUnauthorized,
 		status == http.StatusPaymentRequired,
 		status == http.StatusTooManyRequests:
@@ -230,6 +236,14 @@ func streamFaultStatus(payload string) int {
 	// noteStreamFrameLimit 武装。6004 优先级不变（上面先判，它保持 status 0）。
 	if isDailyQuotaFrame(payload) {
 		return http.StatusTooManyRequests
+	}
+	// 2026-10-22 用户定：请求级确定性错（模型未注册/提示词过长/风控/WAF）
+	// 也按 400 走流头闸，宿主第一次就停，不再换号重刷。
+	if isModelNotRegistered(http.StatusBadRequest, payload) ||
+		isPromptTooLong(http.StatusBadRequest, payload) ||
+		isChannelRiskControl(http.StatusBadRequest, payload) ||
+		isWafBlocked(http.StatusForbidden, payload) {
+		return http.StatusBadRequest
 	}
 	low := strings.ToLower(payload)
 	switch {

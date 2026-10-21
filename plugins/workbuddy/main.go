@@ -937,7 +937,8 @@ func handleExecStream(raw []byte) ([]byte, error) {
 			// empty streams and >=400s as its error — feed the pair
 			// cooldown so the NEXT request rotates candidates.
 			noteModelCooldownFailure(req.AuthID, sa, upstreamModel, statusCode, errCollect.Error())
-			return nil, errCollect
+			// 同一条规矩：错误要带状态回去，别让宿主按 500 猜。
+			return nil, upstreamStatusError(statusCode, errCollect.Error(), errCollect)
 		}
 		publishUsage(req.Model, upstreamModel, authUID, started, collector.detail(), false, 0, "")
 		noteLearnedRealModel(upstreamModel, collector.respModel)

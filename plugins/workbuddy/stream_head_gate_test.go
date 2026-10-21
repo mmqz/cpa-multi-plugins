@@ -128,7 +128,7 @@ func TestStreamHeadFaultStatusMapping(t *testing.T) {
 		{"throttle (non-6004) -> 429", `{"code":11120,"msg":"too many requests, slow down"}`, 429},
 		{"business 403 -> 403", `{"code":11140,"msg":"no permission to access"}`, 403},
 		{"model-scoped 6004 stays status-less", head6004Frame, 0},
-		{"prompt-too-long is request-level", `{"code":11115,"msg":"prompt is too long"}`, 0},
+		{"prompt-too-long is request-level -> 400", `{"code":11115,"msg":"prompt is too long"}`, 400},
 		{"bare event:error has nothing to map", "event:error", 0},
 		{"opaque body stays status-less", `{"detail":"something odd"}`, 0},
 	}
