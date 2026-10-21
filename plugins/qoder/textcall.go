@@ -103,6 +103,20 @@ func markerState(s string) int {
 	return best
 }
 
+// isBareCallingToolsMarker 判断攒下的文字是否只有 "Calling tools." 这句前缀。
+// 只吞这一种裸标记；后面带了真正正文、或长成了 XML 调用，都不在这里猜。
+func isBareCallingToolsMarker(s string) bool {
+	t := strings.TrimSpace(s)
+	return strings.EqualFold(t, "Calling tools") || strings.EqualFold(t, "Calling tools.")
+}
+
+// isInvisibleToolCallPlaceholder 识别旧版注入的孤立 "."，以及新版零宽占位符。
+// 只吞这种无语义占位；正常正文里的句号、省略号或任何说明文字都不动。
+func isInvisibleToolCallPlaceholder(s string) bool {
+	t := strings.TrimSpace(s)
+	return t == "." || t == "\u200b"
+}
+
 // blockEnd 在攒下的文字里找这个块的结尾；返回结束下标（含结尾标记）。
 // 找到 </tool_call> 最稳；退一步认 </function>，再退一步认 </parameter>。
 func blockEnd(s string) (int, bool) {
@@ -309,6 +323,11 @@ type textCallGuard struct {
 	sawCall  bool           // 这条消息已经出过标准调用
 	template map[string]any // 第一块 chunk 当模板，用来造新 chunk
 	seq      int
+	// 中途认领（2026-10-22）：开头守卫只看消息开头，模型把调用写到正文
+	// 中段时就漏了。这里只认「同一个 content 块内完整出现」的
+	// <tool_call>…</tool_call> 整块——成功换标准调用，失败原样保留。
+	// 跨块的整块不碰（fail-open 原样透传）。一条消息只认领一次。
+	midDone bool
 }
 
 func newTextCallGuard(specs []toolSpec) *textCallGuard { return &textCallGuard{specs: specs} }
@@ -335,8 +354,15 @@ func (g *textCallGuard) Filter(chunk string) []string {
 		g.template = obj
 	}
 	if tcs, isArr := delta["tool_calls"].([]any); isArr && len(tcs) > 0 {
-		// 已经有标准调用了：这条消息一律不再改写（避免重复执行）
+		// 已经有标准调用了：这条消息一律不再改写（避免重复执行）。
+		// 如果攒着的只是裸的 "Calling tools." 前缀，它不是正文，也不是调用本体，
+		// 跟着标准调用一起出门只会重复模型 UI 里那句话；这里直接吞掉。
 		g.sawCall = true
+		if isBareCallingToolsMarker(g.buf.String()) || isInvisibleToolCallPlaceholder(g.buf.String()) {
+			g.head, g.buf = "", strings.Builder{}
+			g.holding, g.off = false, true
+			return []string{chunk}
+		}
 		outs := g.flushText()
 		g.off = true
 		return append(outs, chunk)
@@ -344,6 +370,13 @@ func (g *textCallGuard) Filter(chunk string) []string {
 	content, _ := delta["content"].(string)
 	if content == "" {
 		return []string{chunk}
+	}
+	// 中途认领：只在开头守卫判定完毕（off）之后接管，与守卫攒块/吞尾互斥；
+	// 见过标准调用或已认领过一次就不再做——一次调用绝不能跑两遍。
+	if g.off && !g.swallow && !g.sawCall && !g.midDone {
+		if outs, handled := g.midScan(chunk, obj, delta, content); handled {
+			return outs
+		}
 	}
 	// 块已经认领过，只差它最后那句 </tool_call>：吞掉，别漏给客户端。
 	if g.swallow {
@@ -369,9 +402,23 @@ func (g *textCallGuard) Filter(chunk string) []string {
 		return []string{chunk}
 	}
 	if !g.holding {
+		if isInvisibleToolCallPlaceholder(g.head + content) {
+			g.holding = true
+			g.head = ""
+			g.buf.WriteString(content)
+			outs := g.chunkWithoutContent(obj, delta)
+			return append(outs, g.maybeResolve()...)
+		}
 		switch markerState(g.head + content) {
 		case 0:
 			g.off = true
+			// 判定"开头不是调用"的同一块里，可能带着中段的完整调用块——
+			// 出门前必须过一遍中途扫描（2026-10-22）。
+			if !g.midDone {
+				if outs, handled := g.midScan(chunk, obj, delta, content); handled {
+					return outs
+				}
+			}
 			return []string{chunk}
 		case 1:
 			g.head += content
@@ -395,9 +442,57 @@ func (g *textCallGuard) Flush() []string {
 	return g.flushText()
 }
 
+// ── 中途认领（2026-10-22）─────────────────────────────────────────────────
+// 只认「同一个 content 块内完整出现」的 <tool_call>…</tool_call>：前缀正文
+// 保留、整块换标准调用；认不出来整块原样保留。跨块的整块不碰（fail-open
+// 原样透传）。一条消息只认领一次。
+
+const midToolCallOpen = "<tool_call>"
+
+// midScan 吃一块 content，返回 (输出块, 是否已处理)。
+func (g *textCallGuard) midScan(chunk string, obj, delta map[string]any, content string) ([]string, bool) {
+	idx := strings.Index(content, midToolCallOpen)
+	if idx < 0 {
+		return nil, false
+	}
+	rel := strings.Index(content[idx:], "</tool_call>")
+	if rel < 0 {
+		return nil, false
+	}
+	end := idx + rel + len("</tool_call>")
+	prefix, block, rest := content[:idx], content[idx:end], content[end:]
+	g.midDone = true
+	var outs []string
+	if prefix != "" {
+		c := cloneChunk(obj)
+		if chs, ok := c["choices"].([]any); ok && len(chs) > 0 {
+			if cc, ok := chs[0].(map[string]any); ok {
+				cc["delta"] = map[string]any{"content": prefix}
+			}
+		}
+		outs = append(outs, marshalChunk(c))
+	}
+	_, calls := salvageText(block, g.specs)
+	if len(calls) > 0 {
+		g.seq++
+		outs = append(outs, g.chunkWithCall(calls[0], g.seq))
+	} else {
+		// 2026-10-22 probe: a text tool call the salver could not claim —
+		// it leaks to the client verbatim ("Calling tools." family). One
+		// journald line per occurrence, no body text.
+		println("[toolleak] path=mid tag=text_call")
+		outs = append(outs, g.chunkWithText(block))
+	}
+	if strings.TrimSpace(rest) != "" {
+		outs = append(outs, g.chunkWithText(rest))
+	}
+	return outs, true
+}
+
 func (g *textCallGuard) flushText() []string {
-	if strings.TrimSpace(g.buf.String()) == "" {
-		g.buf.Reset()
+	if strings.TrimSpace(g.buf.String()) == "" || isInvisibleToolCallPlaceholder(g.buf.String()) {
+		g.head, g.buf = "", strings.Builder{}
+		g.holding, g.off = false, true
 		return nil
 	}
 	text := g.buf.String()

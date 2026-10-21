@@ -83,7 +83,7 @@ func scrubbedStreamContent(t *testing.T, body string) string {
 	sc := bufio.NewScanner(strings.NewReader(body))
 	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	rec := &streamRecorder{}
-	if _, handled := pumpStreamFrames(sc, rec, nil, false, &sseUsageCollector{}, "m", "m", "uid-live", time.Now(), nil); handled {
+	if _, handled := pumpStreamFrames(sc, rec, nil, false, &sseUsageCollector{}, "m", "m", "uid-live", time.Now(), nil, ""); handled {
 		t.Fatalf("production pump aborted the stream")
 	}
 	chunks, _ := rec.snapshot()

@@ -13,14 +13,14 @@ import (
 
 func TestAggregateCompletionRejectsErrorEvent(t *testing.T) {
 	input := "event:error\n\n"
-	if _, err := aggregateCompletion(strings.NewReader(input), "g-5"); err == nil {
+	if _, err := aggregateCompletion(strings.NewReader(input), "g-5", ""); err == nil {
 		t.Fatalf("expected error for upstream error event, got nil")
 	}
 }
 
 func TestAggregateCompletionRejects200ErrorBody(t *testing.T) {
 	input := "data: {\"error\":{\"message\":\"quota exhausted\",\"code\":11103}}\n\n"
-	_, err := aggregateCompletion(strings.NewReader(input), "g-5")
+	_, err := aggregateCompletion(strings.NewReader(input), "g-5", "")
 	if err == nil || !strings.Contains(err.Error(), "workbuddy upstream error") {
 		t.Fatalf("expected workbuddy upstream error, got %v", err)
 	}
@@ -29,7 +29,7 @@ func TestAggregateCompletionRejects200ErrorBody(t *testing.T) {
 func TestAggregateCompletionRejectsErrorCodeFrame(t *testing.T) {
 	// Non-zero code with null error body is still an upstream error frame.
 	input := "data: {\"code\":11101,\"error\":null}\n\n"
-	_, err := aggregateCompletion(strings.NewReader(input), "g-5")
+	_, err := aggregateCompletion(strings.NewReader(input), "g-5", "")
 	if err == nil || !strings.Contains(err.Error(), "workbuddy upstream error") {
 		t.Fatalf("expected workbuddy upstream error for non-zero code, got %v", err)
 	}
@@ -37,7 +37,7 @@ func TestAggregateCompletionRejectsErrorCodeFrame(t *testing.T) {
 
 func TestAggregateCompletionRejectsEmptyStream(t *testing.T) {
 	input := ": keep-alive\ndata: [DONE]\n\n"
-	_, err := aggregateCompletion(strings.NewReader(input), "g-5")
+	_, err := aggregateCompletion(strings.NewReader(input), "g-5", "")
 	if err == nil || !strings.Contains(err.Error(), "empty_stream") {
 		t.Fatalf("expected empty_stream error, got %v", err)
 	}
@@ -52,7 +52,7 @@ func TestAggregateCompletionFoldsNormalChunks(t *testing.T) {
 		"data: [DONE]",
 		"",
 	}, "\n")
-	out, err := aggregateCompletion(strings.NewReader(input), "g-5")
+	out, err := aggregateCompletion(strings.NewReader(input), "g-5", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

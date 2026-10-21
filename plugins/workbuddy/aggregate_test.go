@@ -7,7 +7,7 @@ import (
 
 func TestAggregateCompletion_BasicSSE(t *testing.T) {
 	sse := "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"id\":\"1\",\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":10,\"total_tokens\":15}}\n\ndata: [DONE]\n\n"
-	out, err := aggregateCompletion(strings.NewReader(sse), "test-model")
+	out, err := aggregateCompletion(strings.NewReader(sse), "test-model", "")
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestAggregateCompletion_BasicSSE(t *testing.T) {
 func TestAggregateCompletion_Empty(t *testing.T) {
 	// v0.12.76: an empty 200 stream is an upstream failure, not a synthetic
 	// success — aggregateCompletion now mirrors the streaming paths' guard.
-	_, err := aggregateCompletion(strings.NewReader(""), "test")
+	_, err := aggregateCompletion(strings.NewReader(""), "test", "")
 	if err == nil || !strings.Contains(err.Error(), "empty_stream") {
 		t.Fatalf("expected empty_stream error, got %v", err)
 	}
@@ -31,7 +31,7 @@ func TestAggregateCompletion_Empty(t *testing.T) {
 
 func TestAggregateCompletion_NoDone(t *testing.T) {
 	sse := "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"
-	out, _ := aggregateCompletion(strings.NewReader(sse), "m")
+	out, _ := aggregateCompletion(strings.NewReader(sse), "m", "")
 	if !strings.Contains(string(out), "hi") {
 		t.Fatal("content missing")
 	}
@@ -65,7 +65,7 @@ func TestAggregateCompletionDropsTruncatedToolArgs(t *testing.T) {
 	sse := "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_good\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"/a.txt\\\"}\"}}]},\"finish_reason\":null}]}\n\n" +
 		"data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_bad\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"content\\\":\\\"half-writ\"}}]},\"finish_reason\":\"length\"}]}\n\n" +
 		"data: [DONE]\n\n"
-	out, err := aggregateCompletion(strings.NewReader(sse), "m")
+	out, err := aggregateCompletion(strings.NewReader(sse), "m", "")
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestAggregateCompletionDropsTruncatedToolArgs(t *testing.T) {
 func TestAggregateCompletionKeepsNoArgToolCalls(t *testing.T) {
 	// Empty arguments string is a legal no-argument call, not truncation.
 	sse := "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_x\",\"function\":{\"name\":\"ping\",\"arguments\":\"\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"
-	out, err := aggregateCompletion(strings.NewReader(sse), "m")
+	out, err := aggregateCompletion(strings.NewReader(sse), "m", "")
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
 	}

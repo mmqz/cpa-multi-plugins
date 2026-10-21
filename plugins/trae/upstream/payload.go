@@ -1,4 +1,10 @@
 // payload.go OpenAI → SOLO llm_utils_chat 请求体改写。
+//
+// 现状（2026-10-21）：CN 走 SOLO llm_utils_chat，未接 Remote Agent，因此
+// 当前没有 reasoning effort 档位。后续若做 Trae 思考档位，可研究 Remote
+// Agent 的 POST /api/remote/v1/chat_sessions + GET .../events 链路；
+// Trae2api-cn 已证明个人签到号可尝试 Remote，但部分模型会 4028/502，
+// 必须先实测，再决定是否接入。这里仅记录线索，不改变当前请求行为。
 package upstream
 
 import (

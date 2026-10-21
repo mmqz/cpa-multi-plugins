@@ -1,14 +1,17 @@
 // pinned_effort.go — 【本地补丁 · 档位管家】
 //
-// 让插件配置里的 models[].reasoning 真正生效：每个请求发出前，按模型名查一次
-// "钉子"；客户端带了自己的有效档（low/medium/high/xhigh/max）→ 让路听它的；
-// 没带、或带的是上游不认的值 → 用钉子兜底。没钉的模型完全不受影响（2026-10-15 用户定）。
+// models[].reasoning 是强制钉：只要它对当前模型真实档位有效，就覆盖客户端。
+// models[].default_reasoning 是默认档：只在客户端没有给出有效档位时兜底。
+// 两者都没配置时，WorkBuddy 继续用“真实支持的最高档”作为最后兜底。
+//
+// 优先级：强制钉 > 客户端有效档位 > 默认档 > 真实最高档兜底。
 //
 // 配置形状（引擎 config.yaml → plugins.configs.workbuddy）：
 //
 //	models:
 //	  - id: deepseek-v4.1-flash
-//	    reasoning: low
+//	    reasoning: high
+//	    default_reasoning: low
 //
 // 键支持 id / name / alias 任一，大小写不敏感；带 "provider/" 前缀也认。
 package main
@@ -20,78 +23,131 @@ import (
 )
 
 var (
-	pinnedEffortMu sync.RWMutex
+	effortPolicyMu sync.RWMutex
 	pinnedEfforts  = map[string]string{}
+	defaultEfforts = map[string]string{}
 )
 
-// setPinnedEffortsFromModels 用插件配置里的 models 列表重建钉子表。
-// 每项取 reasoning（非空字符串生效）；id/name/alias 任一都登记为键。
-// 列表为空/缺失 → 清空钉子（配置是唯一事实来源）。
+// setPinnedEffortsFromModels 用插件配置里的 models 列表重建档位策略表。
+// reasoning 是强制钉；default_reasoning 是默认档。id/name/alias 都登记为键。
+// 列表为空/缺失 → 清空两套配置（配置是唯一事实来源）。
 func setPinnedEffortsFromModels(models any) {
-	next := map[string]string{}
+	nextPinned := map[string]string{}
+	nextDefault := map[string]string{}
 	if list, ok := models.([]any); ok {
 		for _, item := range list {
 			obj, ok := item.(map[string]any)
 			if !ok {
 				continue
 			}
-			eff := strings.ToLower(strings.TrimSpace(configScalarString(obj["reasoning"])))
-			if eff == "" {
+			pin := strings.ToLower(strings.TrimSpace(configScalarString(obj["reasoning"])))
+			def := strings.ToLower(strings.TrimSpace(configScalarString(obj["default_reasoning"])))
+			if pin == "" && def == "" {
 				continue
 			}
 			for _, key := range []string{"id", "name", "alias"} {
 				if k := strings.ToLower(strings.TrimSpace(configScalarString(obj[key]))); k != "" {
-					next[k] = eff
+					if pin != "" {
+						nextPinned[k] = pin
+					}
+					if def != "" {
+						nextDefault[k] = def
+					}
 				}
 			}
 		}
 	}
-	pinnedEffortMu.Lock()
-	pinnedEfforts = next
-	pinnedEffortMu.Unlock()
+	effortPolicyMu.Lock()
+	pinnedEfforts = nextPinned
+	defaultEfforts = nextDefault
+	effortPolicyMu.Unlock()
 }
 
-// pinnedReasoningEffort 查某个模型名上的钉子（"" = 没钉）。带 provider/ 前缀也认。
-func pinnedReasoningEffort(model string) string {
+// normalizedModelKey strips a provider prefix and lowercases the id.
+func normalizedModelKey(model string) string {
 	m := strings.ToLower(strings.TrimSpace(model))
 	if i := strings.Index(m, "/"); i >= 0 {
 		m = m[i+1:]
 	}
-	pinnedEffortMu.RLock()
-	defer pinnedEffortMu.RUnlock()
-	return pinnedEfforts[m]
+	return m
 }
 
-// applyPinnedEffortInPlace 在请求体上落钉兜底：客户端没带有效档（或带的是乱值）时，才把 reasoning_effort 填成钉值。
-// 必须在 mirrorReasoningEffort（会镜像 reasoning_summary）之前调用。
+// advertisedEffort returns the configured level only when the model itself
+// advertises it. Unknown levels are never sent to the upstream.
+func advertisedEffort(model, effort string) string {
+	if effort == "" {
+		return ""
+	}
+	for _, level := range thinkingLevelsForModel(model) {
+		if strings.EqualFold(strings.TrimSpace(level), effort) {
+			return strings.ToLower(strings.TrimSpace(level))
+		}
+	}
+	return ""
+}
+
+// pinnedReasoningEffort returns the configured forced effort when it is one of
+// the model's advertised levels; empty means "no applicable forced pin".
+func pinnedReasoningEffort(model string) string {
+	m := normalizedModelKey(model)
+	effortPolicyMu.RLock()
+	pin := pinnedEfforts[m]
+	effortPolicyMu.RUnlock()
+	return advertisedEffort(model, pin)
+}
+
+// defaultReasoningEffort returns the configured default effort when it is one
+// of the model's advertised levels; empty means "no applicable default".
+func defaultReasoningEffort(model string) string {
+	m := normalizedModelKey(model)
+	effortPolicyMu.RLock()
+	def := defaultEfforts[m]
+	effortPolicyMu.RUnlock()
+	return advertisedEffort(model, def)
+}
+
+// applyPinnedEffortInPlace applies the forced pin. It intentionally wins over
+// a valid client value; that is the difference between a pin and a default.
 func applyPinnedEffortInPlace(obj map[string]any) bool {
 	model, _ := obj["model"].(string)
 	eff := pinnedReasoningEffort(model)
 	if eff == "" {
 		return false
 	}
-	cur, _ := obj["reasoning_effort"].(string)
-	if clientEffortGiven(cur) {
+	obj["reasoning_effort"] = eff
+	return true
+}
+
+// applyDefaultEffortInPlace applies the default only when the client did not
+// give a meaningful effort. A valid client choice always wins over default.
+func applyDefaultEffortInPlace(obj map[string]any) bool {
+	current, _ := obj["reasoning_effort"].(string)
+	if clientEffortGiven(current) {
+		return false
+	}
+	model, _ := obj["model"].(string)
+	eff := defaultReasoningEffort(model)
+	if eff == "" {
 		return false
 	}
 	obj["reasoning_effort"] = eff
 	return true
 }
 
-// logTierProbe 诊断日志（档位管家实测专用）：把「客户端传的档位 / 钉的档位 /
-// 最终发往上游的档位」打成一行，走标准库 log → 引擎 journald 可见。
-func logTierProbe(model, clientEff, pin, final string) {
-	log.Printf("[tierprobe] workbuddy model=%s client=%q pin=%q final=%q",
-		model, clientEff, pin, final)
-}
-
-// clientEffortGiven 客户端这一笔算不算「带了自己的档」：low/medium/high/xhigh/max
-// 是有效档；none/off 是「明确要走无思考」的表达（上游认，尊重它）；空、缺、
-// 乱值（ultra 这类）都算没带——交给钉子兜底，也避免乱值扔给上游。
+// clientEffortGiven reports whether the client supplied a meaningful effort:
+// the named ladder or an explicit off value. Empty and unknown values fall
+// through to the tier policy/default.
 func clientEffortGiven(s string) bool {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "low", "medium", "high", "xhigh", "max", "none", "off":
 		return true
 	}
 	return false
+}
+
+// logTierProbe logs the client value, the applicable forced pin and the
+// final value actually prepared for the upstream.
+func logTierProbe(model, clientEff, pin, final string) {
+	log.Printf("[tierprobe] workbuddy model=%s client=%q pin=%q final=%q",
+		model, clientEff, pin, final)
 }

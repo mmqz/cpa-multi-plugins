@@ -378,7 +378,7 @@ func wbRegistration() registration {
 				{Name: "claim_unverified", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Opt-in (default false): when true, the Pro-claim flow may claim a CLAIMABLE campaigns row whose reward face value could not be verified (unreadable or absent) instead of only reporting it. Rows that reveal a readable reward are never claimed here."},
 				{Name: "lifecycle_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Auto disable CN when credits exhausted; re-enable CN after check-in restores credits (default true)."},
 				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily access-token refresh at 22:00 local time to prevent Keycloak offline-session expiry (default true)."},
-				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning."},
+				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning (forced pin; wins over the client), and default_reasoning (used only when the client gives no valid effort)."},
 				{Name: "scheduler_mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{schedulerModeOff, schedulerModeCredits}, Description: "Multi-account selection: off (defer to built-in, default) or credits (pick highest remaining). WARNING: when off + lifecycle_auto=false, exhausted accounts may still be routed — enable lifecycle_auto or set scheduler_mode=credits."},
 				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional override of CPAMP usage import URL (default http://cpa-manager-plus:18317/v0/management/usage/import; also env USAGE_REPORT_URL)."},
 				{Name: "usage_report_key", Type: pluginapi.ConfigFieldTypeString, Description: "Optional CPAMP admin key override. Prefer auto-detect from env CPAMP_ADMIN_KEY / USAGE_REPORT_KEY or secret file /run/secrets/cpamp_admin_key."},
@@ -773,16 +773,15 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "payload parse: "+err.Error())
 		return nil, fmt.Errorf("payload parse: %w", err)
 	}
-	// 【本地补丁·档位管家·让路版】客户端带了自己的档（有效值）→ 听它的；没带、或带的是上游不认的值 → 用管家钉的档兜底（2026-10-15 用户定）。
+	// 【本地补丁·档位管家】强制钉覆盖客户端；客户端有效档位压过默认档；
+	// 都没有时交给 Qoder 官方目录归一化。
 	clientEff := qwReq.ReasoningEffort
 	pin := pinnedReasoningEffort(stripProviderPrefix(req.Model))
-	if pin != "" && !effortIsExplicit(clientEff) {
-		qwReq.ReasoningEffort = pin
-	}
-	// 诊断日志（tierprobe）：client=客户端原值 pin=钉子 final=按官方目录归一化后真正发往上游的值
+	def := defaultReasoningEffort(stripProviderPrefix(req.Model))
+	qwReq.ReasoningEffort = resolveTierEffort(clientEff, pin, def)
 	qwReq.Region = authRegion(sa)
 	finalEff, _ := normalizeReasoningEffortFor(upstreamModel, qwReq.Region, qwReq.ReasoningEffort)
-	logTierProbe(req.Model, clientEff, pin, finalEff)
+	logTierProbe(req.Model, clientEff, pin, def, finalEff)
 	body, err := buildQoderBody(qwReq, upstreamModel, uiUserType(nil))
 	if err != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "body build: "+err.Error())
@@ -870,16 +869,15 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "payload parse: "+err.Error())
 		return nil, fmt.Errorf("payload parse: %w", err)
 	}
-	// 【本地补丁·档位管家·让路版】客户端带了自己的档（有效值）→ 听它的；没带、或带的是上游不认的值 → 用管家钉的档兜底（2026-10-15 用户定）。
+	// 【本地补丁·档位管家】强制钉覆盖客户端；客户端有效档位压过默认档；
+	// 都没有时交给 Qoder 官方目录归一化。
 	clientEff := qwReq.ReasoningEffort
 	pin := pinnedReasoningEffort(stripProviderPrefix(req.Model))
-	if pin != "" && !effortIsExplicit(clientEff) {
-		qwReq.ReasoningEffort = pin
-	}
-	// 诊断日志（tierprobe）：client=客户端原值 pin=钉子 final=按官方目录归一化后真正发往上游的值
+	def := defaultReasoningEffort(stripProviderPrefix(req.Model))
+	qwReq.ReasoningEffort = resolveTierEffort(clientEff, pin, def)
 	qwReq.Region = authRegion(sa)
 	finalEff, _ := normalizeReasoningEffortFor(upstreamModel, qwReq.Region, qwReq.ReasoningEffort)
-	logTierProbe(req.Model, clientEff, pin, finalEff)
+	logTierProbe(req.Model, clientEff, pin, def, finalEff)
 	body, err := buildQoderBody(qwReq, upstreamModel, uiUserType(nil))
 	if err != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "body build: "+err.Error())

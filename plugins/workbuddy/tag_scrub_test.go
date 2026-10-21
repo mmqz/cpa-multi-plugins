@@ -104,13 +104,29 @@ func TestThoughtTagScrubber_HTMLDetailsSummary(t *testing.T) {
 	}
 }
 
+// 2026-10-22 行为变更：未闭合的已确认思考标签块在流截断时整段丢弃（不带裸
+// 标签漏给客户端），不再 fail-open 原样放行——放行正是 DeepSeek 漏标签的实
+// 测漏法之一。名字未确认的前缀（"<th"、"<"）仍走 fail-open 放行。
 func TestThoughtTagScrubber_UnclosedBlockFailOpen(t *testing.T) {
 	s := newThoughtTagScrubber()
 	if out := s.feed("<thought>truncated " + scrubSSEHidden); out != "" {
 		t.Fatalf("unclosed block should hold, released %q", out)
 	}
-	if tail := s.flush(); tail != "<thought>truncated "+scrubSSEHidden {
-		t.Fatalf("flush must release the raw tail verbatim: %q", tail)
+	if tail := s.flush(); tail != "" {
+		t.Fatalf("confirmed tag block truncated mid-stream must be dropped, got %q", tail)
+	}
+	// 未确认的前缀（标签名的纯前缀截断，如 "<tho"）保持 fail-open 原样放行；
+	// 带后续字符的（"<th partial"）在第一次 feed 就判定为真实内容直接放行。
+	s2 := newThoughtTagScrubber()
+	if out := s2.feed("<tho"); out != "" {
+		t.Fatalf("unconfirmed prefix should hold, released %q", out)
+	}
+	if tail := s2.flush(); tail != "<tho" {
+		t.Fatalf("unconfirmed prefix must release the raw tail verbatim: %q", tail)
+	}
+	s3 := newThoughtTagScrubber()
+	if out := s3.feed("<th partial"); out != "<th partial" {
+		t.Fatalf("diverged prefix must pass through immediately, got %q", out)
 	}
 }
 
@@ -259,7 +275,7 @@ func TestPumpStreamFrames_ScrubsTaggedStream(t *testing.T) {
 	scanner := bufio.NewScanner(strings.NewReader(input))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	rec := &streamRecorder{}
-	seen, handled := pumpStreamFrames(scanner, rec, nil, false, &sseUsageCollector{}, "m", "m", "uid", time.Now(), nil)
+	seen, handled := pumpStreamFrames(scanner, rec, nil, false, &sseUsageCollector{}, "m", "m", "uid", time.Now(), nil, "")
 	if handled || !seen {
 		t.Fatalf("unexpected loop state: handled=%v seen=%v", handled, seen)
 	}
@@ -281,7 +297,7 @@ func TestPumpStreamFrames_FailOpenTail(t *testing.T) {
 	scanner := bufio.NewScanner(strings.NewReader(input))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	rec := &streamRecorder{}
-	pumpStreamFrames(scanner, rec, nil, false, &sseUsageCollector{}, "m", "m", "uid", time.Now(), nil)
+	pumpStreamFrames(scanner, rec, nil, false, &sseUsageCollector{}, "m", "m", "uid", time.Now(), nil, "")
 	chunks, _ := rec.snapshot()
 	joined := strings.Join(chunks, "\n")
 	// Fail-open: an unterminated block degrades to the pre-fix wire shape —
@@ -297,7 +313,7 @@ func TestAggregateSSEWithCollector_Scrubs(t *testing.T) {
 		frameWithContent("<analysis>b</analysis>\n\nreal"),
 		"data: [DONE]",
 	}, "\n") + "\n"
-	chunks, err := aggregateSSEWithCollector(strings.NewReader(input), false, &sseUsageCollector{})
+	chunks, err := aggregateSSEWithCollector(strings.NewReader(input), false, &sseUsageCollector{}, "", "", "")
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}
@@ -322,7 +338,7 @@ func TestAggregateCompletion_ScrubsOneShot(t *testing.T) {
 		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
 		"data: [DONE]",
 	}, "\n") + "\n"
-	out, err := aggregateCompletion(strings.NewReader(input), "m")
+	out, err := aggregateCompletion(strings.NewReader(input), "m", "")
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
 	}
@@ -353,7 +369,7 @@ func TestIssue30_TaughtTagRunNeverReachesClient(t *testing.T) {
 	tagged := "<thought>x</thought><analysis>y</analysis><summary>z</summary><think>w</think>"
 	for _, tag := range []string{"thought", "analysis", "summary", "think"} {
 		stream := "data: " + frameWithContent(tagged+"real answer") + "\ndata: [DONE]\n"
-		chunks, err := aggregateSSEWithCollector(strings.NewReader(stream), false, &sseUsageCollector{})
+		chunks, err := aggregateSSEWithCollector(strings.NewReader(stream), false, &sseUsageCollector{}, "", "", "")
 		if err != nil {
 			t.Fatalf("%s: collect: %v", tag, err)
 		}
@@ -367,6 +383,56 @@ func TestIssue30_TaughtTagRunNeverReachesClient(t *testing.T) {
 		}
 		if !strings.Contains(out, "real answer") {
 			t.Fatalf("answer lost for <%s>: %s", tag, out)
+		}
+	}
+}
+
+// ── 2026-10-22：变体标签与截断丢弃（DeepSeek 漏思维链的两种实测漏法）─────────
+
+func TestThoughtTagScrubber_UpperCaseVariant(t *testing.T) {
+	got := feedAll(t, []string{"<THINK>\n" + scrubSSEHidden + "\n</THINK>\nvisible"})
+	if got != "\nvisible" {
+		t.Fatalf("uppercase variant not stripped: %q", got)
+	}
+}
+
+func TestThoughtTagScrubber_SpaceBeforeCloseVariant(t *testing.T) {
+	// 跨 chunk：'<think' 与 '>' 分两段到，空白变体也要剥净。
+	got := feedAll(t, []string{"<think >", "\n" + scrubSSEHidden + "\n", "</think >\nvisible"})
+	if got != "\nvisible" {
+		t.Fatalf("space variant not stripped: %q", got)
+	}
+}
+
+func TestThoughtTagScrubber_NewlineBeforeCloseVariant(t *testing.T) {
+	got := feedAll(t, []string{"<think\n>\n" + scrubSSEHidden + "\n</think\n>\nvisible"})
+	if got != "\nvisible" {
+		t.Fatalf("newline variant not stripped: %q", got)
+	}
+}
+
+// 流在思考块中间断掉：未决的块是模型模仿的思考，整段丢弃，不带裸标签出门。
+func TestThoughtTagScrubber_TruncatedBlockDropped(t *testing.T) {
+	got := feedAll(t, []string{"<thought>\n" + scrubSSEHidden + "\npartial that never closes"})
+	if got != "" {
+		t.Fatalf("truncated thought block must be dropped, got %q", got)
+	}
+}
+
+// 流截断在变体开标签上：名字已确认命中即丢弃。
+func TestThoughtTagScrubber_TruncatedVariantOpenDropped(t *testing.T) {
+	got := feedAll(t, []string{"<THINK>" + scrubSSEHidden})
+	if got != "" {
+		t.Fatalf("truncated variant open must be dropped, got %q", got)
+	}
+}
+
+// 回归护栏：真 HTML 的头部不被当思考标签吃掉。
+func TestThoughtTagScrubber_HTMLHeadsSurviveTruncation(t *testing.T) {
+	for _, head := range []string{"<thead", "<t", "<details", "<div", "<table"} {
+		got := feedAll(t, []string{head + " partial truncated"})
+		if !strings.Contains(got, head) {
+			t.Errorf("HTML head %q must survive truncation, got %q", head, got)
 		}
 	}
 }

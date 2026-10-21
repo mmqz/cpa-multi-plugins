@@ -244,6 +244,7 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 	if statusCode >= 400 {
 		// Drain the error body via the same bridge so the message is complete.
 		errPayload, _ := io.ReadAll(newHostStreamReader(stream))
+		captureUpstream(captureKey("str-"+streamID, upstreamModel, authUID), "in", upstreamModel, authUID, fmt.Sprintf("HTTP %d | ", statusCode)+string(errPayload))
 		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(errPayload))
 		noteModelRateLimitFromPayload(authUID, upstreamModel, statusCode, string(errPayload))
 		// issue #35: >=400 failures also feed the per-(credential, model)
@@ -266,7 +267,7 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 	collector := &sseUsageCollector{}
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	seenPayload, handled := pumpStreamFrames(scanner, hostStreamSink{streamID}, gate, sseFramed, collector, requestedModel, upstreamModel, authUID, started, sa)
+	seenPayload, handled := pumpStreamFrames(scanner, hostStreamSink{streamID}, gate, sseFramed, collector, requestedModel, upstreamModel, authUID, started, sa, streamID)
 	if handled {
 		// The frame loop already reported the terminal state (a surfaced
 		// pre-answer failure or an emit abort); running the tail here would
@@ -315,7 +316,7 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 // rolled back. Returns (seenPayload, handled); handled==true means the loop
 // already recorded the terminal state (surfaced failure or emit abort) and the
 // caller must not run the empty-stream / read-error tail.
-func pumpStreamFrames(scanner *bufio.Scanner, sink streamSink, gate *streamHeadGate, sseFramed bool, collector *sseUsageCollector, requestedModel, upstreamModel, authUID string, started time.Time, sa *storedAuth) (bool, bool) {
+func pumpStreamFrames(scanner *bufio.Scanner, sink streamSink, gate *streamHeadGate, sseFramed bool, collector *sseUsageCollector, requestedModel, upstreamModel, authUID string, started time.Time, sa *storedAuth, captureKeyStr string) (bool, bool) {
 	seenPayload := false
 	gating := gate != nil
 	var pending [][]byte
@@ -328,6 +329,8 @@ func pumpStreamFrames(scanner *bufio.Scanner, sink streamSink, gate *streamHeadG
 	toolSeen := map[int]bool{}
 	for scanner.Scan() {
 		line := scanner.Text()
+		// TEMP capture (01 investigation): raw upstream SSE line, before cleaning.
+		captureUpstream(captureKey("str-"+captureKeyStr, upstreamModel, authUID), "in", upstreamModel, authUID, line)
 		content, meaningful, frameErr := workBuddyStreamFrame(line)
 		if frameErr != nil {
 			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, frameErr.Error())
@@ -405,6 +408,7 @@ func pumpStreamFrames(scanner *bufio.Scanner, sink streamSink, gate *streamHeadG
 	// Issue #30 fail-open: whatever the scrubbers still hold (an unterminated
 	// leading block, a whitespace tail) goes out verbatim so a degenerate
 	// stream degrades to the pre-fix wire shape instead of swallowing bytes.
+	reportThinkLeak(scrubbers, upstreamModel, authUID, "pump")
 	for _, chunk := range scrubTailChunks(scrubbers, sseFramed) {
 		if err := sink.emit(chunk); err != nil {
 			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
@@ -424,6 +428,13 @@ func collectUpstreamStream(body []byte, sa *storedAuth, sseFramed bool, collecto
 		return nil, 0, err
 	}
 	backendHeaders(httpReq, sa)
+	// TEMP capture (01 investigation): gate-1 entries for the sync collect path.
+	uidForCapture := ""
+	if sa != nil {
+		uidForCapture = sa.Account.UID
+	}
+	capKey := captureKey(nanosKey("col"), upstreamModel, uidForCapture)
+	captureUpstream(capKey, "out", upstreamModel, uidForCapture, string(body))
 	// Compliance: route via host.http.do_stream so request-log captures the call.
 	stream, statusCode, respHdr, err := hostHTTPDoStream(httpReq)
 	if err != nil {
@@ -433,6 +444,7 @@ func collectUpstreamStream(body []byte, sa *storedAuth, sseFramed bool, collecto
 	reader := newHostStreamReader(stream)
 	if statusCode >= 400 {
 		errPayload, _ := io.ReadAll(reader)
+		captureUpstream(capKey, "in", upstreamModel, uidForCapture, fmt.Sprintf("HTTP %d | ", statusCode)+string(errPayload))
 		if sa != nil {
 			noteModelRateLimitFromPayload(sa.Account.UID, upstreamModel, statusCode, string(errPayload))
 		}
@@ -444,7 +456,7 @@ func collectUpstreamStream(body []byte, sa *storedAuth, sseFramed bool, collecto
 		return nil, statusCode, upstreamStatusError(statusCode, string(errPayload),
 			translateChatUpstreamErrorFull(statusCode, string(errPayload), sa, respHdr))
 	}
-	chunks, errAgg := aggregateSSEWithCollector(reader, sseFramed, collector)
+	chunks, errAgg := aggregateSSEWithCollector(reader, sseFramed, collector, capKey, upstreamModel, uidForCapture)
 	if errAgg != nil {
 		return chunks, statusCode, errAgg
 	}
@@ -476,7 +488,7 @@ func clientNeedsSSEFrame(metadata map[string]any) bool {
 // aborts collection and is returned so the caller records the attempt as
 // failed. The collector, when non-nil, observes raw upstream chunks for usage
 // extraction.
-func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageCollector) ([]pluginapi.ExecutorStreamChunk, error) {
+func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageCollector, captureKeyStr, upstreamModel, authUID string) ([]pluginapi.ExecutorStreamChunk, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var chunks []pluginapi.ExecutorStreamChunk
@@ -486,6 +498,8 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 	// Issue #36: per-choice tool-call accumulator (see finish_reason.go).
 	toolSeen := map[int]bool{}
 	for scanner.Scan() {
+		// TEMP capture (01 investigation): raw upstream SSE line, before cleaning.
+		captureUpstream(captureKeyStr, "in", upstreamModel, authUID, scanner.Text())
 		content, meaningful, frameErr := workBuddyStreamFrame(scanner.Text())
 		if frameErr != nil {
 			return chunks, frameErr
@@ -516,6 +530,7 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 		return chunks, emptyStreamError()
 	}
 	// Issue #30 fail-open: release scrubber tails verbatim (see pumpStreamFrames).
+	reportThinkLeak(scrubbers, upstreamModel, authUID, "agg")
 	for _, chunk := range scrubTailChunks(scrubbers, sseFramed) {
 		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: chunk})
 	}
@@ -591,7 +606,7 @@ func cleanChunkJSON(s string) string {
 	return string(out)
 }
 
-func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
+func aggregateCompletion(r io.Reader, model string, captureKeyStr string) ([]byte, error) {
 	var content, reasoning, role, respModel, respID, finish string
 	var created int64
 	var usage map[string]any
@@ -612,6 +627,8 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 		// "event:error" / 200-OK {"error":...} bodies) and fold an empty
 		// stream into a synthetic empty-content completion: a silent fake
 		// success. Same guard the two streaming paths have had since v0.9.29.
+		// TEMP capture (01 investigation): raw upstream SSE line, before parsing.
+		captureUpstream(captureKeyStr, "in", model, "", scanner.Text())
 		data, meaningful, frameErr := workBuddyStreamFrame(scanner.Text())
 		if frameErr != nil {
 			return nil, frameErr

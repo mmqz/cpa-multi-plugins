@@ -58,14 +58,14 @@ func TestWorkBuddyStreamFrame_PayloadAndControl(t *testing.T) {
 
 func TestAggregateSSE_EmptyStreamRejected(t *testing.T) {
 	body := ": keep-alive\n\n" + "data: [DONE]\n"
-	if _, err := aggregateSSEWithCollector(strings.NewReader(body), false, nil); err == nil {
+	if _, err := aggregateSSEWithCollector(strings.NewReader(body), false, nil, "", "", ""); err == nil {
 		t.Fatalf("keep-alive + [DONE] with zero payload chunks must fail, got nil error")
 	} else if !strings.Contains(err.Error(), "empty_stream") {
 		t.Fatalf("empty-stream error should name the condition, got %v", err)
 	}
 
 	ok := `data: {"choices":[{"delta":{"content":"x"}}]}` + "\n" + "data: [DONE]\n"
-	chunks, err := aggregateSSEWithCollector(strings.NewReader(ok), false, nil)
+	chunks, err := aggregateSSEWithCollector(strings.NewReader(ok), false, nil, "", "", "")
 	if err != nil {
 		t.Fatalf("stream with a payload chunk must pass: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestAggregateSSE_EmptyStreamRejected(t *testing.T) {
 
 	// An error frame mid-stream aborts collection.
 	bad := `data: {"choices":[{"delta":{"content":"x"}}]}` + "\n" + `event:error` + "\n"
-	if _, err := aggregateSSEWithCollector(strings.NewReader(bad), false, nil); err == nil {
+	if _, err := aggregateSSEWithCollector(strings.NewReader(bad), false, nil, "", "", ""); err == nil {
 		t.Fatalf("error frame must abort aggregation")
 	}
 }
@@ -83,6 +83,9 @@ func TestAggregateSSE_EmptyStreamRejected(t *testing.T) {
 // --- forceMaxThinking: the Hy3 "low" catalog level is preserved (v0.9.29) ---
 
 func TestForceMaxThinking_Hy3LowPreserved(t *testing.T) {
+	restore := withThinkingLevels(t, map[string][]string{"hy3-x": {"low", "high"}, "hy3": {"low", "medium", "high"}, "hy4-preview": {"high"}})
+	defer restore()
+
 	low := map[string]any{"model": "hy3-x", "reasoning_effort": "low"}
 	if forceMaxThinking(low) {
 		t.Fatalf("explicit hy3 low must be preserved, body now %v", low)
@@ -91,15 +94,17 @@ func TestForceMaxThinking_Hy3LowPreserved(t *testing.T) {
 		t.Fatalf("hy3 low was rewritten to %v", low["reasoning_effort"])
 	}
 
-	// Non-low values keep the historical high pin.
+	// With the new tier policy, an explicit client choice is not overridden by
+	// the automatic high pin; only an absent client effort falls back.
 	medium := map[string]any{"model": "hy3", "reasoning_effort": "medium"}
-	if !forceMaxThinking(medium) || medium["reasoning_effort"] != "high" {
-		t.Fatalf("hy3 medium should pin to high, got %v", medium["reasoning_effort"])
+	if forceMaxThinking(medium) || medium["reasoning_effort"] != "medium" {
+		t.Fatalf("hy3 client medium must be preserved, got %v", medium["reasoning_effort"])
 	}
-	// hy4 family: even low still pins to high (only hy3/hy3-x advertise low).
+	// hy4 only advertises high, so an explicit low is not supported; the
+	// automatic fallback still corrects it to the advertised level.
 	hy4 := map[string]any{"model": "hy4-preview", "reasoning_effort": "low"}
 	if !forceMaxThinking(hy4) || hy4["reasoning_effort"] != "high" {
-		t.Fatalf("hy4 low should still pin to high, got %v", hy4["reasoning_effort"])
+		t.Fatalf("hy4 unsupported low should pin to high, got %v", hy4["reasoning_effort"])
 	}
 }
 

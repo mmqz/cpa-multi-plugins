@@ -89,7 +89,7 @@ func driveStreamHead(t *testing.T, reader io.Reader, gate *streamHeadGate) (erro
 	rec := &streamRecorder{}
 	done := make(chan bool, 1)
 	go func() {
-		_, handled := pumpStreamFrames(scanner, rec, gate, false, &sseUsageCollector{}, "gpt", "gpt", "uid-1", time.Now(), nil)
+		_, handled := pumpStreamFrames(scanner, rec, gate, false, &sseUsageCollector{}, "gpt", "gpt", "uid-1", time.Now(), nil, "")
 		done <- handled
 	}()
 	headErr := awaitStreamHead(gate)
@@ -276,7 +276,7 @@ func TestStreamHeadSilentTimeoutReleasesHandoff(t *testing.T) {
 	rec := &streamRecorder{}
 	done := make(chan struct{})
 	go func() {
-		pumpStreamFrames(scanner, rec, gate, false, &sseUsageCollector{}, "gpt", "gpt", "uid-1", time.Now(), nil)
+		pumpStreamFrames(scanner, rec, gate, false, &sseUsageCollector{}, "gpt", "gpt", "uid-1", time.Now(), nil, "")
 		close(done)
 	}()
 
@@ -315,7 +315,7 @@ func TestStreamHeadDisabledKeepsOldBehavior(t *testing.T) {
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	rec := &streamRecorder{}
 
-	_, handled := pumpStreamFrames(scanner, rec, nil, false, &sseUsageCollector{}, "gpt", "gpt", "uid-1", time.Now(), nil)
+	_, handled := pumpStreamFrames(scanner, rec, nil, false, &sseUsageCollector{}, "gpt", "gpt", "uid-1", time.Now(), nil, "")
 
 	chunks, errs := rec.snapshot()
 	if len(chunks) != 1 || !strings.Contains(chunks[0], "assistant") {

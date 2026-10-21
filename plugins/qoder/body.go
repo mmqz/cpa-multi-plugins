@@ -366,7 +366,7 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 		// turns upstream is willing to keep.
 		if m.Role == "assistant" && strings.TrimSpace(m.Content) == "" &&
 			assistantCarriesToolCalls(m) && isEmptyAssistantBody(m) {
-			m.Content, m.rawContent, m.contentSet = "Calling tools.", "", true
+			m.Content, m.rawContent, m.contentSet = "\u200b", "", true
 		}
 		// OpenAI's "developer" role (o1+/gpt-5 era successor of "system") is
 		// rejected by the gateway — "developer is not one of ['system',

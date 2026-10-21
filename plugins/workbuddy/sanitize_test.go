@@ -31,6 +31,9 @@ func TestSanitizeBlockedTemplates_NoMatch(t *testing.T) {
 }
 
 func TestForceMaxThinking_Hy3Model(t *testing.T) {
+	restore := withThinkingLevels(t, map[string][]string{"hy3-std": {"low", "high"}})
+	defer restore()
+
 	obj := map[string]any{"model": "hy3-std"}
 	changed := forceMaxThinking(obj)
 	if !changed {
@@ -42,6 +45,9 @@ func TestForceMaxThinking_Hy3Model(t *testing.T) {
 }
 
 func TestForceMaxThinking_Hy4Model(t *testing.T) {
+	restore := withThinkingLevels(t, map[string][]string{"hy4-preview": {"high"}})
+	defer restore()
+
 	obj := map[string]any{"model": "hy4-preview"}
 	changed := forceMaxThinking(obj)
 	if !changed {
@@ -53,7 +59,10 @@ func TestForceMaxThinking_Hy4Model(t *testing.T) {
 }
 
 func TestForceMaxThinking_Hy4ModelCaseInsensitive(t *testing.T) {
-	obj := map[string]any{"model": "Hy4 Preview"}
+	restore := withThinkingLevels(t, map[string][]string{"hy4-preview": {"high"}})
+	defer restore()
+
+	obj := map[string]any{"model": "Hy4-Preview"}
 	if !forceMaxThinking(obj) {
 		t.Fatal("should match Hy4 case-insensitively (pre-rewrite alias form)")
 	}
@@ -62,21 +71,22 @@ func TestForceMaxThinking_Hy4ModelCaseInsensitive(t *testing.T) {
 	}
 }
 
-// 2026-10-18 按老师 WorkBuddy2API 源码对齐（core/responses_adapter.py:79-84）：
-// 非 hy3/hy4 模型一律钉 max——上游对 GLM/DeepSeek 只认 high 与 max，low/medium/
-// 不传档时上游不思考，账本里就是 0（GLM 历史 high 3 笔全 0 的根因）。
+// 最高档必须来自模型真实支持的档位，而不是写死 max。
 func TestForceMaxThinking_NonHy3Model(t *testing.T) {
+	restore := withThinkingLevels(t, map[string][]string{"glm-5.2": {"high", "xhigh"}, "glm-5.3-flash": {"low", "high", "max"}})
+	defer restore()
+
 	obj := map[string]any{"model": "glm-5.2"}
 	if !forceMaxThinking(obj) {
-		t.Fatal("non-hy model must be pinned to max")
+		t.Fatal("non-hy model should be adjusted to its highest supported level")
 	}
-	if obj["reasoning_effort"] != "max" {
-		t.Fatalf("non-hy model effort = %v, want max", obj["reasoning_effort"])
+	if obj["reasoning_effort"] != "xhigh" {
+		t.Fatalf("glm-5.2 effort = %v, want xhigh", obj["reasoning_effort"])
 	}
-	// 客户端自己的档位也被覆盖（老师：不依赖客户端传参）。
+	// 客户端自己的有效档位现在压过自动最高档兜底。
 	low := map[string]any{"model": "glm-5.3-flash", "reasoning_effort": "low"}
-	if !forceMaxThinking(low) || low["reasoning_effort"] != "max" {
-		t.Fatalf("client low must be overridden to max, got %v", low["reasoning_effort"])
+	if forceMaxThinking(low) || low["reasoning_effort"] != "low" {
+		t.Fatalf("client low must be preserved, got %v", low["reasoning_effort"])
 	}
 	// 已经是 max 的不再改动。
 	maxed := map[string]any{"model": "glm-5.3-flash", "reasoning_effort": "max"}
@@ -86,6 +96,9 @@ func TestForceMaxThinking_NonHy3Model(t *testing.T) {
 }
 
 func TestForceMaxThinking_AlreadyHigh(t *testing.T) {
+	restore := withThinkingLevels(t, map[string][]string{"hy3-std": {"low", "high"}})
+	defer restore()
+
 	obj := map[string]any{"model": "hy3-std", "reasoning_effort": "high"}
 	changed := forceMaxThinking(obj)
 	if changed {

@@ -57,10 +57,12 @@ func prepareUpstreamBody(payload, original []byte, sa *storedAuth, upstreamModel
 	// 开关关闭时本函数直接返回，请求体一个字节都不变。
 	projectContextInPlace(obj)
 
-	// 【本地补丁·档位管家·让路版】钉了档的模型：客户端没带档时在这里落钉兜底；
-	// 客户端带了自己的档则让路；后面的 mirror 与 forceMaxThinking 照旧（2026-10-15 用户定）。
+	// 【本地补丁·档位管家】强制钉优先；客户端有效档位压过默认档；
+	// 两者都没有时由 forceMaxThinking 用真实最高档兜底。
 	clientEff, _ := obj["reasoning_effort"].(string)
-	applyPinnedEffortInPlace(obj)
+	if !applyPinnedEffortInPlace(obj) {
+		applyDefaultEffortInPlace(obj)
+	}
 
 	// 3. rewriteSystem: strip blocked Claude Code template phrases + force thinking.
 	rewriteSystemInPlace(obj)
@@ -783,40 +785,52 @@ func sanitizeBlockedTemplates(s string) string {
 	return s
 }
 
-// forceMaxThinking 把推理档位钉到该模型的上限（2026-10-18 按老师
-// WorkBuddy2API 的 core/responses_adapter.py:79-84 对齐）：
+// forceMaxThinking selects the highest reasoning level that the model actually
+// advertises. The catalog is authoritative: never send a level the model did
+// not return. This matters for models such as step-5-preview (low/medium/high)
+// and glm-5.2 (high/xhigh), which must not receive max.
 //
-//   - hy3 / hy4 家族：目录上限是 high（hy3 显式 low 仍保留，v0.9.29 实测），
-//     其余值钉 high；
-//   - 其它模型（GLM / DeepSeek 等）：上游只认 high 与 max，一律钉 max，不看
-//     客户端传了什么。老师原注释："上游实测 DeepSeek/GLM 只认 high 与 max"，
-//     GLM 在 low/medium/不传档时上游不思考，账本里就是 0——这就是「推理列
-//     时有时无」的主因，不是统计问题。
-//
-// 匹配大小写不敏感，因为它跑在 rewriteModelInPlace 换上游 ID 之前。
-// 返回是否改过。
+// If no Thinking.Levels are known, the request is left untouched rather
+// than guessed. Explicit client choices are preserved here; the tier policy
+// has already handled pin/default precedence before this fallback runs.
 func forceMaxThinking(obj map[string]any) bool {
 	model, _ := obj["model"].(string)
-	lm := strings.ToLower(model)
-	if strings.HasPrefix(lm, "hy3") || strings.HasPrefix(lm, "hy4") {
-		// v0.9.29 (fork libo0118/qoder-custom review): the current Hy3 catalog
-		// explicitly advertises a "low" effort level, so an explicit low is kept
-		// instead of being forced up — the historical high-pin only remains as
-		// the fallback for values the model can't honor.
-		if eff, _ := obj["reasoning_effort"].(string); eff == "low" && (lm == "hy3" || lm == "hy3-x") {
-			return false
-		}
-		if eff, _ := obj["reasoning_effort"].(string); eff == "high" {
-			return false
-		}
-		obj["reasoning_effort"] = "high"
-		return true
-	}
-	// 非 hy 家族：一律 max（老师同款，覆盖客户端与钉子的值）。
-	if eff, _ := obj["reasoning_effort"].(string); eff == "max" {
+
+	// A configured forced pin always wins. A configured default is also
+	// authoritative over this automatic fallback, even when the client sent an
+	// invalid value. A valid client value beats the automatic max fallback.
+	if pinnedReasoningEffort(model) != "" || defaultReasoningEffort(model) != "" {
 		return false
 	}
-	obj["reasoning_effort"] = "max"
+	current, _ := obj["reasoning_effort"].(string)
+	if clientEffortGiven(current) {
+		m := normalizedModelKey(model)
+		if m == "hy3-x" && current == "low" {
+			return false
+		}
+		for _, level := range thinkingLevelsForModel(model) {
+			if strings.EqualFold(strings.TrimSpace(level), current) {
+				return false
+			}
+		}
+	}
+
+	levels := thinkingLevelsForModel(model)
+	if len(levels) == 0 {
+		return false
+	}
+
+	lm := normalizedModelKey(model)
+	current = strings.ToLower(strings.TrimSpace(current))
+	if current == "low" && (lm == "hy3" || lm == "hy3-x") {
+		return false
+	}
+
+	best := highestEffortLevel(levels)
+	if best == "" || current == best {
+		return false
+	}
+	obj["reasoning_effort"] = best
 	return true
 }
 

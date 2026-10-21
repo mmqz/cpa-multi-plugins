@@ -93,3 +93,67 @@ func TestBuildQoderBodyPreservesOtherAssistantContent(t *testing.T) {
 		}
 	}
 }
+
+// 占位词也是模型模仿源：历史里反复写 "Calling tools."，Q 模型就会学它继续说。
+// 空工具调用只需要一个中性非空正文，不能再注入这句 UI 前缀。
+func TestBuildQoderBodyUsesNeutralToolCallPlaceholder(t *testing.T) {
+	call := mustMsg(`{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"calc","arguments":"{}"}}]}`)
+	req := &openAIRequest{Messages: []openAIMessage{
+		mustMsg(`{"role":"system","content":"Answer briefly."}`),
+		mustMsg(`{"role":"user","content":"Compute 1+1."}`),
+		call,
+		mustMsg(`{"role":"tool","tool_call_id":"call_1","content":"2"}`),
+	}}
+	body, err := buildQoderBody(req, "dfmodel", "personal_professional_trial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Messages []map[string]json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Messages) < 3 {
+		t.Fatalf("messages = %d, want assistant+tool tail", len(out.Messages))
+	}
+	assistant := out.Messages[len(out.Messages)-2]
+	var text string
+	if err := json.Unmarshal(assistant["content"], &text); err != nil || strings.TrimSpace(text) == "" {
+		t.Fatalf("占位正文必须非空：text=%q err=%v", text, err)
+	}
+	if strings.EqualFold(strings.TrimSpace(text), "Calling tools") ||
+		strings.EqualFold(strings.TrimSpace(text), "Calling tools.") {
+		t.Fatalf("不能再注入 Calling tools. 占位词：%q", text)
+	}
+}
+
+// 历史占位不能是模型会模仿的可见字符：`.` 已经被模型回显成草稿小点。
+// 这里固定用零宽占位符，保证上游拿到非空 assistant 正文，但用户看不到。
+func TestBuildQoderBodyUsesInvisibleToolCallPlaceholder(t *testing.T) {
+	call := mustMsg(`{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"calc","arguments":"{}"}}]}`)
+	req := &openAIRequest{Messages: []openAIMessage{
+		mustMsg(`{"role":"system","content":"Answer briefly."}`),
+		mustMsg(`{"role":"user","content":"Compute 1+1."}`),
+		call,
+		mustMsg(`{"role":"tool","tool_call_id":"call_1","content":"2"}`),
+	}}
+	body, err := buildQoderBody(req, "dfmodel", "personal_professional_trial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Messages []map[string]json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatal(err)
+	}
+	assistant := out.Messages[len(out.Messages)-2]
+	var text string
+	if err := json.Unmarshal(assistant["content"], &text); err != nil {
+		t.Fatalf("占位正文必须是字符串：%v", err)
+	}
+	if text != "\u200b" {
+		t.Fatalf("占位正文必须是零宽占位符，实际=%q", text)
+	}
+}

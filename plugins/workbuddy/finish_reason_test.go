@@ -44,7 +44,7 @@ func TestAggregateCompletionRewritesStopWithToolCalls(t *testing.T) {
 	sse := "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n" +
 		"data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
 		"data: [DONE]\n\n"
-	out, err := aggregateCompletion(strings.NewReader(sse), "m")
+	out, err := aggregateCompletion(strings.NewReader(sse), "m", "")
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestAggregateCompletionKeepsLengthWithToolCalls(t *testing.T) {
 	sse := "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_ok\",\"function\":{\"name\":\"ping\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n" +
 		"data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_cut\",\"function\":{\"name\":\"write\",\"arguments\":\"{\\\"a\\\":\\\"half-writ\"}}]},\"finish_reason\":\"length\"}]}\n\n" +
 		"data: [DONE]\n\n"
-	out, err := aggregateCompletion(strings.NewReader(sse), "m")
+	out, err := aggregateCompletion(strings.NewReader(sse), "m", "")
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestAggregateCompletionKeepsLengthWithToolCalls(t *testing.T) {
 // speaking the correct dialect round-trips byte-identically (no rewrite).
 func TestAggregateCompletionProperToolCallsUnchanged(t *testing.T) {
 	sse := "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_x\",\"function\":{\"name\":\"ping\",\"arguments\":\"\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"
-	out, err := aggregateCompletion(strings.NewReader(sse), "m")
+	out, err := aggregateCompletion(strings.NewReader(sse), "m", "")
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
 	}
@@ -113,7 +113,7 @@ func runPump(t *testing.T, sse string) (string, bool, bool) {
 	sink := &fakeSink{}
 	scanner := bufio.NewScanner(strings.NewReader(sse))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	seen, handled := pumpStreamFrames(scanner, sink, nil, false, &sseUsageCollector{}, "req-m", "up-m", "uid", time.Now(), nil)
+	seen, handled := pumpStreamFrames(scanner, sink, nil, false, &sseUsageCollector{}, "req-m", "up-m", "uid", time.Now(), nil, "")
 	var b strings.Builder
 	for _, c := range sink.chunks {
 		b.Write(c)
@@ -181,7 +181,7 @@ func TestPumpPerChoiceIsolation(t *testing.T) {
 
 func TestAggregateSSERewritesStopWithToolCalls(t *testing.T) {
 	// The synchronous collector path shares the correction.
-	chunks, err := aggregateSSEWithCollector(strings.NewReader(issue36SSE), false, &sseUsageCollector{})
+	chunks, err := aggregateSSEWithCollector(strings.NewReader(issue36SSE), false, &sseUsageCollector{}, "", "", "")
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
 	}

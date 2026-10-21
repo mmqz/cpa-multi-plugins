@@ -61,15 +61,58 @@ type thoughtTagScrubber struct {
 	buf      string // held-back bytes not yet released (only while undecided)
 	decided  bool   // true once real content started (or fail-open tripped) — pass-through forever
 	scrubbed bool   // at least one block was removed (observability / tests)
+	leakTag  string // 2026-10-22 probe: bare thinking-tag variant that escaped the scrubber ("" = clean)
 }
 
 func newThoughtTagScrubber() *thoughtTagScrubber { return &thoughtTagScrubber{} }
 
+// leakTagNames are the tags the escape probe watches: thought/think only —
+// neither exists as a legitimate HTML element, so the probe has (near) zero
+// false-positive surface. analysis/summary stay in the stripping list but are
+// not probed because <summary> is a real HTML tag.
+var leakTagNames = []string{"thought", "think"}
+
+// noteLeak records the first escaped bare opening-tag variant seen in frag
+// (case-insensitive, whitespace between name and '>' tolerated). Idempotent:
+// once a leak is seen it is never overwritten. Zero cost when clean.
+func (s *thoughtTagScrubber) noteLeak(frag string) {
+	if s.leakTag != "" {
+		return
+	}
+	low := strings.ToLower(frag)
+	for _, name := range leakTagNames {
+		needle := "<" + name
+		idx := 0
+		for {
+			i := strings.Index(low[idx:], needle)
+			if i < 0 {
+				break
+			}
+			at := idx + i
+			j := at + len(needle)
+			for j < len(low) && isScrubSpace(low[j]) {
+				j++ // "<think >" / "<think\n>" tolerate whitespace
+			}
+			if j >= len(low) {
+				break
+			}
+			if low[j] == '>' || low[j] == '/' {
+				s.leakTag = name
+				return
+			}
+			// "</think>"-style closer or "<thinkX" junk: keep scanning
+			idx = j
+		}
+	}
+}
+
 // feed consumes one content fragment and returns the text safe to emit now.
 // While undecided it may return "" (everything held back); once decided it is
-// a pure pass-through with zero allocation.
+// a pure pass-through with zero allocation. 2026-10-22 probe: decided
+// pass-through fragments are watched for escaped bare thinking tags.
 func (s *thoughtTagScrubber) feed(fragment string) string {
 	if s.decided {
+		s.noteLeak(fragment)
 		return fragment
 	}
 	s.buf += fragment
@@ -77,28 +120,48 @@ func (s *thoughtTagScrubber) feed(fragment string) string {
 	if done {
 		s.decided = true
 		s.buf = ""
+		s.noteLeak(out)
 		return out
 	}
 	if len(s.buf) > tagScrubHoldLimit {
 		out := s.buf
 		s.buf = ""
 		s.decided = true
+		s.noteLeak(out)
 		return out
 	}
 	return out
 }
 
-// flush ends the stream: any bytes still held are released verbatim. This is
-// the fail-open path for an unterminated leading block (stream cut mid-
-// thought, finish_reason=length) — the client sees the raw tail exactly as
-// it would have pre-fix, instead of losing it.
+// flush ends the stream: any bytes still held are released verbatim — EXCEPT
+// an undecided run that has already confirmed one of the taught tag names:
+// that is the model's imitation thought block cut off mid-stream (truncation,
+// dropped connection), and releasing it would leak a bare unclosed tag to the
+// client. 2026-10-22: drop it instead. A mere '<' or a short prefix ("<th")
+// still passes through — real HTML heads ("<thead>") must not be eaten.
 func (s *thoughtTagScrubber) flush() string {
 	if s.decided {
 		return ""
 	}
+	t := strings.TrimLeft(s.buf, " \t\r\n\v\f")
+	if len(t) >= 2 && t[0] == '<' {
+		body := t[1:]
+		for _, name := range scrubTagNames {
+			if len(body) >= len(name) && equalsFoldASCII(body[:len(name)], name) {
+				s.buf = ""
+				s.decided = true
+				s.scrubbed = true
+				return ""
+			}
+		}
+		// 2026-10-22 fail-open on a '<'-led prefix: the released tail may
+		// carry a bare tag variant ("<think >…") — probe it before letting go.
+		s.noteLeak(s.buf)
+	}
 	out := s.buf
 	s.buf = ""
 	s.decided = true
+	s.noteLeak(out)
 	return out
 }
 
@@ -132,15 +195,63 @@ func (s *thoughtTagScrubber) consume() (string, bool) {
 			return b, true // '<' that opens none of our tags: real content
 		}
 		rest := b[j+hdrLen:]
-		end := strings.Index(rest, "</"+name+">")
+		end := indexCloseTag(rest, name)
 		if end < 0 {
 			s.buf = b // inside an open block; keep buffering (cap guarded)
 			return "", false
 		}
-		b = rest[end+len(name)+3:]
+		b = rest[end:]
 		s.scrubbed = true
 		// Loop: consecutive blocks (whitespace-separated) are also stripped.
 	}
+}
+
+// indexCloseTag finds the end (just past '>') of the closing tag for name in
+// s, case-insensitively and tolerating whitespace before '>' — the model does
+// not always copy the taught tags verbatim ("<THINK>x</THINK>",
+// "<think >x</think >"). Returns -1 while the closer has not arrived yet.
+func indexCloseTag(s, name string) int {
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] != '<' || s[i+1] != '/' {
+			continue
+		}
+		rest := s[i+2:]
+		if len(rest) < len(name) {
+			return -1
+		}
+		if !equalsFoldASCII(rest[:len(name)], name) {
+			continue
+		}
+		j := len(name)
+		for j < len(rest) && isScrubSpace(rest[j]) {
+			j++
+		}
+		if j < len(rest) && rest[j] == '>' {
+			return i + 2 + j + 1
+		}
+		// "</thought" without '>' yet — keep scanning; the real closer for
+		// this block cannot appear inside itself.
+	}
+	return -1
+}
+
+func equalsFoldASCII(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		ca, cb := a[i], b[i]
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
 }
 
 func isScrubSpace(c byte) bool {
@@ -148,29 +259,40 @@ func isScrubSpace(c byte) bool {
 }
 
 // matchScrubTagOpen decides whether s (guaranteed to start with '<') opens
-// one of scrubTagNames.
-//   - name set, hdrLen = len("<name>"): exact open tag matched
+// one of scrubTagNames. 2026-10-22: case-insensitive, and whitespace between
+// the tag name and '>' is tolerated ("<THINK>", "<think >", "<think\n>") —
+// the model does not always copy the taught tags verbatim.
+//   - name set, hdrLen = offset just past '>': open tag matched
 //   - name "", ambiguous=false: diverged — real content
-//   - ambiguous=true: more bytes needed ("<thou", "<thought" without '>', …)
+//   - ambiguous=true: more bytes needed ("<thou", "<think" without '>', …)
 func matchScrubTagOpen(s string) (name string, hdrLen int, ambiguous bool) {
 	if len(s) < 2 {
 		return "", 0, true // "<" alone — need one more byte to diverge
 	}
 	body := s[1:]
 	for _, t := range scrubTagNames {
-		if strings.HasPrefix(body, t) {
-			if len(body) > len(t) {
-				if body[len(t)] == '>' {
-					return t, len(t) + 2, false // exact match
-				}
-				continue // "<thoughtX…" can never be "<thought>" — not it
+		n := len(t)
+		if len(body) < n {
+			// Proper-prefix case: "<tho" — still ambiguous (case-insensitive).
+			if equalsFoldASCII(body, t[:len(body)]) {
+				return "", 0, true
 			}
-			return "", 0, true // "<thought" with the '>' byte pending
+			continue
 		}
-		// Proper-prefix case: "<tho" is a prefix of "thought" — still ambiguous.
-		if len(body) < len(t) && strings.HasPrefix(t, body) {
-			return "", 0, true
+		if !equalsFoldASCII(body[:n], t) {
+			continue
 		}
+		j := n
+		for j < len(body) && isScrubSpace(body[j]) {
+			j++
+		}
+		if j >= len(body) {
+			return "", 0, true // '>' byte still pending
+		}
+		if body[j] == '>' {
+			return t, j + 2, false // '<' + name + spaces + '>' matched
+		}
+		// "<thoughtX…" can never be "<thought>" — try the next tag name.
 	}
 	return "", 0, false
 }
@@ -184,7 +306,28 @@ func scrubTagBlocksOneShot(content string) string {
 	}
 	s := newThoughtTagScrubber()
 	out := s.feed(content)
-	return out + s.flush()
+	out += s.flush()
+	if s.leakTag != "" {
+		// 2026-10-22 probe: bare thinking tag survived the non-stream scrub.
+		println("[thinkleak] path=ns model=unknown tag=" + s.leakTag)
+	}
+	return out
+}
+
+// reportThinkLeak prints one journald line per stream when the probe caught an
+// escaped bare thinking tag (2026-10-22). Model/uid come from the caller — the
+// scrubber itself has no request context. One line per stream, no body text.
+func reportThinkLeak(state map[int]*thoughtTagScrubber, model, uid, path string) {
+	for _, st := range state {
+		if st != nil && st.leakTag != "" {
+			u := uid
+			if len(u) > 8 {
+				u = u[len(u)-8:]
+			}
+			println("[thinkleak] path=" + path + " model=" + model + " uid=" + u + " tag=" + st.leakTag)
+			return
+		}
+	}
 }
 
 // scrubTagBlocksInChunk rewrites every choice's delta.content in one SSE

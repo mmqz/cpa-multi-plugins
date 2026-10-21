@@ -6,7 +6,7 @@
 // output_tokens_details）。插件是唯一同时看得到"上游原始写法"与"宿主解析口径"
 // 的一层，所以在这里做一次 读全 + 双写：
 //
-//	读 reasoning：completion_tokens_details.reasoning_tokens
+//	读 reasoning（扫描全部候选，取第一个正值；显式 0 只在没有正值时保留）：completion_tokens_details.reasoning_tokens
 //	            → output_tokens_details.reasoning_tokens
 //	            → 顶层 reasoning_tokens
 //	            → completion_tokens_details.reasoning
@@ -102,37 +102,40 @@ func cloneUsageSub(m map[string]any, key string) map[string]any {
 	return out
 }
 
-// readUsageReasoning walks the five-field fallback chain (order matches the
-// mature reference proxies' live-verified probes). present=false means the
-// upstream did not report reasoning at all — the caller must not write a 0.
+// readUsageReasoning walks the six reasoning aliases used by the upstreams.
+// present=false means reasoning was absent and the caller must not write 0.
+// A present 0 never hides a later positive alias: return the first positive
+// value; if every alias is 0, preserve 0; if none exist, report absent.
 func readUsageReasoning(m map[string]any) (int64, bool) {
 	if m == nil {
 		return 0, false
 	}
-	if sub := usageSubObject(m, "completion_tokens_details"); sub != nil {
-		if v, ok := usageField(sub, "reasoning_tokens"); ok {
+	fields := []struct {
+		object map[string]any
+		key    string
+	}{
+		{usageSubObject(m, "completion_tokens_details"), "reasoning_tokens"},
+		{usageSubObject(m, "output_tokens_details"), "reasoning_tokens"},
+		{m, "reasoning_tokens"},
+		{usageSubObject(m, "completion_tokens_details"), "reasoning"},
+		{m, "completion_thinking_tokens"},
+		{m, "reasoning_token_count"},
+	}
+	found := false
+	for _, field := range fields {
+		v, ok := usageField(field.object, field.key)
+		if !ok {
+			continue
+		}
+		found = true
+		if v > 0 {
 			return v, true
 		}
 	}
-	if sub := usageSubObject(m, "output_tokens_details"); sub != nil {
-		if v, ok := usageField(sub, "reasoning_tokens"); ok {
-			return v, true
-		}
+	if found {
+		return 0, true
 	}
-	if v, ok := usageField(m, "reasoning_tokens"); ok {
-		return v, true
-	}
-	if sub := usageSubObject(m, "completion_tokens_details"); sub != nil {
-		if v, ok := usageField(sub, "reasoning"); ok {
-			return v, true
-		}
-	}
-	// WorkBuddy 上游实测还会给 completion_thinking_tokens（老师日志里与
-	// completion_tokens_details.reasoning_tokens 同值），一并兜底。
-	if v, ok := usageField(m, "completion_thinking_tokens"); ok {
-		return v, true
-	}
-	return usageField(m, "reasoning_token_count")
+	return 0, false
 }
 
 // readUsageCached walks the five-field cached-token fallback chain.

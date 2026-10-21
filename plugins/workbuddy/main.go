@@ -366,7 +366,7 @@ func wbRegistration() registration {
 				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily access-token refresh at 22:00 local time to prevent Keycloak offline-session expiry (default true)."},
 				{Name: "login_platform", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"CLI", "ide"}, Description: "Client variant used for NEW logins: CLI (WorkBuddy, default) or ide (CodeBuddy IDE). Existing accounts keep the platform recorded at login/import time."},
 				{Name: "login_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl"}, Description: "Realm for NEW logins: cn (copilot.tencent.com, default) or intl (codebuddy.ai, IDE client; merged codebuddy-intl plugin). Global (workbuddy.ai) accounts are added via panel credential import."},
-				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning. NOTE: for realm-scoped pinning use models_cn / models_global / models_intl below."},
+				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional model list. Each item can have id, name, alias, context, max_tokens, enabled, reasoning (forced pin; wins over the client), and default_reasoning (used only when the client gives no valid effort). NOTE: for realm-scoped pinning use models_cn / models_global / models_intl below."},
 				{Name: "models_cn", Type: pluginapi.ConfigFieldTypeString, Description: "Leave empty (recommended): each CN account then supports exactly what copilot.tencent.com returns for its credential token (5-min cache). Optional comma-separated upstream model IDs to pin/override the CN model output."},
 				{Name: "models_global", Type: pluginapi.ConfigFieldTypeString, Description: "Leave empty (recommended): each Global account then supports exactly what workbuddy.ai returns for its credential token (5-min cache). Optional comma-separated upstream model IDs to pin/override the Global model output."},
 				{Name: "models_intl", Type: pluginapi.ConfigFieldTypeString, Description: "Leave empty (recommended): each Intl account then supports exactly what codebuddy.ai returns for its credential token (5-min cache) - no pre-filled guessing, so unsupported models are never advertised or routed. Optional comma-separated upstream model IDs to pin/override the Intl model output."},
@@ -833,6 +833,10 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	// prepareUpstreamBody does forceStream + normalizeTools + rewriteSystem +
 	// ensureSystemMessage + rewriteModel in ONE unmarshal/marshal pass.
 	body := prepareUpstreamBody(req.Payload, req.OriginalRequest, sa, upstreamModel)
+	// TEMP capture (01 investigation): the final body that leaves for the
+	// upstream — the gate-1 "out" entry for the non-stream path.
+	capKey := captureKey(nanosKey("ns"), upstreamModel, authUID)
+	captureUpstream(capKey, "out", upstreamModel, authUID, string(body))
 	httpReq, err := http.NewRequest(http.MethodPost, endpointChatFor(sa), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -862,7 +866,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		// applies its real cooldown policy to this credential.
 		return nil, upstreamStatusError(statusCode, string(payload), translateChatUpstreamErrorFull(statusCode, string(payload), sa, respHdr))
 	}
-	completion, err := aggregateCompletion(reader, req.Model)
+	completion, err := aggregateCompletion(reader, req.Model, capKey)
 	if err != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
 		// Issue #35: in-stream frame errors / empty streams from the fold path
@@ -955,6 +959,9 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		return okEnvelope(streamResponse{Headers: headers})
 	}
 	backendHeaders(httpReq, sa)
+	// TEMP capture (01 investigation): gate-1 "out" entry for the async stream
+	// path. Keyed by streamID so the pump's "in" lines land in the same file.
+	captureUpstream(captureKey("str-"+req.StreamID, upstreamModel, authUID), "out", upstreamModel, authUID, string(body))
 	// stream_head_timeout (opt-in): when configured > 0, hold the async
 	// hand-off until the pump reports its first decisive upstream event, so a
 	// failure that lands before the model answers becomes a status-bearing
