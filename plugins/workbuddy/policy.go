@@ -163,6 +163,15 @@ func emptyStreamError() error {
 	return fmt.Errorf("empty_stream: workbuddy upstream closed before a completion payload (unexpected EOF)")
 }
 
+// truncatedStreamError is the half-answer twin of emptyStreamError: the upstream
+// answered, then stopped before any finish_reason/[DONE]. Same transport
+// lifecycle wording, so the classifier must not cool a credential that is
+// perfectly healthy; the difference is that frames were already delivered, and
+// without this the client would take the partial text as the model's last word.
+func truncatedStreamError() error {
+	return fmt.Errorf("truncated_stream: workbuddy upstream ended without finish_reason (unexpected EOF)")
+}
+
 // upstreamReadError renders a mid-stream read failure with the same
 // transport-lifecycle classification as emptyStreamError.
 func upstreamReadError(err error) error {

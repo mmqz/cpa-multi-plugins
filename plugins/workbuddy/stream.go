@@ -317,6 +317,8 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 // caller must not run the empty-stream / read-error tail.
 func pumpStreamFrames(scanner *bufio.Scanner, sink streamSink, gate *streamHeadGate, sseFramed bool, collector *sseUsageCollector, requestedModel, upstreamModel, authUID string, started time.Time, sa *storedAuth) (bool, bool) {
 	seenPayload := false
+	sawFinish := false
+	sawTerminator := false
 	gating := gate != nil
 	var pending [][]byte
 	// Issue #30: per-choice output scrubbers — strip the leading tag-block run
@@ -351,8 +353,15 @@ func pumpStreamFrames(scanner *bufio.Scanner, sink streamSink, gate *streamHeadG
 			return seenPayload, true
 		}
 		seenPayload = seenPayload || meaningful
-		if content == "" || content == "[DONE]" {
+		if content == "[DONE]" {
+			sawTerminator = true
 			continue
+		}
+		if content == "" {
+			continue
+		}
+		if chunkCarriesFinish(content) {
+			sawFinish = true
 		}
 		collector.feed(content)
 		cleaned := cleanChunkJSON(scrubTagBlocksInChunk(content, scrubbers))
@@ -407,6 +416,17 @@ func pumpStreamFrames(scanner *bufio.Scanner, sink streamSink, gate *streamHeadG
 			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
 			return seenPayload, true
 		}
+	}
+	// Truncation witness: a payload stream that simply stops without a
+	// non-empty finish_reason or the [DONE] sentinel delivered a partial
+	// answer. Report it in-band instead of letting the client take the cut as
+	// the model's final word. A read failure is handled by the caller's tail
+	// (it has the real error), so this guard only covers a clean EOF.
+	if seenPayload && !sawFinish && !sawTerminator && scanner.Err() == nil {
+		msg := truncatedStreamError().Error()
+		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, msg)
+		sink.emitError(msg)
+		return seenPayload, true
 	}
 	return seenPayload, false
 }
@@ -478,6 +498,8 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var chunks []pluginapi.ExecutorStreamChunk
 	seenPayload := false
+	sawFinish := false
+	sawTerminator := false
 	// Issue #30: per-choice output scrubbers (see tag_scrub.go).
 	scrubbers := map[int]*thoughtTagScrubber{}
 	// Issue #36: per-choice tool-call accumulator (see finish_reason.go).
@@ -488,8 +510,15 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 			return chunks, frameErr
 		}
 		seenPayload = seenPayload || meaningful
-		if content == "" || content == "[DONE]" {
+		if content == "[DONE]" {
+			sawTerminator = true
 			continue
+		}
+		if content == "" {
+			continue
+		}
+		if chunkCarriesFinish(content) {
+			sawFinish = true
 		}
 		if collector != nil {
 			collector.feed(content)
@@ -509,6 +538,9 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 	}
 	if !seenPayload {
 		return chunks, emptyStreamError()
+	}
+	if !sawFinish && !sawTerminator {
+		return chunks, truncatedStreamError()
 	}
 	// Issue #30 fail-open: release scrubber tails verbatim (see pumpStreamFrames).
 	for _, chunk := range scrubTailChunks(scrubbers, sseFramed) {
@@ -601,6 +633,8 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	seenPayload := false
+	sawFinish := false
+	sawTerminator := false
 	for scanner.Scan() {
 		// v0.12.76: route every line through workBuddyStreamFrame — the
 		// non-stream path used to swallow upstream error frames (SSE
@@ -612,8 +646,15 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 			return nil, frameErr
 		}
 		seenPayload = seenPayload || meaningful
-		if data == "" || data == "[DONE]" {
+		if data == "[DONE]" {
+			sawTerminator = true
 			continue
+		}
+		if data == "" {
+			continue
+		}
+		if chunkCarriesFinish(data) {
+			sawFinish = true
 		}
 		var chunk map[string]any
 		if json.Unmarshal([]byte(data), &chunk) != nil {
@@ -683,6 +724,9 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	// single completion payload is an upstream failure, not a success.
 	if !seenPayload {
 		return nil, emptyStreamError()
+	}
+	if !sawFinish && !sawTerminator {
+		return nil, truncatedStreamError()
 	}
 
 	// Issue #30: strip the leading tag-block run the reasoning replay
@@ -769,6 +813,30 @@ func mergeToolCallDelta(merged, delta map[string]any) {
 		cur, _ := mfn["arguments"].(string)
 		mfn["arguments"] = cur + v
 	}
+}
+
+// chunkCarriesFinish reports whether an SSE payload holds a non-empty
+// finish_reason on any choice — the only proof that the upstream finished the
+// turn on purpose. A bare [DONE] is the other deliberate end (tracked
+// separately); finish_reason=length/tool_calls both count as deliberate.
+func chunkCarriesFinish(s string) bool {
+	if !strings.Contains(s, "finish_reason") {
+		return false
+	}
+	var obj struct {
+		Choices []struct {
+			FinishReason *string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal([]byte(s), &obj) != nil {
+		return false
+	}
+	for _, c := range obj.Choices {
+		if c.FinishReason != nil && *c.FinishReason != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func stripDataPrefix(s string) string {
