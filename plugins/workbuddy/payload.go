@@ -67,6 +67,13 @@ func prepareUpstreamBody(payload, original []byte, sa *storedAuth, upstreamModel
 	// 3. rewriteSystem: strip blocked Claude Code template phrases + force thinking.
 	rewriteSystemInPlace(obj)
 
+	// 3.2 sanitizeHistory（self 0.9.63）：同一批风控短语也会藏在 assistant 历史
+	// 回显、用户粘贴、tool_calls 参数和 reasoning 字段里。腾讯 11128 通道门
+	// 扫描整个请求体，只清 system 会漏。必须放在 injectReasoningInPlace 之前，
+	// 否则推理回填会把已清掉的短语重新带进正文。只做同义替换，未命中的内容
+	// 逐字节不变。
+	sanitizeHistoryPhrasesInPlace(obj)
+
 	// 3.5 injectReasoning: fold historical assistant reasoning_content into
 	// content as <thought> blocks — the upstream drops the non-standard
 	// field from multi-turn history and the model loses its own prior
@@ -501,7 +508,10 @@ func prependThoughtInPlace(msg map[string]any, thoughtBlock string) bool {
 // system message that is not first no longer suppresses the injection;
 // the Global-only gate is unchanged so CN traffic stays byte-identical.
 func ensureSystemMessageInPlace(obj map[string]any, sa *storedAuth) bool {
-	if sa == nil || !isGlobalDomain(sa.Auth.Domain) {
+	// [self 0.9.63] Upstream 0.9.59 (issue #40, PR #42): the INTL realm
+	// enforces the same messages[0].role == "system" position check as Global.
+	// CN keeps its byte-identical path.
+	if sa == nil || !(isGlobalDomain(sa.Auth.Domain) || isIntlDomain(sa.Auth.Domain)) {
 		return false
 	}
 	messages, ok := obj["messages"].([]any)
@@ -705,8 +715,8 @@ func ensureSystemMessage(payload []byte, sa *storedAuth) []byte {
 	if len(payload) == 0 {
 		return payload
 	}
-	// Only inject for Global; CN doesn't need it and we minimize diff.
-	if sa == nil || !isGlobalDomain(sa.Auth.Domain) {
+	// [self 0.9.63] Global and Intl both validate position; CN is unchanged.
+	if sa == nil || !(isGlobalDomain(sa.Auth.Domain) || isIntlDomain(sa.Auth.Domain)) {
 		return payload
 	}
 	var obj map[string]any
@@ -762,6 +772,21 @@ var (
 	// further description before the period.
 	reCodexCliIntro          = regexp.MustCompile(`(?i)you are a coding agent running in the codex cli[^.\n]*\.\s*codex cli is an open source project led by openai\s*\.?`)
 	codexCliIntroReplacement = "You are a helpful coding assistant running in the terminal."
+
+	// [self 0.9.63] Upstream 0.9.62 (PR #46): Tencent's CN gateway blocklists
+	// the DeepSeek Harness base-instructions opening as 11128 "Illegal API
+	// invocation from an unapproved channel". Single-variable replay: the bare
+	// sentence 400s every time, while "DeepSeek Harness" alone, "powered by
+	// DeepSeek Harness", and the same sentence naming another harness all pass.
+	reDeepSeekHarnessIntro          = regexp.MustCompile(`(?i)you are an ai agent powered by deepseek harness`)
+	deepSeekHarnessIntroReplacement = "You are an AI assistant"
+
+	// [self 0.9.63] Upstream 0.9.63 (PR #49): the runtime-context line
+	// "the DeepSeek Harness Web GUI" is a separate member of the same 11128
+	// family. Replay: the verbatim four-token phrase 400s, while breaking any
+	// one token ("Site GUI", "Web UI", "Harness Web GUI") passes.
+	reDeepSeekHarnessWebGUI          = regexp.MustCompile(`(?i)deepseek\s+harness\s+web\s+gui`)
+	deepSeekHarnessWebGUIReplacement = "DeepSeek Harness web interface"
 )
 
 func sanitizeBlockedTemplates(s string) string {
@@ -782,7 +807,100 @@ func sanitizeBlockedTemplates(s string) string {
 		"You are a coding agent running in the Codex CLI, a terminal-based coding assistant. Codex CLI is an open source project led by OpenAI.",
 		codexCliIntroReplacement)
 	s = reCodexCliIntro.ReplaceAllString(s, codexCliIntroReplacement)
+	// [self 0.9.63] DeepSeek Harness family: same 11128 channel gate. The
+	// caller decides scope — rewriteSystemMessagesInPlace for system content,
+	// sanitizeHistoryPhrasesInPlace for every other role.
+	s = reDeepSeekHarnessIntro.ReplaceAllString(s, deepSeekHarnessIntroReplacement)
+	s = reDeepSeekHarnessWebGUI.ReplaceAllString(s, deepSeekHarnessWebGUIReplacement)
 	return s
+}
+
+// sanitizeHistoryPhrasesInPlace applies the blocked-phrase rewrites to EVERY
+// message in the history — assistant echoes, tool results and user pastes
+// included (upstream v0.9.63). Evidence chain (2026-10-21, single-variable
+// replays against copilot.tencent.com): a 50-message body whose only
+// "DeepSeek Harness Web GUI" occurrences live in a user message and an
+// assistant history echo 400s with code 11128 even when the system prompt is
+// fully sanitized; scrubbing the phrase in every role flips the same body to
+// 200. The Claude Code git-injection line "Main branch (you will usually use
+// this for PRs)" hits the same way inside an assistant echo.
+//
+// Scope guard: this is NOT the retired v0.9.18 wholesale swap. Every rewrite
+// is the same meaning-preserving substitution the system path already uses,
+// and content without a trigger phrase passes byte-identical.
+//
+// [self 0.9.63] Placement matters: this runs AFTER our context projection and
+// system rewrite, and BEFORE injectReasoningInPlace. The fold in step 3.5
+// copies reasoning_content/reasoning into content, so those fields must be
+// scrubbed here or the fold would re-arm the phrases inside already-sanitized
+// content.
+//
+// Handles: string content; array content (per text part); tool_calls
+// function.arguments (agents echo protocol text there); assistant
+// reasoning_content / reasoning mirrors.
+func sanitizeHistoryPhrasesInPlace(obj map[string]any) bool {
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return false
+	}
+	changed := false
+	scrub := sanitizeBlockedTemplates
+	for _, mi := range msgs {
+		m, ok := mi.(map[string]any)
+		if !ok {
+			continue
+		}
+		// reasoning_content / reasoning are folded into content by
+		// injectReasoningInPlace AFTER this pass, so scrub them here.
+		if role, _ := m["role"].(string); strings.EqualFold(strings.TrimSpace(role), "assistant") {
+			for _, key := range []string{"reasoning_content", "reasoning"} {
+				if rc, ok := m[key].(string); ok && rc != "" {
+					if r := scrub(rc); r != rc {
+						m[key] = r
+						changed = true
+					}
+				}
+			}
+		}
+		if c, ok := m["content"].(string); ok {
+			if r := scrub(c); r != c {
+				m["content"] = r
+				changed = true
+			}
+		} else if parts, ok := m["content"].([]any); ok {
+			for _, pi := range parts {
+				p, ok := pi.(map[string]any)
+				if !ok {
+					continue
+				}
+				if t, ok := p["text"].(string); ok {
+					if r := scrub(t); r != t {
+						p["text"] = r
+						changed = true
+					}
+				}
+			}
+		}
+		if tcs, ok := m["tool_calls"].([]any); ok {
+			for _, tci := range tcs {
+				tc, ok := tci.(map[string]any)
+				if !ok {
+					continue
+				}
+				fn, ok := tc["function"].(map[string]any)
+				if !ok || fn == nil {
+					continue
+				}
+				if a, ok := fn["arguments"].(string); ok {
+					if r := scrub(a); r != a {
+						fn["arguments"] = r
+						changed = true
+					}
+				}
+			}
+		}
+	}
+	return changed
 }
 
 // forceMaxThinking selects the highest reasoning level that the model actually

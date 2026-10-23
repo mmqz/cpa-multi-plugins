@@ -99,13 +99,25 @@ func TestEnsureSystemFirstCNUnchanged(t *testing.T) {
 	}
 }
 
-func TestEnsureSystemFirstIntlRealmUnchanged(t *testing.T) {
-	// Intl (codebuddy.ai) has no first-message evidence — deliberately out
-	// of scope (CHANGELOG 0.9.37); its payloads stay byte-identical.
+func TestEnsureSystemFirstIntlRealmInjects(t *testing.T) {
+	// [self 0.9.63] Intl (codebuddy.ai) enforces the same first-message
+	// position check as Global (measured 2026-10-18/19: user-first intl
+	// request -> 11128 first message is not system prompt), so the injection
+	// covers INTL and user-first clients work there too.
 	sa := &storedAuth{Auth: storedTokens{Domain: "codebuddy.ai"}}
 	obj := map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hi"}}}
-	if ensureSystemMessageInPlace(obj, sa) {
-		t.Fatal("Intl realm must not be touched by the Global-only injection")
+	if !ensureSystemMessageInPlace(obj, sa) {
+		t.Fatal("Intl realm user-first payload must be injected with a system message")
+	}
+	msgs, _ := obj["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("messages len = %d, want 2 (system + user)", len(msgs))
+	}
+	if role, _ := msgs[0].(map[string]any)["role"].(string); role != "system" {
+		t.Fatalf("first message role = %q, want system", role)
+	}
+	if got, _ := msgs[1].(map[string]any)["content"].(string); got != "hi" {
+		t.Fatalf("original user message displaced: %q", got)
 	}
 }
 
