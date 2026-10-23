@@ -614,6 +614,16 @@ func backendHeaders(req *http.Request, sa *storedAuth) {
 		req.Header.Set("X-IDE-Type", "WorkBuddy")
 		req.Header.Set("X-IDE-Version", "5.5.6")
 	}
+	// [self 0.9.63] Tencent's channel gate validates the desktop client's three
+	// conversation-correlation headers. Blank-only fill: an explicit caller value
+	// (task_chat's wb-task-* id, a preset header) is never overwritten. Per-request
+	// fresh UUID-shaped ids are accepted; the gate checks presence/shape, not
+	// cross-turn continuity. Realm-unconditional per upstream 0.9.61 (issues #43-#45).
+	for _, h := range []string{"X-Conversation-ID", "X-Conversation-Request-ID", "X-Conversation-Message-ID"} {
+		if req.Header.Get(h) == "" {
+			req.Header.Set(h, growthClientToken())
+		}
+	}
 	if sa.Auth.AccessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+sa.Auth.AccessToken)
 	} else {
