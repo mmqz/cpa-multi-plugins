@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.9.63-self.1
+
+### 自用版：按行为移植上游 0.9.59 / 0.9.61 / 0.9.62 / 0.9.63，不整体替换
+
+基线是自用深度魔改版 `0.9.58`（tag `self-0.9.58-baseline`）。本次没有拉上游
+整包覆盖，只把上游这几版里"能解释大规模 11128 / 风控失效"的行为改动逐条对进
+来，自研模块（`context_projection.go`、`pinned_effort.go`、`effort_model.go`、
+`usage_shape.go`、`tag_scrub.go`、`capture.go`）一行未动。
+
+版本号规则：`<上游版本>-self.<第几次自用改动>`。看到版本号就知道是从哪个上游
+版本开始魔改的；下次上游再往前走，仍以这个 tag 为分叉点做增量对齐。
+
+1. **会话关联请求头**（对齐上游 0.9.61）：`X-Conversation-ID`、
+   `X-Conversation-Request-ID`、`X-Conversation-Message-ID` 三件套补齐，
+   CN / Global / Intl 全生效。只在调用方没给值时补，给了就不覆盖——上游把它
+   们当成"同一条会话"的凭据，缺了容易被判定成脚本拼装请求。
+
+2. **DeepSeek Harness 短语清洗**（对齐上游 0.9.62 / 0.9.63）：腾讯 CN 网关
+   把 `You are an AI agent powered by DeepSeek Harness` 和
+   `DeepSeek Harness Web GUI` 当作未授权通道特征，命中即 11128。两条都做同义
+   替换，不改语义。
+
+3. **清洗范围从 system 扩到整段历史**（对齐上游 0.9.63）：同一批短语会藏在
+   assistant 历史回显、用户粘贴、`tool_calls[].function.arguments`、以及
+   assistant 的 `reasoning_content` / `reasoning` 里。上游实测：system 洗干净
+   了、正文里还留一句，照样 400。本版新增 `sanitizeHistoryPhrasesInPlace`，
+   覆盖全部角色和上述字段；没命中触发词的内容逐字节不变。
+
+   放置顺序有讲究：在 `rewriteSystemInPlace` 之后、`injectReasoningInPlace`
+   之前。因为后者会把 reasoning 折进 content，先折后洗等于把短语又搬回正文。
+
+4. **Intl 也要求 system 在首位**（对齐上游 0.9.59 / PR #42）：
+   `ensureSystemMessageInPlace` / `ensureSystemMessage` 的门槛从
+   "只有 Global" 扩到 "Global + Intl"。CN 路径保持逐字节不变。
+
+### 验证
+
+- 定向单测：`backend_conversation_headers_test.go`、
+  `payload_deepseek_harness_test.go`、`payload_intl_system_message_test.go` 全过。
+- `go vet ./...` 通过。
+- 全量 `go test ./...` 剩 3 个失败（`TestDailyQuotaDeclaredResetWins`、
+  `TestScrubTagBlocksOneShot`、`TestPumpStreamFrames_FailOpenTail`），
+  已在基线 `self-0.9.58-baseline` 上复现，非本次引入。
+- 真实链路（隔离实例，端口 18317，凭据目录只放 Yuri 一个账号）：
+  `glm-5.3-flash` 非流式 200 / `OK`；流式 200 / `STREAM-OK` / 正常 `[DONE]`，
+  无 11128、无 `auth_unavailable`。
+
 ## 0.9.58
 
 ### Daily-quota tier for the cooldown table + login platform lineage (issues #35/#36 follow-up)
