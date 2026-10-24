@@ -375,6 +375,7 @@ func wbRegistration() registration {
 				{Name: "models_intl", Type: pluginapi.ConfigFieldTypeString, Description: "Leave empty (recommended): each Intl account then supports exactly what codebuddy.ai returns for its credential token (5-min cache) - no pre-filled guessing, so unsupported models are never advertised or routed. Optional comma-separated upstream model IDs to pin/override the Intl model output."},
 				{Name: "scheduler_mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{schedulerModeOff, schedulerModeCredits}, Description: "Multi-account selection: off (defer to built-in, default) or credits (pick highest remaining). WARNING: when off + lifecycle_auto=false, exhausted accounts may still be routed — enable lifecycle_auto or set scheduler_mode=credits."},
 				{Name: "stream_head_timeout", Type: pluginapi.ConfigFieldTypeInteger, Description: "Opt-in async-stream head gate, in seconds (default 0 = disabled, unchanged behavior). When > 0 the executor waits up to this long for the first decisive upstream event before opening the host stream, so a pre-answer failure (upstream >=400 or an error frame before the model starts answering) returns as a normal failed request with an HTTP status instead of a lossy in-band text error. Never blocks longer than this, and a silent stream is released normally."},
+				{Name: "account_max_concurrent", Type: pluginapi.ConfigFieldTypeInteger, Description: "Opt-in per-credential in-flight chat cap (default 0 = disabled, unchanged dispatch). N > 0: once N executor calls for one credential are still in flight, further requests fail fast with a plain error so the host rotates to another candidate — no local queueing. The upstream meters per (account, minute) and one big-context conversation alone carries hundreds of thousands of tokens, so parallel conversations on one credential are the fastest path to a model-scoped rate limit."},
 				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional override of CPAMP usage import URL (default http://cpa-manager-plus:18317/v0/management/usage/import; also env USAGE_REPORT_URL)."},
 				{Name: "usage_report_key", Type: pluginapi.ConfigFieldTypeString, Description: "Optional CPAMP admin key override. Prefer auto-detect from env CPAMP_ADMIN_KEY / USAGE_REPORT_KEY or secret file /run/secrets/cpamp_admin_key."},
 			},
@@ -880,6 +881,15 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
 		return nil, err
 	}
+	// Opt-in in-flight admission (account_max_concurrent): at capacity this
+	// fails plain so the host rotates to another candidate. The slot is held
+	// for the whole upstream call and released on every exit of this
+	// synchronous executor (defer below).
+	releaseSlot, err := accountSlotAcquire(req.AuthID)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseSlot()
 	// CodeBuddy rejects non-stream requests (code 11101), so always stream
 	// upstream and fold the chunks into a single chat.completion object.
 	// prepareUpstreamBody does forceStream + normalizeTools + rewriteSystem +
@@ -965,6 +975,14 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
 		return nil, err
 	}
+	// Opt-in in-flight admission (account_max_concurrent), same contract as
+	// the non-stream path. Release semantics differ per branch below: the
+	// sync collector holds the slot for this function's lifetime, the async
+	// pump holds it for the goroutine's.
+	releaseSlot, err := accountSlotAcquire(req.AuthID)
+	if err != nil {
+		return nil, err
+	}
 	body := req.Payload
 	if len(body) == 0 {
 		body = req.OriginalRequest
@@ -977,6 +995,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 
 	// No async stream id → fall back to synchronous chunk collection.
 	if req.StreamID == "" {
+		defer releaseSlot()
 		collector := &sseUsageCollector{}
 		chunks, statusCode, errCollect := collectUpstreamStream(body, sa, sseFramed, collector, upstreamModel)
 		if errCollect != nil {
@@ -1002,6 +1021,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointChatFor(sa), bytes.NewReader(body))
 	if err != nil {
 		cancel()
+		releaseSlot()
 		streamEmitError(req.StreamID, err.Error())
 		streamClose(req.StreamID)
 		return okEnvelope(streamResponse{Headers: headers})
@@ -1016,7 +1036,13 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	if secs := loadedStreamHeadTimeout(); secs > 0 {
 		gate = newStreamHeadGate(time.Duration(secs) * time.Second)
 	}
-	go pumpUpstreamStream(httpReq, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, sa, gate)
+	// The admission slot is held for the pump's whole lifetime — the upstream
+	// call is still in flight after this handler returns (that is the point
+	// of async), so the release rides the goroutine, not this function.
+	go func() {
+		defer releaseSlot()
+		pumpUpstreamStream(httpReq, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, sa, gate)
+	}()
 	if gate != nil {
 		if headErr := awaitStreamHead(gate); headErr != nil {
 			return nil, headErr

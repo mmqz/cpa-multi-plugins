@@ -116,9 +116,10 @@ func configure(raw []byte) {
 	nextKeepaliveAuto := true
 	nextTasksAuto := true
 	nextMgmtKey := ""
-	nextLoginPlatform := ""    // sticky: empty = keep current (issue #24)
-	nextLoginRegion := ""      // sticky: empty = keep current (issue #24)
-	nextStreamHeadTimeout := 0 // default off: 0 seconds
+	nextLoginPlatform := ""       // sticky: empty = keep current (issue #24)
+	nextLoginRegion := ""         // sticky: empty = keep current (issue #24)
+	nextStreamHeadTimeout := 0    // default off: 0 seconds
+	nextAccountMaxConcurrent := 0 // default off: admission control disabled
 
 	nextPinned := map[string][]string{}
 	cfgURL, cfgKey := "", ""
@@ -172,6 +173,11 @@ func configure(raw []byte) {
 				if v, present := m["stream_head_timeout"]; present {
 					if n, err := strconv.Atoi(configScalarString(v)); err == nil && n > 0 {
 						nextStreamHeadTimeout = n
+					}
+				}
+				if v, present := m["account_max_concurrent"]; present {
+					if n, err := strconv.Atoi(configScalarString(v)); err == nil && n > 0 {
+						nextAccountMaxConcurrent = n
 					}
 				}
 			}
@@ -235,6 +241,15 @@ func configure(raw []byte) {
 					// negatives) all normalize to 0 = disabled.
 					if n, err := strconv.Atoi(v); err == nil && n > 0 {
 						nextStreamHeadTimeout = n
+					}
+				}
+				if strings.HasPrefix(line, "account_max_concurrent:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "account_max_concurrent:"))
+					v = strings.Trim(v, "\"'")
+					// Opt-in only: same normalization as stream_head_timeout —
+					// absent, unparseable or non-positive all mean disabled.
+					if n, err := strconv.Atoi(v); err == nil && n > 0 {
+						nextAccountMaxConcurrent = n
 					}
 				}
 				if strings.HasPrefix(line, "models_cn:") {
@@ -306,6 +321,17 @@ func configure(raw []byte) {
 	streamHeadTimeoutMu.Lock()
 	streamHeadTimeout = nextStreamHeadTimeout
 	streamHeadTimeoutMu.Unlock()
+
+	accountMaxConcurrentMu.Lock()
+	if accountMaxConcurrent != nextAccountMaxConcurrent {
+		if nextAccountMaxConcurrent > 0 {
+			log.Printf("workbuddy: account_max_concurrent=%d applied (per-credential in-flight admission)", nextAccountMaxConcurrent)
+		} else {
+			log.Printf("workbuddy: account_max_concurrent admission disabled")
+		}
+	}
+	accountMaxConcurrent = nextAccountMaxConcurrent
+	accountMaxConcurrentMu.Unlock()
 
 	// management key: config_yaml > env > keep existing. Empty stays empty
 	// (plugin-layer auth disabled, host middleware still guards).
