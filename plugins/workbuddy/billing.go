@@ -179,6 +179,20 @@ func billingHeaders(req *http.Request, sa *storedAuth) {
 	if sa.Auth.Domain != "" {
 		req.Header.Set("X-Domain", sa.Auth.Domain)
 	}
+	// 2026-10-25 (per-account billing identity): the billing plane is where
+	// N gateway-fronted accounts would otherwise present zero device
+	// separation — one gateway shape on every call from every account. The
+	// official non-chat family carries X-Machine-ID (OS hardware UUID) /
+	// X-Session-ID (per-process UUID) plus a fresh X-Request-ID per call, so
+	// a gateway derives the two stable ids per account — same account always
+	// the same device, never shared across accounts — or the shared value
+	// becomes a correlation key tying the whole pool to one machine
+	// (workbuddy2api-hub wb_accounts.py / wb_fingerprint.py, its #448).
+	// Shapes: hyphenated UUIDv4 for the stable ids (deriveAccountDeviceID),
+	// bare 32-hex for the request id (accountRequestID).
+	req.Header.Set("X-Machine-ID", deriveAccountDeviceID(sa, "machine"))
+	req.Header.Set("X-Session-ID", deriveAccountDeviceID(sa, "session"))
+	req.Header.Set("X-Request-ID", accountRequestID())
 	req.Header.Set("User-Agent", "CodeBuddy")
 	// Intl realm parity (applyRealmHeaders): the codebuddy.ai gateway expects
 	// the IDE client header set and no X-Requested-With. Without these the

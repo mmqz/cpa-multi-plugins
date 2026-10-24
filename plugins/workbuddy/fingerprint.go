@@ -26,6 +26,9 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"runtime"
 	"strings"
@@ -96,4 +99,40 @@ func applyStainlessHeaders(req *http.Request) {
 // header family (adopted IDE logins) rather than the CLI identity.
 func isIDEPlatform(platform string) bool {
 	return strings.EqualFold(strings.TrimSpace(platform), "ide")
+}
+
+// deriveAccountDeviceID derives a stable, UUIDv4-shaped device identifier
+// for one account from salt + account UID: the same account always derives
+// the same value (a fixed virtual device), and two accounts never share a
+// value. A gateway fronting N accounts must present each of them as its own
+// device on every identity-bearing surface — a process-wide value would tie
+// the whole pool to one machine (workbuddy2api-hub wb_fingerprint.py, its
+// issue #448 correlation note).
+//
+// Shape matters as much as stability. The official clients' machineId is the
+// OS hardware UUID and sessionId a per-process randomUUID — both hyphenated
+// 8-4-4-4-12 with the v4 version/variant nibbles. A bare 36-hex string (what
+// a naive derivation emits) is itself a gateway signature, so the version
+// nibble is forced to 4 and the variant nibble to an RFC-4122 value here.
+// The growth plane's per-uid growthDeriveID keeps its existing bare-hex
+// shape; aligning that surface is a separate, behavior-changing step.
+func deriveAccountDeviceID(sa *storedAuth, salt string) string {
+	uid := ""
+	if sa != nil {
+		uid = sa.Account.UID
+	}
+	sum := sha256.Sum256([]byte(salt + ":" + uid))
+	h := hex.EncodeToString(sum[:16])
+	h = h[:12] + "4" + h[13:16] + "a" + h[17:]
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// accountRequestID mints the per-request X-Request-ID: 32 bare hex chars
+// (official capture shape). Deliberately NOT derived from the UID — a stable
+// per-account request-id prefix would be a gateway signature; real clients
+// mint a fresh one per request.
+func accountRequestID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
