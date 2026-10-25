@@ -255,7 +255,9 @@ func hostCall(method string, request []byte) ([]byte, error) {
 func handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
-		configure(request)
+		if err := configure(request); err != nil {
+			return nil, err
+		}
 		startAdoption()
 		return okEnvelope(wbRegistration())
 	case pluginabi.MethodModelStatic:
@@ -372,6 +374,7 @@ func wbRegistration() registration {
 			GitHubRepository: "https://github.com/mmqz/cpa-multi-plugins",
 			Logo:             pluginLogoURL,
 			ConfigFields: []pluginapi.ConfigField{
+				{Name: "queue_wait_budget", Type: pluginapi.ConfigFieldTypeString, Description: "Cumulative queue-ticket wait per execution, 0–150 integer seconds (default 150). 0 disables queue retries. Does not limit network or generation time."},
 				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in: window-anchored 10:05 UTC+8 (round-open timezone, works in any container TZ) plus 10:00/15:00/21:00 local compensation ticks (default true)."},
 				{Name: "login_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{regionCN, regionIntl}, Description: "Region for NEW logins: cn (qoder.cn, default) or intl (qoder.com). Existing accounts keep their own region; legacy qoder-cn-/qoder-intl- auth files are adopted automatically."},
 				{Name: "login_dialect", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{loginDialectCockpit, loginDialectDesktop}, Description: "DEPRECATED since v0.8.45 (no-op). Both CN and Intl now always use the official desktop-client v0.4.3 wire format (client_id 732aef47-… + machine identity + /users/sign-in?biz_variant=qoder wrapper) — the official first-login newbie grant (14-day Pro trial + 300 credits) fires server-side on every login. The config key is kept for backward compat only; both values produce the same URL."},

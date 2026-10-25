@@ -31,7 +31,13 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+)
+
+var (
+	queueWaitBudget = queueTotalBudget
+	queueBudgetMu   sync.RWMutex
 )
 
 const (
@@ -204,7 +210,10 @@ func queueRetryAllowed(attempt int, waited time.Duration, wait time.Duration) bo
 	if wait > queueWaitCap {
 		wait = queueWaitCap
 	}
-	return attempt+1 < queueMaxAttempts && waited+wait <= queueTotalBudget
+	queueBudgetMu.RLock()
+	budget := queueWaitBudget
+	queueBudgetMu.RUnlock()
+	return attempt+1 < queueMaxAttempts && waited+wait <= budget
 }
 
 // queueWait sleeps for the ticket's interval, honouring ctx cancellation. It

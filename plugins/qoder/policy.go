@@ -84,6 +84,11 @@ func isHardCreditError(status int, body string) bool {
 		return true
 	}
 	lower := strings.ToLower(body)
+	// The provider's workspace allocation limit does not establish that the
+	// Qoder account has run out of credits.
+	if strings.Contains(lower, "workspace allocated quota exceeded") {
+		return false
+	}
 	for _, m := range hardCreditMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) {
 			return true

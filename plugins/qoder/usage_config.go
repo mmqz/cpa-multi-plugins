@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -104,7 +105,7 @@ const fallbackUsageReportURL = "http://cpa-manager-plus:18317/v0/management/usag
 // decode first (yaml.v3 rides in via the SDK), so flow-style one-liners
 // (`trae: {enabled: true, login_region: intl}`) and JSON payloads parse too;
 // the historical line-scan stays as the fallback for malformed YAML.
-func configure(raw []byte) {
+func configure(raw []byte) error {
 	// Parse config without holding any lock (fixes nested-lock hazard).
 	nextCheckinAuto := true
 	nextLifecycleAuto := true
@@ -114,6 +115,7 @@ func configure(raw []byte) {
 	nextLoginDialect := "" // sticky: empty = keep current (v0.8.40)
 	nextMgmtKey := ""
 	nextStreamHeadTimeout := 0
+	nextQueueWaitBudget := queueTotalBudget
 	nextClaimUnverified := false
 	nextRoundSeeds := ""
 
@@ -130,6 +132,13 @@ func configure(raw []byte) {
 			// authoritative for block style (both agree there); the
 			// map only ADDS keys the scan cannot see.
 			if m, ok := decodePluginConfigYAML(req.ConfigYAML); ok {
+				if v, present := m["queue_wait_budget"]; present {
+					secs, err := strconv.Atoi(configScalarString(v))
+					if err != nil || secs < 0 || secs > 150 {
+						return fmt.Errorf("qoder queue_wait_budget must be an integer from 0 to 150 seconds")
+					}
+					nextQueueWaitBudget = time.Duration(secs) * time.Second
+				}
 				if v, present := m["login_region"]; present {
 					nextLoginRegion = normalizeRegion(configScalarString(v))
 				}
@@ -284,6 +293,9 @@ func configure(raw []byte) {
 	applyRoundSeeds(nextRoundSeeds)
 
 	setStreamHeadTimeout(nextStreamHeadTimeout)
+	queueBudgetMu.Lock()
+	queueWaitBudget = nextQueueWaitBudget
+	queueBudgetMu.Unlock()
 
 	// management key: config_yaml > env > keep existing. Empty stays empty
 	// (plugin-layer auth disabled, host middleware still guards).
@@ -296,6 +308,7 @@ func configure(raw []byte) {
 
 	resolveUsageReport(cfgURL, cfgKey)
 	ensureScheduler()
+	return nil
 }
 
 // parseRoundSeeds turns the config scalar "intl=<uuid>,cn=<uuid>" (or
