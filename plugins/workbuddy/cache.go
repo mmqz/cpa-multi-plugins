@@ -16,6 +16,10 @@ type accountCacheEntry struct {
 	credits *creditsSummary
 	plan    string
 	fetched time.Time
+	// Per-credential guardrail overrides (#61), carried from the credential
+	// record so scheduler pick can resolve them by authID. nil = inherit.
+	reserveOverride  *int64
+	dailyCapOverride *int64
 }
 
 var (
@@ -136,7 +140,8 @@ func cachedAccountDetails(authID string, sa *storedAuth, force bool) (plan strin
 	if cr != nil {
 		usageQuotaStampFromCredits(authID, plan, cr)
 	}
-	accountCache.Store(authID, &accountCacheEntry{checkin: ci, credits: cr, plan: plan, fetched: now})
+	accountCache.Store(authID, &accountCacheEntry{checkin: ci, credits: cr, plan: plan, fetched: now,
+		reserveOverride: sa.ReserveCredits, dailyCapOverride: sa.DailyCreditsCap})
 	// Soft cap: if map is huge, drop oldest-looking entries beyond bound.
 	pruneAccountCacheSoftCap(accountCacheSoftCap)
 	return plan, ci, cr, errList

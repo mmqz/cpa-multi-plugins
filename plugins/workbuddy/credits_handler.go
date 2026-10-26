@@ -283,6 +283,7 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 				plan, _ := acct["plan"].(string)
 				accountCache.Store(f.ID, &accountCacheEntry{
 					checkin: ci, credits: cr, plan: plan, fetched: now,
+					reserveOverride: sa.ReserveCredits, dailyCapOverride: sa.DailyCreditsCap,
 				})
 				// Propagate the fresh credits into the host auth-file note so
 				// CPA's native credential card matches this panel. Without it a

@@ -351,7 +351,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.70"
+var version = "0.9.71"
 
 func wbRegistration() registration {
 	return registration{
@@ -376,6 +376,8 @@ func wbRegistration() registration {
 				{Name: "scheduler_mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{schedulerModeOff, schedulerModeCredits}, Description: "Multi-account selection: off (defer to built-in, default) or credits (pick highest remaining). WARNING: when off + lifecycle_auto=false, exhausted accounts may still be routed — enable lifecycle_auto or set scheduler_mode=credits."},
 				{Name: "stream_head_timeout", Type: pluginapi.ConfigFieldTypeInteger, Description: "Opt-in async-stream head gate, in seconds (default 0 = disabled, unchanged behavior). When > 0 the executor waits up to this long for the first decisive upstream event before opening the host stream, so a pre-answer failure (upstream >=400 or an error frame before the model starts answering) returns as a normal failed request with an HTTP status instead of a lossy in-band text error. Never blocks longer than this, and a silent stream is released normally."},
 				{Name: "account_max_concurrent", Type: pluginapi.ConfigFieldTypeInteger, Description: "Opt-in per-credential in-flight chat cap (default 0 = disabled, unchanged dispatch). N > 0: once N executor calls for one credential are still in flight, further requests fail fast with a plain error so the host rotates to another candidate — no local queueing. The upstream meters per (account, minute) and one big-context conversation alone carries hundreds of thousands of tokens, so parallel conversations on one credential are the fastest path to a model-scoped rate limit."},
+				{Name: "reserve_credits", Type: pluginapi.ConfigFieldTypeInteger, Description: "Opt-in credit guardrail (#61): skip a credential in scheduler pick once its cached remaining credits are <= the reserve, keeping the account usable for the official client. Default 0 = off. Reads the existing credits cache only (zero upstream calls). Only effective with scheduler_mode: credits; per-credential override: reserve_credits number in the auth document top level (0 = disable for that credential)."},
+				{Name: "daily_credits_cap", Type: pluginapi.ConfigFieldTypeInteger, Description: "Opt-in credit guardrail (#61): skip a credential once its same-day credit spend (day-start remaining − current remaining, from the credits cache) reaches the cap. Day boundary is UTC+8; counters are in-memory. Default 0 = off. Only effective with scheduler_mode: credits; per-credential override: daily_credits_cap in the auth document top level."},
 				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional override of CPAMP usage import URL (default http://cpa-manager-plus:18317/v0/management/usage/import; also env USAGE_REPORT_URL)."},
 				{Name: "usage_report_key", Type: pluginapi.ConfigFieldTypeString, Description: "Optional CPAMP admin key override. Prefer auto-detect from env CPAMP_ADMIN_KEY / USAGE_REPORT_KEY or secret file /run/secrets/cpamp_admin_key."},
 			},
@@ -459,6 +461,15 @@ var modelAliasCache struct {
 type storedAuth struct {
 	Auth    storedTokens  `json:"auth"`
 	Account storedAccount `json:"account"`
+
+	// Per-credential guardrail overrides (#61), read at scheduler-pick time
+	// via the account cache: absent = inherit the global knob, 0 = disable
+	// that guardrail for this credential. Panel/doc editing sets them as
+	// document top-level numbers; pointer shape keeps nil vs explicit 0
+	// distinct, and omitempty preserves panel-set values across token
+	// refreshes (persistAuthTokens' merge keeps keys sa does not carry).
+	ReserveCredits  *int64 `json:"reserve_credits,omitempty"`
+	DailyCreditsCap *int64 `json:"daily_credits_cap,omitempty"`
 
 	// authIndex is the host-side identity of this credential, stamped by
 	// hostAuthGet / hostAuthGetBundle (empty for hand-built snapshots: tests,

@@ -120,6 +120,8 @@ func configure(raw []byte) {
 	nextLoginRegion := ""         // sticky: empty = keep current (issue #24)
 	nextStreamHeadTimeout := 0    // default off: 0 seconds
 	nextAccountMaxConcurrent := 0 // default off: admission control disabled
+	nextReserveCredits := int64(0) // default off: guardrail disabled (#61)
+	nextDailyCreditsCap := int64(0) // default off: guardrail disabled (#61)
 
 	nextPinned := map[string][]string{}
 	cfgURL, cfgKey := "", ""
@@ -178,6 +180,16 @@ func configure(raw []byte) {
 				if v, present := m["account_max_concurrent"]; present {
 					if n, err := strconv.Atoi(configScalarString(v)); err == nil && n > 0 {
 						nextAccountMaxConcurrent = n
+					}
+				}
+				if v, present := m["reserve_credits"]; present {
+					if n, err := strconv.ParseInt(configScalarString(v), 10, 64); err == nil && n > 0 {
+						nextReserveCredits = n
+					}
+				}
+				if v, present := m["daily_credits_cap"]; present {
+					if n, err := strconv.ParseInt(configScalarString(v), 10, 64); err == nil && n > 0 {
+						nextDailyCreditsCap = n
 					}
 				}
 			}
@@ -250,6 +262,21 @@ func configure(raw []byte) {
 					// absent, unparseable or non-positive all mean disabled.
 					if n, err := strconv.Atoi(v); err == nil && n > 0 {
 						nextAccountMaxConcurrent = n
+					}
+				}
+				if strings.HasPrefix(line, "reserve_credits:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "reserve_credits:"))
+					v = strings.Trim(v, "\"'")
+					// Opt-in only (#61): non-positive normalizes to disabled.
+					if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+						nextReserveCredits = n
+					}
+				}
+				if strings.HasPrefix(line, "daily_credits_cap:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "daily_credits_cap:"))
+					v = strings.Trim(v, "\"'")
+					if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+						nextDailyCreditsCap = n
 					}
 				}
 				if strings.HasPrefix(line, "models_cn:") {
@@ -332,6 +359,28 @@ func configure(raw []byte) {
 	}
 	accountMaxConcurrent = nextAccountMaxConcurrent
 	accountMaxConcurrentMu.Unlock()
+
+	reserveCreditsMu.Lock()
+	if reserveCredits != nextReserveCredits {
+		if nextReserveCredits > 0 {
+			log.Printf("workbuddy: reserve_credits=%d applied (scheduler pick guardrail, #61)", nextReserveCredits)
+		} else {
+			log.Printf("workbuddy: reserve_credits guardrail disabled")
+		}
+	}
+	reserveCredits = nextReserveCredits
+	reserveCreditsMu.Unlock()
+
+	dailyCreditsCapMu.Lock()
+	if dailyCreditsCap != nextDailyCreditsCap {
+		if nextDailyCreditsCap > 0 {
+			log.Printf("workbuddy: daily_credits_cap=%d applied (UTC+8 day, scheduler pick guardrail, #61)", nextDailyCreditsCap)
+		} else {
+			log.Printf("workbuddy: daily_credits_cap guardrail disabled")
+		}
+	}
+	dailyCreditsCap = nextDailyCreditsCap
+	dailyCreditsCapMu.Unlock()
 
 	// management key: config_yaml > env > keep existing. Empty stays empty
 	// (plugin-layer auth disabled, host middleware still guards).
