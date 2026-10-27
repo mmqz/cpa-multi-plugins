@@ -69,6 +69,7 @@ const (
 // not a 10605/RESOURCE_LIMIT envelope.
 type queueSignal struct {
 	detected   bool
+	subCode    string
 	retryAfter time.Duration
 	queueType  string
 	modelKey   string
@@ -82,10 +83,10 @@ type queueSignal struct {
 // layer or an SSE frame) looking for the queue ticket at any nesting depth.
 // The gateway nests the actionable object inside JSON-string "message" (and
 // sometimes "details") fields, so both are unwrapped recursively; the walk is
-// depth-bounded and stops at the first hit.
+// depth-bounded and collects metadata below an identified queue envelope.
 func parseQueueSignal(body string) queueSignal {
 	var sig queueSignal
-	walkQueueBody(strings.TrimSpace(body), &sig, 0)
+	walkQueueBody(strings.TrimSpace(body), &sig, 0, false)
 	if sig.detected {
 		if sig.retryAfter <= 0 {
 			sig.retryAfter = queueWaitDefault
@@ -101,8 +102,9 @@ func parseQueueSignal(body string) queueSignal {
 // pathological nesting. Layers do not short-circuit on the first hit: the
 // observed envelope splits the identification (code 10605 on L2) from the
 // payload (retryAfterSeconds/modelKey on L3), so every layer gets to
-// contribute what it carries.
-func walkQueueBody(s string, sig *queueSignal, depth int) {
+// contribute what it carries. inQueue applies only to descendants of an
+// identified envelope, so an unrelated sibling cannot overwrite its metadata.
+func walkQueueBody(s string, sig *queueSignal, depth int, inQueue bool) {
 	if depth > 4 {
 		return
 	}
@@ -124,6 +126,12 @@ func walkQueueBody(s string, sig *queueSignal, depth int) {
 	}
 	if codeScalarString(obj.Code) == queueCode || strings.EqualFold(strings.TrimSpace(obj.SubCode), queueSubCode) {
 		sig.detected = true
+		inQueue = true
+	}
+	if inQueue {
+		if v := strings.TrimSpace(obj.SubCode); v != "" {
+			sig.subCode = v
+		}
 		switch {
 		case obj.RetryAfterSeconds > 0:
 			sig.retryAfter = time.Duration(obj.RetryAfterSeconds * float64(time.Second))
@@ -140,10 +148,10 @@ func walkQueueBody(s string, sig *queueSignal, depth int) {
 	// The ticket may be one level deeper (L2 hits on code, L3 carries
 	// retryAfterSeconds) — keep walking the JSON-string carriers.
 	if nested := jsonObjectString(obj.Message); nested != "" {
-		walkQueueBody(nested, sig, depth+1)
+		walkQueueBody(nested, sig, depth+1, inQueue)
 	}
 	if nested := jsonObjectString(obj.Details); nested != "" {
-		walkQueueBody(nested, sig, depth+1)
+		walkQueueBody(nested, sig, depth+1, inQueue)
 	}
 }
 
@@ -183,20 +191,23 @@ func jsonObjectString(raw json.RawMessage) string {
 	return ""
 }
 
-// queueLimitLine renders the queue rejection as one actionable line, in the
-// same spirit as planGateLine: the failure is a capacity ticket, not account
-// trouble, and the client's cheapest moves are to wait or to switch models.
+// queueLimitLine preserves the upstream sub-code without assuming every 10605
+// rejection is model-capacity trouble unrelated to the account.
 // The queue_limit prefix is load-bearing — recordUpstreamFailure's classifier
 // keys on it to apply the short (auth, model) cooldown.
 func queueLimitLine(sig queueSignal) string {
-	line := queueMarker + ": code=" + queueCode + " subCode=" + queueSubCode + " 上游资源排队中（容量限制，与账号无关）"
+	line := queueMarker + ": code=" + queueCode
+	if sig.subCode != "" {
+		line += " subCode=" + sig.subCode
+	}
+	line += " 上游排队或受限"
 	if sig.modelKey != "" {
 		line += "，model=" + sig.modelKey
 	}
 	if sig.queueType != "" {
 		line += "，队列=" + sig.queueType
 	}
-	line += " — 稍后重试或换模型；上游整体饱和时各模型都会排队，可换时段再试"
+	line += " — 按上游建议等待后重试，或改用其他模型"
 	return line
 }
 
