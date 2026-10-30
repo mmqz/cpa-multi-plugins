@@ -83,6 +83,15 @@ const (
 	// inside one host request. The host rotates credentials when an execution
 	// fails, and each rotation would otherwise pay for its own ladder.
 	queueFastLadderWindow = 12 * time.Second
+	// queueFastLadderMaxEntries bounds the claim table the way
+	// modelCooldownMaxEntries bounds the cooldown table: a hostile or
+	// buggy upstream minting unique modelKeys cannot grow it without
+	// limit. Entries live for one window, so a full table prunes its
+	// expired windows first; a table still full of live windows drops
+	// the new claim — the ladder is an optimization, never a correctness
+	// requirement, and the ticket still fails fast with its actionable
+	// text.
+	queueFastLadderMaxEntries = 64
 	// queueWaitDefault is used when the ticket carries no usable interval.
 	queueWaitDefault = 30 * time.Second
 	// queueWaitCap clamps a hostile/large retryAfterSeconds per round.
@@ -225,9 +234,17 @@ func codeScalarString(raw json.RawMessage) string {
 
 // codeScalarInt renders a numeric metadata field as an int, accepting both the
 // number shape (0) and the quoted-string shape ("0") the gateway mixes into
-// these envelopes. ok=false means the field was absent or not numeric.
+// these envelopes. ok=false means the field was absent, null, or not
+// numeric.
 func codeScalarInt(raw json.RawMessage) (int, bool) {
-	if len(raw) == 0 {
+	// v0.8.72: a JSON null must read as "not reported", not as a numeric
+	// zero. json.Unmarshal of null into a float64 is a documented no-op
+	// with a nil error, so without this guard a `"queueCount": null`
+	// ticket parsed as (0, seen) — head of the queue — and rode the
+	// 700ms ladder instead of the 30s wait the ticket asked for
+	// (probe-confirmed on the 0.8.71 head).
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
 		return 0, false
 	}
 	var f float64
@@ -355,6 +372,19 @@ func queueFastLadderClaim(modelKey string, now time.Time) bool {
 	defer queueFastLadderMu.Unlock()
 	if last, ok := queueFastLadderAt[key]; ok && now.Sub(last) < queueFastLadderWindow {
 		return false
+	}
+	// v0.8.72: bound the table before inserting. Expired windows are
+	// dead weight and go first; only a table full of *live* windows
+	// refuses the claim.
+	if len(queueFastLadderAt) >= queueFastLadderMaxEntries {
+		for k, at := range queueFastLadderAt {
+			if now.Sub(at) >= queueFastLadderWindow {
+				delete(queueFastLadderAt, k)
+			}
+		}
+		if len(queueFastLadderAt) >= queueFastLadderMaxEntries {
+			return false
+		}
 	}
 	queueFastLadderAt[key] = now
 	return true

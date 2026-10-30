@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.8.72
+
+### A null queueCount no longer reads as "nobody ahead" (review follow-up on 0.8.71)
+
+Probe-confirmed on the 0.8.71 head: `json.Unmarshal` of a JSON `null` into a
+float64 is a documented no-op with a nil error, so `"queueCount": null` parsed
+as `(0, seen)` — head of the queue — and a ticket that asked for a real 30s
+wait would have ridden the 700ms ladder instead of honouring it. Null now means
+the same as a missing or unparseable depth: not reported, and the ticket's own
+interval stands.
+
+- `queue_retry.go`: `codeScalarInt` treats a blank or `null` raw value as
+  not-seen before any unmarshal.
+- The per-model ladder-claim table is bounded (`queueFastLadderMaxEntries`,
+  64), matching the cooldown table's posture against an upstream minting
+  unique modelKeys: expired windows are pruned first, and a table still full
+  of live windows drops the new claim — the ladder is an optimization, never
+  a correctness requirement.
+- README version table: the 0.8.71 row was never added (the CI README
+  lockstep guard went red right after the #67 merge, as it once did for zcode
+  0.2.2); the table is back in lockstep at 0.8.72.
+- Tests: the null-depth regression sits beside the `"many"` case, and the
+  claim table's prune / live-full behaviour is pinned.
+
+
 ## 0.8.71
 
 ### A ticket that says "nobody ahead" stops costing 90 seconds (field report 2026-10-29)

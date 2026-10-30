@@ -117,6 +117,25 @@ func TestParseQueueSignalMalformedDepthIsNotHeadOfQueue(t *testing.T) {
 	}
 }
 
+func TestParseQueueSignalNullDepthIsNotHeadOfQueue(t *testing.T) {
+	// v0.8.72 regression: json.Unmarshal of a JSON null into a float64 is a
+	// documented no-op with a nil error, so "queueCount": null parsed as
+	// (0, seen) — head of the queue — and a ticket asking for a real 30s wait
+	// rode the 700ms ladder instead (probe-confirmed on the 0.8.71 head).
+	body := `{"code":"10605","subCode":"RESOURCE_LIMIT","message":` +
+		strconv.Quote(`{"isQueued":true,"modelKey":"dfmodel","queueCount":null,"retryAfterSeconds":30,"waitTime":30}`) + `}`
+	sig := parseQueueSignal(body)
+	if !sig.detected || sig.depthSeen || sig.emptyQueue {
+		t.Fatalf("a null depth must read as not-seen: %+v", sig)
+	}
+	if sig.retryAfter != 30*time.Second {
+		t.Fatalf("the ticket's interval must stand, got %v", sig.retryAfter)
+	}
+	if isHeadOfQueueFailure(queueLimitLine(sig)) {
+		t.Fatalf("no queue_head marker without a reported depth: %q", queueLimitLine(sig))
+	}
+}
+
 // --- retry policy -----------------------------------------------------------
 
 func TestQueueRetryContinueRunsLadderOncePerWindow(t *testing.T) {
@@ -271,5 +290,43 @@ func TestPumpHeadOfQueueTicketInBandFrameRetriesFast(t *testing.T) {
 	}
 	if len(*waits) != 1 || (*waits)[0] != queueFastRetryBackoff {
 		t.Fatalf("the in-band empty-queue ticket must retry on the fast ladder, waits=%v", *waits)
+	}
+}
+
+func TestQueueFastLadderClaimBoundsItsTable(t *testing.T) {
+	resetQueueFastLadderWindows()
+	now := time.Now()
+
+	// A table full of expired windows is dead weight: the claim prunes and
+	// lands.
+	queueFastLadderMu.Lock()
+	for i := 0; i < queueFastLadderMaxEntries; i++ {
+		queueFastLadderAt["stale-"+strconv.Itoa(i)] = now.Add(-queueFastLadderWindow - time.Second)
+	}
+	queueFastLadderMu.Unlock()
+	if !queueFastLadderClaim("fresh-model", now) {
+		t.Fatal("a table of expired windows must prune and admit the claim")
+	}
+	queueFastLadderMu.Lock()
+	left := len(queueFastLadderAt)
+	queueFastLadderMu.Unlock()
+	if left != 1 {
+		t.Fatalf("prune must drop every expired window (want 1 entry, the fresh claim), got %d", left)
+	}
+
+	// A table full of live windows does not grow past its bound: the new
+	// claim is dropped and the ladder is skipped — the ticket still fails
+	// fast with its actionable text.
+	queueFastLadderMu.Lock()
+	queueFastLadderAt = map[string]time.Time{}
+	for i := 0; i < queueFastLadderMaxEntries; i++ {
+		queueFastLadderAt["live-"+strconv.Itoa(i)] = now
+	}
+	queueFastLadderMu.Unlock()
+	if queueFastLadderClaim("fresh-model-2", now) {
+		t.Fatal("a table full of live windows must not grow past its bound")
+	}
+	if queueFastLadderClaim("live-0", now) {
+		t.Fatal("an existing live window must keep refusing its owner")
 	}
 }
