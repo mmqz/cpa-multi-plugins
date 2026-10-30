@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.73
+
+### The auth.parse response carries the operator fields (issue #68)
+
+Same fix as workbuddy 0.9.82: after #25 the file kept proxy_url, but the
+host's in-memory record (panel display + per-auth outbound proxy) is rebuilt
+from the auth.parse response, and the host's loader paths do not re-read the
+operator fields from the file. `applyHostOwnedAuthFields` (new,
+`host_owned_fields.go`) re-injects the #25 whitelist into the AuthData —
+proxy_url/prefix ride the dedicated fields, all keys ride Metadata so the
+host's persist path writes them back. Unit + end-to-end handleParseAuth
+tests pin the behaviour.
+
+
 ## 0.8.72
 
 ### A null queueCount no longer reads as "nobody ahead" (review follow-up on 0.8.71)

@@ -139,7 +139,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.81"
+var version = "0.12.82"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -869,24 +869,40 @@ func handleParseAuth(request []byte) ([]byte, error) {
 	if a.Variant != "intl" && accountPool != nil {
 		accountPool.Add(a)
 	}
+	ad := pluginapi.AuthData{
+		// v0.12.8: leave ID empty — the host derives the record ID from
+		// the file path, matching the import/login upsert key. Returning
+		// the uid here made import and watcher registrations diverge
+		// (duplicate records; deleting the file left a ghost that
+		// re-materialized on next use).
+		Provider: providerName,
+		ID:       "",
+		FileName: nonEmpty(req.FileName, authFileName),
+		Label:    nonEmpty(a.Nickname, variantLabel(a.Variant)+" "+a.UID),
+		// Return the DECODED storage object — returning the raw base64
+		// string made the host persist an undecodable auth and broke
+		// model.for_auth / executor dispatch downstream.
+		StorageJSON: payload,
+		Metadata:    map[string]any{"type": providerName, "uid": a.UID, "note": authNote(a.Variant)},
+	}
+	// v0.12.82 (issue #68): re-inject the host-owned operator fields
+	// (proxy_url/prefix/...) into the AuthData — the host's loader does not
+	// re-read them from the file, so without this the panel proxy resets to
+	// "none" after every restart and the per-auth proxy stops applying.
+	// The physical document is req.RawJSON — a []byte field on the wire, so
+	// it arrives base64-encoded as a JSON string; decode first (payload is
+	// the decoded storage object, which does not carry the operator keys).
+	hostDoc := req.RawJSON
+	if len(hostDoc) > 0 && hostDoc[0] == '"' {
+		var decoded []byte
+		if json.Unmarshal(hostDoc, &decoded) == nil && len(decoded) > 0 {
+			hostDoc = decoded
+		}
+	}
+	applyHostOwnedAuthFields(&ad, hostDoc)
 	return okEnvelope(pluginapi.AuthParseResponse{
 		Handled: true,
-		Auth: pluginapi.AuthData{
-			// v0.12.8: leave ID empty — the host derives the record ID from
-			// the file path, matching the import/login upsert key. Returning
-			// the uid here made import and watcher registrations diverge
-			// (duplicate records; deleting the file left a ghost that
-			// re-materialized on next use).
-			Provider: providerName,
-			ID:       "",
-			FileName: nonEmpty(req.FileName, authFileName),
-			Label:    nonEmpty(a.Nickname, variantLabel(a.Variant)+" "+a.UID),
-			// Return the DECODED storage object — returning the raw base64
-			// string made the host persist an undecodable auth and broke
-			// model.for_auth / executor dispatch downstream.
-			StorageJSON: payload,
-			Metadata:    map[string]any{"type": providerName, "uid": a.UID, "note": authNote(a.Variant)},
-		},
+		Auth:    ad,
 	})
 }
 

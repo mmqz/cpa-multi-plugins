@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.82
+
+### The auth.parse response carries the operator fields (issue #68)
+
+Same fix as workbuddy 0.9.82: the host rebuilds its in-memory Auth record
+from the auth.parse response and does not re-read proxy_url / prefix /
+priority from the file, so the panel proxy reset to "none" after restarts
+and after plugin-side rewrites. `applyHostOwnedAuthFields` (new,
+`host_owned_fields.go`) re-injects the #25 whitelist into the AuthData; the
+physical document arrives base64-encoded on the wire and is decoded first
+(the decoded storage payload does not carry the operator keys). Unit +
+end-to-end handleParseAuth tests pin the behaviour.
+
+
 ## 0.12.81
 
 ### A claim that answered code:0 is never re-sent the same day (magpie trae 0.2.22 discipline)

@@ -358,6 +358,11 @@ func handleParseAuth(raw []byte) ([]byte, error) {
 	// CPA falls back to authIDForPath(path) which derives ID from the file
 	// path and always matches the watcher's key (prevents duplicate records).
 	ad := toAuthData(sa, parseDisabledFromAuthJSON(req.RawJSON))
+	// v0.2.18 (issue #68): re-inject the host-owned operator fields
+	// (proxy_url/prefix/...) into the AuthData — the host's loader does not
+	// re-read them from the file, so without this the panel proxy resets to
+	// "none" after every restart and the per-auth proxy stops applying.
+	applyHostOwnedAuthFields(&ad, req.RawJSON)
 	// v0.2.11: surface the on-disk note (the usage loop's quota line) so a
 	// freshly parsed credential renders it in the manager list immediately.
 	if nb := noteFromAuthJSON(req.RawJSON); nb != "" {

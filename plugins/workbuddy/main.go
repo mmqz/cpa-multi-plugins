@@ -351,7 +351,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.81"
+var version = "0.9.82"
 
 func wbRegistration() registration {
 	return registration{
@@ -827,6 +827,11 @@ func handleParseAuth(raw []byte) ([]byte, error) {
 	// note with "积分未知" in the management API even though the file on disk
 	// still carries live numbers.
 	ad := toAuthDataOptsWithNote(sa, nil, false, noteCreditsFromJSON(req.RawJSON))
+	// v0.9.82 (issue #68): re-inject the host-owned operator fields
+	// (proxy_url/prefix/...) into the AuthData — the host's loader does not
+	// re-read them from the file, so without this the panel proxy resets to
+	// "none" after every restart and the per-auth proxy stops applying.
+	applyHostOwnedAuthFields(&ad, req.RawJSON)
 	ad.ID = "" // let host compute from path (prevents ID mismatch dupes)
 	if fn := strings.TrimSpace(req.FileName); fn != "" {
 		ad.FileName = fn

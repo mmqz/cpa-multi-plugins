@@ -336,7 +336,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.2.7"
+var version = "0.2.8"
 
 // coding-plane LLM upstream bases (see the consts block for why these are
 // vars: the e2e fallback tests repoint them at httptest servers).
@@ -523,6 +523,11 @@ func handleParseAuth(raw []byte) ([]byte, error) {
 	// Preserve the credit segment already stored in the file so a reload
 	// never regresses a live "余N 已用N" note to the placeholder.
 	ad := toAuthDataOptsWithNote(sa, nil, false, noteCreditsFromJSON(req.RawJSON))
+	// v0.2.8 (issue #68): re-inject the host-owned operator fields
+	// (proxy_url/prefix/...) into the AuthData — the host's loader does not
+	// re-read them from the file, so without this the panel proxy resets to
+	// "none" after every restart and the per-auth proxy stops applying.
+	applyHostOwnedAuthFields(&ad, req.RawJSON)
 	ad.ID = ""
 	if fn := strings.TrimSpace(req.FileName); fn != "" {
 		ad.FileName = fn

@@ -401,7 +401,7 @@ func mimoRegistration() registration {
 // must stay in lockstep with the VERSION file — the same drift class that
 // shipped trae v0.12.86 self-reporting 0.12.56 (repo lesson 2026-09-23).
 // `make build` may still override it via -X (git describe).
-var version = "0.2.17"
+var version = "0.2.18"
 
 // -----------------------------------------------------------------------------
 // Envelope helpers

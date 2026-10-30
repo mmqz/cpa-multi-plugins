@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.8
+
+### The auth.parse response carries the operator fields (issue #68)
+
+Same fix as workbuddy 0.9.82: the host rebuilds its in-memory Auth record
+from the auth.parse response and does not re-read proxy_url / prefix /
+priority from the file, so the panel proxy reset to "none" after restarts
+and after plugin-side rewrites. `applyHostOwnedAuthFields` (new,
+`host_owned_fields.go`) re-injects the #25 whitelist into the AuthData —
+proxy_url/prefix ride the dedicated fields, all keys ride Metadata so the
+host's persist path writes them back. Unit + end-to-end handleParseAuth
+tests pin the behaviour.
+
+
 ## 0.2.7
 
 ### Empty first-user messages no longer collide every conversation's session-id (review catch on 0.2.6)

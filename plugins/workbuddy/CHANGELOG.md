@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.9.82
+
+### The auth.parse response carries the operator fields (issue #68)
+
+#25 fixed the file side (the save funnel re-injects proxy_url and friends),
+but the panel proxy still reset to "none" overnight. The missing half: the
+host rebuilds its in-memory Auth record from the auth.parse response, and its
+own loader paths do not re-read proxy_url / prefix / priority from the file —
+only the management panel's update path syncs them. So every plugin-side
+rewrite (nightly keepalive / credits note) upserted a memory record with an
+empty proxy, and a restart loaded one the same way: panel shows "no proxy",
+and the per-auth outbound proxy silently stops applying even though the file
+still carries it. The host's persist path (pluginTokenStorage ->
+mergedStorageJSON) also rebuilds the file from StorageJSON + Metadata, so keys
+absent from the parse Metadata could be dropped from the file on the next
+persist.
+
+- `host_owned_fields.go` (new): `applyHostOwnedAuthFields` copies the issue
+  #25 whitelist from the physical document's top level into the AuthData —
+  `proxy_url`/`prefix` ride the dedicated AuthData fields the host applies
+  verbatim, every whitelisted key rides Metadata for the persist path.
+- `handleParseAuth` wiring: applied after the typed build, before the
+  ID/FileName echo fixups.
+- Tests: unit matrix (whitelist copy, number survival, absent keys stay
+  absent, malformed payload untouched) plus an end-to-end handleParseAuth
+  case asserting ProxyURL / Prefix / Metadata["priority"] on the response.
+
+
 ## 0.9.81
 
 ### The fourth 11-128 family member: the DSH file-reference segment (field report 2026-10-28, persistent after 0.9.79)
