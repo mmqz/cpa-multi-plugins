@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.8.71
+
+### A ticket that says "nobody ahead" stops costing 90 seconds (field report 2026-10-29)
+
+A CN deployment reported that every chat on the `dfmodel`/`qfmodel` lane failed
+after 21-31 seconds while a sibling model on the same credential answered in
+about a second. The tickets were all the same shape, and the shape is the bug:
+
+```json
+{"isQueued":true,"modelKey":"dfmodel","queueCount":0,"queueType":"p3",
+ "retryAfterSeconds":30,"serviceAvailable":false,
+ "subCode":"RESOURCE_LIMIT","waitTime":30}
+```
+
+`queueCount: 0` says nobody is ahead of this request, yet the ticket still asks
+for 30 seconds. v0.8.64 took the estimate at face value, so one chat call slept
+30s three times (~90s, exactly what `queueMaxAttempts` documents), and because
+the host rotates credentials when an execution fails, **each** rotation paid
+that ladder again. Measured on that deployment: a single client request took
+21-31s to fail, and the failures were instant at the CPA layer (12-26ms once the
+ladder was gated off). A direct gateway probe (bypassing CPA) showed the third
+consecutive ticket from one credential answered `200` with a full stream — the
+30s estimate is boilerplate, not a real wait.
+
+- `queue_retry.go`: `queueSignal` now carries the reported depth
+  (`queueCount` + a `depthSeen` flag, accepting both the number and the quoted
+  string shape) and marks a `queueCount == 0` ticket as `emptyQueue`.
+  `parseQueueSignal` keeps the v0.8.64 default/cap logic and then, for an
+  empty-queue ticket only, replaces the interval with `queueFastRetryBackoff`
+  (700ms). A ticket with a real depth is untouched — its interval still stands.
+- `queueRetryContinue` replaces the bare `queueRetryAllowed` check at all six
+  executor call sites (async pump HTTP/frame layers, synchronous collector
+  HTTP/frame layers, non-stream HTTP/frame layers). It keeps the existing
+  attempt count and `queue_wait_budget` bounds — `queue_wait_budget = 0` still
+  disables queue retries outright — and adds, for empty-queue tickets, the
+  `queueFastAttempts` (4) ceiling plus a per-model `queueFastLadderWindow`
+  (12s) claim. Only the credential that claims the window runs the ladder; the
+  siblings the host rotates through fail fast with the same actionable text.
+- `queueLimitLine` stamps a new `queue_head` marker beside `queue_limit` for
+  those tickets, and the terminal note describes what actually happened
+  (`票据自报队列已空，已快速重试N次共X.Xs仍未放行`) instead of reporting a
+  30-second wait the plugin never performed.
+- `cooldown.go`: `queue_head` lands on the new `cooldownReasonHeadOfQueue`
+  (10s, one ladder window). The generic queue ticket — a real depth the plugin
+  waited on — keeps the 60s one-ticket cadence, and every other classifier
+  (plan gate, soft rate limit, empty stream) is unchanged.
+
+Measured on the reporting deployment after the change: a failing client request
+returns in ~4.9s (was 21-31s), the repeat inside the window returns in 12ms, and
+`qwen3.8-flash` / `qwen3.8-max` answer normally in 1.0-4.4s.
+
+- Tests (`queue_head_of_queue_test.go`): the 2026-10-29 ticket parses as
+  empty-queue with the 700ms ladder and renders both markers; a quoted `"0"`
+  depth reads the same; a ticket with 12 requests ahead keeps its own interval
+  and stays out of the head-of-queue classifier; an unparseable depth is not
+  mistaken for an empty queue; the ladder runs once per window and stops at its
+  ceiling while a later request may claim again; a `queue_wait_budget` of 0
+  disables it; the terminal note and the cooldown cadences are pinned for both
+  ticket kinds; and two pump tests (HTTP layer + in-band first frame) assert the
+  recorded waits are 700ms, not 30s. All pre-existing queue tests pass
+  unchanged.
+
 ## 0.8.70
 
 ### CALL_COUNT_LIMIT queue metadata survives the nested envelope (PR #65, sabercomo)

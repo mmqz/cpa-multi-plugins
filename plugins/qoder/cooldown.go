@@ -35,6 +35,12 @@ const (
 	// failures because the upstream explicitly asked us to slow down.
 	modelCooldownRateLimit = 300 * time.Second
 	modelCooldownUnknown   = 60 * time.Second
+	// modelCooldownHeadOfQueue benches a pair whose queue ticket reported an
+	// empty queue (queueCount == 0). The plugin already spent the ticket's
+	// interval on the fast ladder, so holding the pair for a full minute would
+	// drop a credential the next request would have used successfully; one
+	// ladder window is enough to stop the immediate re-pick.
+	modelCooldownHeadOfQueue = 10 * time.Second
 
 	// modelCooldownMaxEntries bounds the table so a hostile or buggy upstream
 	// cannot grow it without limit.
@@ -44,8 +50,9 @@ const (
 type cooldownReason string
 
 const (
-	cooldownReasonRateLimit cooldownReason = "rate_limit"
-	cooldownReasonUnknown   cooldownReason = "upstream_error"
+	cooldownReasonRateLimit   cooldownReason = "rate_limit"
+	cooldownReasonUnknown     cooldownReason = "upstream_error"
+	cooldownReasonHeadOfQueue cooldownReason = "queue_head"
 )
 
 type modelCooldownKey struct {
@@ -132,8 +139,11 @@ func markModelCooldown(authID, model string, reason cooldownReason) {
 		return
 	}
 	ttl := modelCooldownUnknown
-	if reason == cooldownReasonRateLimit {
+	switch reason {
+	case cooldownReasonRateLimit:
 		ttl = modelCooldownRateLimit
+	case cooldownReasonHeadOfQueue:
+		ttl = modelCooldownHeadOfQueue
 	}
 	now := cooldownNowFn()
 	cooldownMu.Lock()
@@ -324,6 +334,10 @@ func recordUpstreamFailure(authID, model string, status int, body string) {
 	// same queue. Account-wide cooling would be wrong: other models on the
 	// same credential are unaffected by a per-model queue.
 	if isQueueLimitFailure(body) {
+		if isHeadOfQueueFailure(body) {
+			markModelCooldown(authID, model, cooldownReasonHeadOfQueue)
+			return
+		}
 		markModelCooldown(authID, model, cooldownReasonUnknown)
 		return
 	}
@@ -359,6 +373,14 @@ func isPlanGateFailure(body string) bool {
 // every terminal rendering of a queue ticket lands here.
 func isQueueLimitFailure(body string) bool {
 	return strings.Contains(body, queueMarker)
+}
+
+// isHeadOfQueueFailure reports a queue ticket whose own metadata said nobody
+// was ahead of this request (queueCount == 0). The "queue_head" marker is
+// stamped by queueLimitLine for exactly those tickets; the fast ladder already
+// paid their interval, so the pair cools for one window instead of a minute.
+func isHeadOfQueueFailure(body string) bool {
+	return strings.Contains(body, queueHeadMarker)
 }
 
 // handleCooldownList reports every active pair, or one account's pairs when

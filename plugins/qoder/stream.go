@@ -420,7 +420,7 @@ func pumpUpstreamStream(httpReq *http.Request, rebuild func() (*http.Request, er
 				// not a failure — nothing has been delivered yet by construction.
 				if sig := parseQueueSignal(string(errPayload)); sig.detected {
 					sig.status = statusCode
-					if queueRetryAllowed(attempt, waited, sig.retryAfter) {
+					if queueRetryContinue(attempt, waited, sig) {
 						return sig, true
 					}
 					reportQueueExhausted(sig)
@@ -460,7 +460,7 @@ func pumpUpstreamStream(httpReq *http.Request, rebuild func() (*http.Request, er
 					// too — an emit-less first frame leaves it false.
 					var fe *qoderFrameError
 					if errors.As(frameErr, &fe) && fe.queued != nil && !seenPayload {
-						if queueRetryAllowed(attempt, waited, fe.queued.retryAfter) {
+						if queueRetryContinue(attempt, waited, *fe.queued) {
 							return *fe.queued, true
 						}
 						reportQueueExhausted(*fe.queued)
@@ -626,7 +626,7 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 			payload, _ := io.ReadAll(newHostStreamReader(stream))
 			stream.Close()
 			sig := parseQueueSignal(string(payload))
-			if sig.detected && queueRetryAllowed(attempt, waited, sig.retryAfter) {
+			if queueRetryContinue(attempt, waited, sig) {
 				queueWaitFn(nil, queueWaitFor(sig.retryAfter))
 				waited += queueWaitFor(sig.retryAfter)
 				attempt++
@@ -636,7 +636,7 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 			// cooldown layer stops re-picking a drained credential.
 			errOut := chatUpstreamError(statusCode, string(payload))
 			if sig.detected && attempt > 0 {
-				errOut = fmt.Errorf("%w（已自动重试%d次共%.0fs仍排队）", errOut, attempt, waited.Seconds())
+				errOut = fmt.Errorf("%w%s", errOut, queueExhaustedNote(attempt, waited, sig))
 			}
 			return nil, statusCode, upstreamStatusError(statusCode, errOut)
 		}
@@ -681,7 +681,7 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 		stream.Close()
 		if frameTerminal != nil {
 			var fe *qoderFrameError
-			if errors.As(frameTerminal, &fe) && fe.queued != nil && queueRetryAllowed(attempt, waited, fe.queued.retryAfter) {
+			if errors.As(frameTerminal, &fe) && fe.queued != nil && queueRetryContinue(attempt, waited, *fe.queued) {
 				queueWaitFn(nil, queueWaitFor(fe.queued.retryAfter))
 				waited += queueWaitFor(fe.queued.retryAfter)
 				attempt++
@@ -690,7 +690,7 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 			if attempt > 0 {
 				var fe *qoderFrameError
 				if errors.As(frameTerminal, &fe) && fe.queued != nil {
-					return chunks, 0, fmt.Errorf("%w（已自动重试%d次共%.0fs仍排队）", frameTerminal, attempt, waited.Seconds())
+					return chunks, 0, fmt.Errorf("%w%s", frameTerminal, queueExhaustedNote(attempt, waited, *fe.queued))
 				}
 			}
 			return chunks, 0, frameTerminal

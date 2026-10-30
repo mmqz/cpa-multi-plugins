@@ -356,7 +356,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.8.70"
+var version = "0.8.71"
 
 // providerName is a VAR (split flavor, issue #29): the unified build keeps
 // the default "qoder"; the split-channel builds rename it via
@@ -809,7 +809,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 			payload, _ := io.ReadAll(newHostStreamReader(stream))
 			stream.Close()
 			sig := parseQueueSignal(string(payload))
-			if sig.detected && queueRetryAllowed(attempt, queueWaited, sig.retryAfter) {
+			if queueRetryContinue(attempt, queueWaited, sig) {
 				queueWaitFn(nil, queueWaitFor(sig.retryAfter))
 				queueWaited += queueWaitFor(sig.retryAfter)
 				continue
@@ -821,7 +821,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 				// classifiers — it carries the queue_limit marker
 				// recordUpstreamFailure keys on, plus the retry history.
 				if attempt > 0 {
-					errOut = fmt.Errorf("%w（已自动重试%d次共%.0fs仍排队）", errOut, attempt, queueWaited.Seconds())
+					errOut = fmt.Errorf("%w%s", errOut, queueExhaustedNote(attempt, queueWaited, sig))
 				}
 				recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, errOut.Error())
 			} else {
@@ -836,7 +836,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		stream.Close()
 		if err != nil {
 			var fe *qoderFrameError
-			if errors.As(err, &fe) && fe.queued != nil && queueRetryAllowed(attempt, queueWaited, fe.queued.retryAfter) {
+			if errors.As(err, &fe) && fe.queued != nil && queueRetryContinue(attempt, queueWaited, *fe.queued) {
 				queueWaitFn(nil, queueWaitFor(fe.queued.retryAfter))
 				queueWaited += queueWaitFor(fe.queued.retryAfter)
 				continue
@@ -844,7 +844,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 			if attempt > 0 {
 				var fe *qoderFrameError
 				if errors.As(err, &fe) && fe.queued != nil {
-					err = fmt.Errorf("%w（已自动重试%d次共%.0fs仍排队）", err, attempt, queueWaited.Seconds())
+					err = fmt.Errorf("%w%s", err, queueExhaustedNote(attempt, queueWaited, *fe.queued))
 				}
 			}
 			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
