@@ -7,7 +7,7 @@ Provider plugins for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
 | workbuddy | 0.9.82 |
 | trae | 0.12.82 |
 | qoder | 0.8.73 |
-| zcode | 0.2.8 |
+| zcode | 0.2.9 |
 | mimo | 0.2.18 |
 
 Tagged commits are built by CI; per-platform artifacts are attached to each [release](../../releases). Release notices are also posted to the [Telegram channel](https://t.me/+hI7SCfhLF-YwMDUx).

@@ -306,11 +306,13 @@ async function loadPreview(){
   const data=await api('/preview');
   if(data.error){box.innerHTML='<div class="card err">'+escHtml(data.error)+'</div>';return}
   const plans=data.plans||[];
+  const errs=data.errors||[];
+  const errHtml=errs.length?'<div class="card err">'+errs.map(function(e){return escHtml((e.account||'')+'：'+(e.error||''))}).join('<br>')+'</div>':'';
   if(!plans.length){
-    box.innerHTML='<div class="card"><h2>当前没有可领取的活动</h2><div class="sub">活动由服务端按账号与时段下发；已领取过的活动不会再出现在列表里。邀请制/定向活动（如 1024 Dev Day 邀请礼包）由官网通道下发，不经过本列表——在官网领取后，对应额度池会直接出现在上方的余量区。</div></div>';
+    box.innerHTML='<div class="card"><h2>当前没有可领取的活动</h2><div class="sub">活动由服务端按账号与时段下发；已领取过的活动不会再出现在列表里。部分活动仅通过 App 横幅（marketing feed）下发、不出现在 billing/preview 列表——本页会同时读取两处；某个列表读取失败时会在这里列出原因（读取失败≠没有活动）。邀请制/定向活动（如 1024 Dev Day 邀请礼包）由官网通道下发，不经过本列表——在官网领取后，对应额度池会直接出现在上方的余量区。</div></div>'+errHtml;
     return;
   }
-  let html='<div class="card"><h2>可领取活动（'+plans.length+'）</h2><div class="khint">点击「领取」弹出阿里云验证码：低风险环境无感通过（等于一键领取），否则拖动滑块完成人机验证，通过后插件立即向上游提交领取。领取账号为当前选中的路由账号；成功后余量区会出现对应额度池。</div></div><div class="grid">';
+  let html='<div class="card"><h2>可领取活动（'+plans.length+'）</h2><div class="khint">点击「领取」弹出阿里云验证码：低风险环境无感通过（等于一键领取），否则拖动滑块完成人机验证，通过后插件立即向上游提交领取。领取账号为当前选中的路由账号；成功后余量区会出现对应额度池。</div></div>'+errHtml+'<div class="grid">';
   plans.forEach(function(p){
     const ents=(p.entitlements||[]).map(function(e){
       let s=escHtml(e.name||'权益');
@@ -320,6 +322,7 @@ async function loadPreview(){
     const win=(p.starts_at||p.ends_at)?'<div class="sub">'+(p.starts_at?fmtUnix(p.starts_at):'')+(p.ends_at?' ~ '+fmtUnix(p.ends_at):'')+'</div>':'';
     html+='<div class="card"><h2>'+escHtml(p.name||p.plan_id)
       +' <span><span class="badge plan">可领取</span>'
+      +(p.source==='banner'?' <span class="badge">横幅活动</span>':'')
       +(p.accounts>1?' <span class="badge">'+p.accounts+' 账号可见</span>':'')
       +'</span></h2>'
       +(p.description?'<div class="sub">'+escHtml(p.description)+'</div>':'')

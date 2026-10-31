@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.2.9
+
+### Banner gift plans are claimed from the app's marketing feed (issue #69)
+
+A ZCode claim banner's plan (the 10-30 "ZCODE WEEKEND BUILD",
+zcode-v3-start-plan-1030-wk, 500M GLM-5.3-Flash tokens) is in neither
+billing/preview nor billing/current while the app shows the banner — so the
+panel answered plans:[] and the auto-claim scheduler found no target (issue
+#69's report; magpie zcode 0.1.39 / #503, kongbai01203's capture). The app
+reads the banner from GET /api/v1/marketing/touch?seq=<n>; each delivery's
+banner button with action type claim_zcode_plan carries the plan_id, and the
+claim is the same POST billing/claim.
+
+- touch.go: the feed fetch (seq counts up from 0 per process; the session +
+  X-Device-Mid + X-ZCode-App-Version + X-Client-Language) and a depth-capped
+  walk that finds claim actions and zcode_plan metas wherever the banner
+  keeps them, mapping grant_units into a bare entitlement.
+- preview.go: claimableSet merges the two lists per plan_id (feed first, so
+  its metadata wins; source=banner badges the panel card). A list that
+  doesn't read is unread — unknown, never none: an account with no plans and
+  an unread list reports the unread as its error, and the panel now renders
+  the per-account errors it never showed.
+- claim_scheduler.go: one tick claims every discovered plan (claim_plan_id
+  still narrows it to one), ordered by priority; foldClaimOutcomes folds the
+  outcomes (the most-urgent decides hold/badge, the message names
+  everything) and an unread list caps the hold at one hour so the account
+  comes back and looks again.
+- panel.html: 横幅活动 badge, per-account error rendering, and the empty
+  state explains the two lists.
+
 ## 0.2.8
 
 ### The auth.parse response carries the operator fields (issue #68)

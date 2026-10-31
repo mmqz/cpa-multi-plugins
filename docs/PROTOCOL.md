@@ -379,6 +379,19 @@ plan JWT **无 exp 永不刷新**（8 天旧 JWT 仍可查账务），仅网关 
   2026-09-26 实测：实例未绑定域名（127.0.0.1 源 config/pe.089/feilin029/
   upload/no8xfe-verify/cloudauth-device 全 200）→ 用户浏览器可直接铸造凭据，
   原「仅官方客户端可生成」结论作废；biz 3007 = 参数被拒换新码重试
+- 礼包活动双列表发现（0.2.9 起，issue #69 / magpie zcode 0.1.39 #503，
+  kongbai01203 10-30 抓包）：部分 ZCode 横幅活动（10-30「ZCODE WEEKEND BUILD」，
+  zcode-v3-start-plan-1030-wk，500M GLM-5.3-Flash token）**只存在于 App 横幅
+  feed，billing/preview 与 billing/current 均不出现**——App 从
+  `GET /api/v1/marketing/touch?seq=<n>` 读横幅（seq 进程内从 0 递增；Bearer
+  会话 + X-Device-Mid + X-ZCode-App-Version + X-Client-Language），每条
+  delivery 的 banner 按钮带 `action.type=claim_zcode_plan` 与
+  `args.plan_id`，名称在 `banner.background.args.zcode_plan.name`（附
+  grant_units/period），领取走同一 `billing/claim`（抓包含 code 0 实答
+  「Plan claimed successfully.」）。插件按深度上限 12 遍历解析（容错按钮
+  位移），两列表按 plan_id 去重合并（feed 优先、source=banner 面板加徽标）；
+  列表读取失败 = 未知而非无：调度器把 hold 压到 1 小时内回查、每轮领取全部
+  发现的 plan 并折叠结果（foldClaimOutcomes），面板 errors 区列明原因
 
 ### 模型目录
 

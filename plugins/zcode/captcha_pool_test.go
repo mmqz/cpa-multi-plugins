@@ -121,23 +121,31 @@ func TestCaptchaRetryRouteAttachesPoolToken(t *testing.T) {
 	}
 }
 
-func TestPickClaimTarget(t *testing.T) {
+func TestClaimTargets(t *testing.T) {
 	plans := []previewPlan{
 		{PlanID: "p-low", Priority: 1},
 		{PlanID: "p-top", Priority: 10},
 		{PlanID: "p-mid", Priority: 5},
 	}
-	if got := pickClaimTarget(plans, ""); got == nil || got.PlanID != "p-top" {
-		t.Fatalf("highest priority not picked: %+v", got)
+	// Default: every plan, highest priority first (stable on ties).
+	got := claimTargets(plans, "")
+	if len(got) != 3 || got[0].PlanID != "p-top" || got[1].PlanID != "p-mid" || got[2].PlanID != "p-low" {
+		t.Fatalf("priority order wrong: %+v", got)
 	}
-	if got := pickClaimTarget(plans, "p-mid"); got == nil || got.PlanID != "p-mid" {
+	// Explicit plan_id narrows to that plan alone.
+	if got := claimTargets(plans, "p-mid"); len(got) != 1 || got[0].PlanID != "p-mid" {
 		t.Fatalf("explicit plan_id not honored: %+v", got)
 	}
-	if got := pickClaimTarget(plans, "p-missing"); got != nil {
+	if got := claimTargets(plans, "p-missing"); got != nil {
 		t.Fatalf("missing plan_id must yield nil: %+v", got)
 	}
-	if got := pickClaimTarget(nil, ""); got != nil {
-		t.Fatalf("empty preview list must yield nil: %+v", got)
+	if got := claimTargets(nil, ""); got != nil {
+		t.Fatalf("empty discovery set must yield nil: %+v", got)
+	}
+	// Equal priorities keep discovery order (stable sort).
+	same := []previewPlan{{PlanID: "a", Priority: 3}, {PlanID: "b", Priority: 3}}
+	if got := claimTargets(same, ""); len(got) != 2 || got[0].PlanID != "a" || got[1].PlanID != "b" {
+		t.Fatalf("ties must keep discovery order: %+v", got)
 	}
 }
 

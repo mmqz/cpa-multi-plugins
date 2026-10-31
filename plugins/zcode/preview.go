@@ -52,7 +52,16 @@ type previewPlan struct {
 	EndsAt       int64                `json:"ends_at,omitempty"`
 	Entitlements []previewEntitlement `json:"entitlements"`
 	Accounts     int                  `json:"accounts,omitempty"` // deduped view: how many accounts see it
+	Source       string               `json:"source,omitempty"`   // preview | banner (issue #69)
 }
+
+// Plan discovery sources: the billing/preview list and the marketing banner
+// feed (touch.go). The panel badges banner plans so the user can tell where
+// a plan came from.
+const (
+	previewSourcePreview = "preview"
+	previewSourceBanner  = "banner"
+)
 
 // rawPreview* mirror the upstream wire shapes (snake_case primary, camelCase
 // aliases observed live on the balance plane — accept both so neither casing
@@ -110,6 +119,7 @@ func (r rawPreviewPlan) normalize() *previewPlan {
 		Name:         strings.TrimSpace(r.Name),
 		Description:  strings.TrimSpace(r.Description),
 		Entitlements: []previewEntitlement{},
+		Source:       previewSourcePreview,
 	}
 	if r.Priority != nil && *r.Priority == *r.Priority { // finite check (NaN != NaN)
 		plan.Priority = int(*r.Priority)
@@ -204,12 +214,55 @@ func fetchClaimablePreview(sa *storedAuth) ([]previewPlan, error) {
 	return plans, nil
 }
 
+// claimableSet is one account's merged claimable discovery — the toClaim
+// port (magpie zcode 0.1.39, issue #69): the app's banner feed (touch.go)
+// first, then billing/preview, each plan_id once. Unread names a list that
+// didn't read: its plans are unknown, never none — a caller that finds no
+// plans must treat unread as "ask again later", and one that claims beside
+// an unread list stays retriable (the scheduler caps its hold, the panel
+// surfaces the warning).
+type claimableSet struct {
+	Plans  []previewPlan
+	Unread []string
+}
+
+// fetchClaimablePlans merges the two discovery lists for one account. The
+// banner feed is asked first so its plans keep first-sighting metadata
+// (source banner) when both lists name the same plan_id.
+func fetchClaimablePlans(sa *storedAuth) claimableSet {
+	var set claimableSet
+	seen := map[string]bool{}
+	add := func(p previewPlan) {
+		if p.PlanID == "" || seen[p.PlanID] {
+			return
+		}
+		seen[p.PlanID] = true
+		set.Plans = append(set.Plans, p)
+	}
+	if touch, err := fetchTouchPlans(sa); err != nil {
+		set.Unread = append(set.Unread, "banner feed: "+err.Error())
+	} else {
+		for _, p := range touch {
+			add(p)
+		}
+	}
+	if prev, err := fetchClaimablePreview(sa); err != nil {
+		set.Unread = append(set.Unread, "billing preview: "+err.Error())
+	} else {
+		for _, p := range prev {
+			add(p)
+		}
+	}
+	return set
+}
+
 // accountPreview is one account's preview outcome for the aggregator.
 type accountPreview struct {
 	Account string
 	Plans   []previewPlan
 	Err     error
-	Skipped bool // no JWT — nothing to preview
+	Unread  []string // lists that didn't read — unknown, not none (issue #69)
+	Skipped bool     // no JWT — nothing to preview
 }
 
 // mergePreviewResults dedupes per-account preview results by plan_id (the
@@ -229,6 +282,16 @@ func mergePreviewResults(results []accountPreview) ([]previewPlan, []map[string]
 		if res.Err != nil {
 			errs = append(errs, map[string]any{"account": res.Account, "error": res.Err.Error()})
 			continue
+		}
+		if len(res.Plans) == 0 && len(res.Unread) > 0 {
+			// issue #69 doctrine: a list that doesn't read is unknown, not
+			// none — an account with no plans and an unread list reports the
+			// unread as its error, never "nothing to claim".
+			errs = append(errs, map[string]any{"account": res.Account, "error": strings.Join(res.Unread, "; ")})
+			continue
+		}
+		for _, u := range res.Unread {
+			errs = append(errs, map[string]any{"account": res.Account, "error": u})
 		}
 		for _, p := range res.Plans {
 			if existing, ok := byID[p.PlanID]; ok {
@@ -274,9 +337,9 @@ func handlePreviewList() map[string]any {
 				results[i] = res
 				return
 			}
-			plans, perr := fetchClaimablePreview(sa)
-			res.Plans = plans
-			res.Err = perr
+			set := fetchClaimablePlans(sa)
+			res.Plans = set.Plans
+			res.Unread = set.Unread
 			results[i] = res
 		}(i, f)
 	}

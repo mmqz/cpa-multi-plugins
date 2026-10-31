@@ -5,8 +5,9 @@
 // Loop (default every 5 min, config claim_poll_seconds):
 //
 //	enumerate credentials with a plan JWT → skip ones on hold →
-//	GET billing/preview → pick the target plan (claim_plan_id config or the
-//	highest-priority preview) → POST billing/claim.
+//	read BOTH discovery lists — the banner feed (marketing/touch, touch.go)
+//	and billing/preview → claim every discovered plan (claim_plan_id config
+//	narrows it to that one) → POST billing/claim each → fold the outcomes.
 //
 // A claim is fully automatic when the captcha pool (captcha_pool.go) has a
 // panel-minted token, or when the campaign does not gate claims. Without a
@@ -27,6 +28,7 @@
 package main
 
 import (
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -109,25 +111,31 @@ func claimSchedulerAccount(key string) *claimAccountState {
 	return st
 }
 
-// pickClaimTarget resolves the plan to claim: an explicit claim_plan_id
-// match wins, otherwise the highest-priority preview (ties keep the first —
-// the preview list order is the server's own ranking).
-func pickClaimTarget(plans []previewPlan, wantID string) *previewPlan {
+// claimTargets resolves the plans to claim this tick (issue #69: the
+// discovery set spans the banner feed and billing/preview, so one tick may
+// hold several plans — magpie's claimDaily claims every listed plan). An
+// explicit claim_plan_id match narrows the set to that plan alone (the
+// configured single-plan mode); the default claims every plan, ordered by
+// priority descending with discovery order kept on ties (stable) — the
+// highest-priority plan is claimed first when a captcha budget matters.
+func claimTargets(plans []previewPlan, wantID string) []previewPlan {
 	if wantID != "" {
-		for i := range plans {
-			if plans[i].PlanID == wantID {
-				return &plans[i]
+		for _, p := range plans {
+			if p.PlanID == wantID {
+				return []previewPlan{p}
 			}
 		}
 		return nil
 	}
-	var best *previewPlan
-	for i := range plans {
-		if best == nil || plans[i].Priority > best.Priority {
-			best = &plans[i]
-		}
+	if len(plans) == 0 {
+		return nil
 	}
-	return best
+	out := make([]previewPlan, len(plans))
+	copy(out, plans)
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Priority > out[j].Priority
+	})
+	return out
 }
 
 // applyClaimOutcome folds one claim attempt into the account state (pure
@@ -162,6 +170,74 @@ func applyClaimOutcome(st *claimAccountState, out claimOutcome, cooldown time.Du
 	}
 }
 
+// claimSeverity ranks one outcome's hold urgency for the fold: the earliest
+// row present across a tick's outcomes decides the account's hold, so a
+// captcha beside a success still retried soon (the success then answers
+// already_claimed and costs nothing but the round trip).
+var claimSeverity = map[string]int{
+	"login_required":  0,
+	"captcha":         1,
+	"quota_exhausted": 2,
+	"already_claimed": 4,
+}
+
+func claimOutcomeSeverity(out claimOutcome) int {
+	if out.OK {
+		return 5
+	}
+	if s, ok := claimSeverity[out.Kind]; ok {
+		return s
+	}
+	return 3 // http_error / unknown / not_found / … — cooldown
+}
+
+// foldClaimOutcomes folds one tick's claim outcomes (and the discovery
+// set's unread lists) into the account state: the most-urgent outcome
+// drives hold/badge via applyClaimOutcome, the message names everything
+// (claimed X; Y: claim it in the panel (…); Z: why; unread lists), and an
+// unread list caps the hold at one hour — its plans are unknown, so the
+// account must come back and look again within the hour (issue #69,
+// magpie's "asked again later in the day").
+func foldClaimOutcomes(st *claimAccountState, set claimableSet, outs []claimOutcome, names []string, cooldown time.Duration, now time.Time) {
+	if len(outs) == 0 {
+		return
+	}
+	worst := 0
+	for i := range outs {
+		if claimOutcomeSeverity(outs[i]) < claimOutcomeSeverity(outs[worst]) {
+			worst = i
+		}
+	}
+	applyClaimOutcome(st, outs[worst], cooldown, now)
+	var parts []string
+	var claimed []string
+	for i := range outs {
+		if outs[i].OK {
+			claimed = append(claimed, names[i])
+		}
+	}
+	if len(claimed) > 0 {
+		parts = append(parts, "claimed "+strings.Join(claimed, ", "))
+	}
+	for i := range outs {
+		if outs[i].Kind == "captcha" {
+			parts = append(parts, names[i]+": claim it in the panel ("+outs[i].Message+")")
+		}
+	}
+	for i := range outs {
+		if !outs[i].OK && outs[i].Kind != "captcha" && outs[i].Kind != "already_claimed" {
+			parts = append(parts, names[i]+": "+outs[i].Message)
+		}
+	}
+	parts = append(parts, set.Unread...)
+	st.Message = strings.Join(parts, "; ")
+	if len(set.Unread) > 0 {
+		if limit := now.Add(time.Hour); st.HoldUntil.After(limit) {
+			st.HoldUntil = limit
+		}
+	}
+}
+
 // claimSchedulerTick runs one poll→claim cycle over every JWT credential.
 func claimSchedulerTick(now time.Time) {
 	if !loadedClaimAuto() {
@@ -188,26 +264,41 @@ func claimSchedulerTick(now time.Time) {
 		if onHold {
 			continue
 		}
-		plans, perr := fetchClaimablePreview(sa)
-		if perr != nil {
-			claimSchedulerState.Lock()
-			claimSchedulerState.lastError = "preview " + key + ": " + perr.Error()
-			claimSchedulerState.Unlock()
-			continue
-		}
-		target := pickClaimTarget(plans, loadedClaimPlanID())
-		if target == nil {
+		set := fetchClaimablePlans(sa)
+		if len(set.Plans) == 0 {
+			if len(set.Unread) > 0 {
+				// issue #69: a list that didn't read is unknown, not none —
+				// record it and retry next tick (no hold change).
+				claimSchedulerState.Lock()
+				claimSchedulerState.lastError = "claim lists " + key + ": " + strings.Join(set.Unread, "; ")
+				claimSchedulerState.Unlock()
+				continue
+			}
 			claimSchedulerState.Lock()
 			st.Kind, st.Message, st.UpdatedAt = "", "", now
 			claimSchedulerState.Unlock()
 			continue
 		}
-		param, region := captchaPoolTake()
-		out := postClaim(sa, target.PlanID, param, region)
-		applyClaimOutcome(st, out, cooldown, now)
-		if out.OK {
-			invalidateAccountCredits(f.AuthIndex, sa.Account.UID)
+		targets := claimTargets(set.Plans, loadedClaimPlanID())
+		if len(targets) == 0 {
+			claimSchedulerState.Lock()
+			st.Kind, st.Message, st.UpdatedAt = "", "", now
+			claimSchedulerState.Unlock()
+			continue
 		}
+		outs := make([]claimOutcome, 0, len(targets))
+		names := make([]string, 0, len(targets))
+		for _, target := range targets {
+			name := firstNonEmpty(target.Name, target.PlanID)
+			param, region := captchaPoolTake()
+			out := postClaim(sa, target.PlanID, param, region)
+			outs = append(outs, out)
+			names = append(names, name)
+			if out.OK {
+				invalidateAccountCredits(f.AuthIndex, sa.Account.UID)
+			}
+		}
+		foldClaimOutcomes(st, set, outs, names, cooldown, now)
 	}
 	claimSchedulerState.Lock()
 	claimSchedulerState.lastTick = now
