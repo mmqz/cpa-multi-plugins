@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -271,6 +272,11 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 		IsVL           bool    `json:"is_vl"`
 		MaxInputTokens int64   `json:"max_input_tokens"`
 		PriceFactor    float64 `json:"price_factor"`
+		ThinkingConfig struct {
+			Enabled struct {
+				Efforts map[string]json.RawMessage `json:"efforts"`
+			} `json:"enabled"`
+		} `json:"thinking_config"`
 	}
 	if err := json.Unmarshal(chatRaw, &models); err != nil {
 		return nil, fmt.Errorf("chat scene parse: %w", err)
@@ -284,6 +290,15 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 		if m.MaxInputTokens > 0 {
 			ctx2 = m.MaxInputTokens
 		}
+		var thinking *pluginapi.ThinkingSupport
+		if efforts := m.ThinkingConfig.Enabled.Efforts; len(efforts) > 0 {
+			levels := make([]string, 0, len(efforts))
+			for level := range efforts {
+				levels = append(levels, level)
+			}
+			sort.Strings(levels)
+			thinking = &pluginapi.ThinkingSupport{Levels: levels}
+		}
 		out = append(out, pluginapi.ModelInfo{
 			ID:                         m.Key,
 			Name:                       m.DisplayName,
@@ -291,6 +306,7 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 			MaxCompletionTokens:        8192,
 			OwnedBy:                    providerName,
 			SupportedGenerationMethods: []string{"chat"},
+			Thinking:                   thinking,
 		})
 	}
 	if len(out) == 0 {
