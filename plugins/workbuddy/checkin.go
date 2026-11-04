@@ -188,6 +188,23 @@ func processAutoCheckinAccount(f pluginapi.HostAuthFileEntry, doCheckin bool) {
 			if prev != nil {
 				entry.credits = prev.credits
 				entry.plan = prev.plan
+				// #70 review catch: the rebuilt entry dropped the guardrail
+				// override pointers — after one check-in tick a per-credential
+				// reserve/daily-cap override went back to inheriting the
+				// globals until the next panel refresh re-armed them.
+				entry.reserveOverride = prev.reserveOverride
+				entry.dailyCapOverride = prev.dailyCapOverride
+			}
+			// #70: this Store was pure Load-Modify-Store — an empty cache
+			// (fresh re-register) could never be populated here, so with
+			// lifecycle off and the panel closed the guardrails stayed
+			// unarmed forever. When a guardrail is configured and we have
+			// no credits snapshot, fetch one now: the daily tick itself arms
+			// the guardrail for this credential.
+			if entry.credits == nil && guardAnyConfigured() {
+				if cr, err := fetchUserResource(sa); err == nil && cr != nil {
+					entry.credits = cr
+				}
 			}
 			accountCache.Store(f.ID, entry)
 		}

@@ -95,6 +95,40 @@ func pickActiveAuth(candidates []activeAuthCandidate) string {
 	return next
 }
 
+// pickPriorityAuth is the opt-in priority-reclaim picker (issue #71): every
+// pick serves the FIRST live candidate in host (file) order, so a transient
+// cascade that once ratcheted the sticky selection onto a later candidate
+// heals the moment an earlier credential recovers. The all-exhausted
+// fallback keeps the sticky semantics verbatim (keep current if still
+// alive, else first candidate) — reclaim must never make the pool less
+// available than the sticky picker. The panel selection tracks the serving
+// account via setActiveAuthID so the card matches what actually routes.
+func pickPriorityAuth(candidates []activeAuthCandidate) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	cur := getActiveAuthID()
+	for _, c := range candidates {
+		if c.Disabled || c.Exhausted {
+			continue
+		}
+		if c.ID != cur {
+			setActiveAuthID(c.ID)
+		}
+		return c.ID
+	}
+	// All exhausted or disabled — same fallback as pickActiveAuth: keep the
+	// current selection if it is still a listed candidate, else the first.
+	if cur != "" {
+		for _, c := range candidates {
+			if c.ID == cur {
+				return cur
+			}
+		}
+	}
+	return candidates[0].ID
+}
+
 // ensureDefaultActiveAuth sets the panel-selected account.
 // Called from buildDashboardEx on every /accounts and /refresh request.
 //
@@ -111,6 +145,17 @@ func ensureDefaultActiveAuth(accounts []wbAccount) string {
 	live := make(map[string]wbAccount, len(accounts))
 	for _, a := range accounts {
 		live[a.AuthID] = a
+	}
+
+	// Priority-reclaim mode (issue #71): the panel selection tracks the
+	// first live candidate in host order, exactly what pickPriorityAuth
+	// serves — the card must show the credential that actually routes.
+	if loadedPriorityReclaim() {
+		cands := make([]activeAuthCandidate, 0, len(accounts))
+		for _, a := range accounts {
+			cands = append(cands, activeAuthCandidate{ID: a.AuthID, Disabled: a.Disabled, Exhausted: a.Exhausted})
+		}
+		return pickPriorityAuth(cands)
 	}
 
 	// Rule 1: current selection is live AND not exhausted → keep.

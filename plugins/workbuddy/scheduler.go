@@ -25,7 +25,34 @@ const (
 var (
 	schedulerMode   = schedulerModeOff
 	schedulerModeMu sync.RWMutex
+
+	// priorityReclaim (issue #71, opt-in scheduler_priority_reclaim): with
+	// scheduler_mode: credits, every pick serves the first live candidate
+	// in host order instead of the sticky selection — a transient cascade
+	// (e.g. one 429/6004 round) can no longer permanently demote serving to
+	// a later credential. Default false = the sticky behavior unchanged.
+	priorityReclaim   = false
+	priorityReclaimMu sync.RWMutex
 )
+
+// setPriorityReclaim is a test seam (setSchedulerMode shape).
+func setPriorityReclaim(on bool) func() {
+	priorityReclaimMu.Lock()
+	old := priorityReclaim
+	priorityReclaim = on
+	priorityReclaimMu.Unlock()
+	return func() {
+		priorityReclaimMu.Lock()
+		priorityReclaim = old
+		priorityReclaimMu.Unlock()
+	}
+}
+
+func loadedPriorityReclaim() bool {
+	priorityReclaimMu.RLock()
+	defer priorityReclaimMu.RUnlock()
+	return priorityReclaim
+}
 
 // setSchedulerMode is a test helper that returns a restore func.
 func setSchedulerMode(mode string) func() {
@@ -125,7 +152,12 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 			Exhausted: exhausted,
 		})
 	}
-	picked := pickActiveAuth(cands)
+	var picked string
+	if loadedPriorityReclaim() {
+		picked = pickPriorityAuth(cands)
+	} else {
+		picked = pickActiveAuth(cands)
+	}
 	if picked == "" {
 		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 	}

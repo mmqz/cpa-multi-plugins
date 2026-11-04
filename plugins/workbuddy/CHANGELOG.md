@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.9.85
+
+### The credit guardrails arm themselves after a re-register (issue #70)
+
+sciman-top's audit: reserve_credits / daily_credits_cap judge the credits
+cache, but nothing outside the panel poll ever repopulated an EMPTY cache —
+reconcileAfterExecutorError is lifecycle-gated, the check-in tick was pure
+Load-Modify-Store, and a plugin re-register (upgrade / config apply) clears
+the map. Between re-register and the first panel open the guardrails
+silently failed open, with no log line saying so — and a billing-plane
+switch that produces no error signal (their 11-01 follow-up: deepseek
+re-rated to a 0.00x paid tier, usage.credit still 0) would never be caught.
+
+- guardrails.go: a pick that finds guard config live but no credits
+  snapshot schedules ONE async arm per credential per 30s retry window
+  (guardTryArm) — the fetch rides the existing per-authID singleflight +
+  45s TTL in cachedAccountDetails, and every fired attempt logs the
+  unarmed state. The pick itself stays fail-open; the guardrail bites from
+  the next pick on.
+- checkin.go: the CN check-in tick's cache Store can now populate an empty
+  cache (fetch one credits snapshot when a guardrail is configured), so the
+  daily tick itself arms the guardrail — and the rebuilt entry no longer
+  drops the per-credential reserve/daily-cap override pointers (review
+  catch: one check-in tick used to reset overrides to inherit-globals
+  until the next panel refresh).
+
+### Opt-in priority reclaim for the account picker (issue #71)
+
+sciman-top's proposal: pickActiveAuth's sticky selection ratchets — one
+transient full-pool cascade (a 429/6004 round) moves serving to a later
+candidate, and when the earlier credential recovers the pick never moves
+back; the pool burns the overflow account until it dies. New opt-in
+`scheduler_priority_reclaim: true` (with scheduler_mode: credits):
+
+- every pick serves the FIRST live candidate in host (file) order
+  (pickPriorityAuth); an earlier credential is reclaimed on the very next
+  pick after it recovers;
+- the all-exhausted fallback is identical to the sticky picker's (keep the
+  current selection if still listed, else the first candidate) — reclaim
+  never makes the pool less available;
+- the panel selection tracks the serving account (ensureDefaultActiveAuth
+  gains the same branch), so the card shows what actually routes;
+- default false: the sticky behavior is byte-for-byte unchanged.
+
 ## 0.9.82
 
 ### The auth.parse response carries the operator fields (issue #68)

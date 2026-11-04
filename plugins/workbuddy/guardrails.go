@@ -1,7 +1,10 @@
 // guardrails.go — opt-in credit guardrails for the scheduler pick (#61).
 //
-// Two knobs, both default-off, both pure consumers of the existing credits
-// cache (the #56-era standing constraint: guardrails add zero upstream calls):
+// Two knobs, both default-off, both reading the credits cache. Since 0.9.85
+// (issue #70) a cache miss under live guard config schedules an async
+// singleflight arm — the #56 "zero upstream calls" contract now means "zero
+// SYNCHRONOUS upstream calls on the pick path"; an unarmed guardrail that
+// silently fails open was the worse trade:
 //
 //	reserve_credits    skip a credential whose cached remaining credits are
 //	                   <= the reserve, so the account stays usable for the
@@ -42,6 +45,7 @@
 package main
 
 import (
+	"log"
 	"sync"
 	"time"
 )
@@ -133,6 +137,85 @@ func effectiveDailyCap(override *int64) int64 {
 	return loadedDailyCreditsCap()
 }
 
+// guardAnyConfigured reports whether ANY guardrail is configured globally.
+// Per-credential overrides ride the cache entry itself, so with an empty
+// cache they are invisible by construction — the arming pass is what
+// (re)materializes them (cachedAccountDetails Stores the sa-carried
+// override pointers).
+func guardAnyConfigured() bool {
+	return loadedReserveCredits() > 0 || loadedDailyCreditsCap() > 0
+}
+
+// Self-arming (issue #70): the guardrails judge the credits cache, but
+// nothing outside the panel poll ever (re)populated an EMPTY cache —
+// reconcileAfterExecutorError is lifecycle-gated, the check-in tick was
+// Load-Modify-Store, and a plugin re-register (upgrade / config apply)
+// clears the map. Between re-register and the first panel open the
+// guardrails silently failed open with no log line. Now a pick that
+// finds guard config live but no credits snapshot schedules ONE async
+// arm per credential per retry window (the fetch rides the existing
+// per-authID singleflight + TTL in cachedAccountDetails); the pick
+// itself stays fail-open — the guardrail bites from the next pick on.
+const guardArmRetryInterval = 30 * time.Second
+
+var (
+	guardArmMu   sync.Mutex
+	guardArmLast = map[string]time.Time{} // authID -> last arm attempt
+	// guardArmFetch is the injectable fetch seam (tests swap it out to
+	// count arming passes without goroutines or a host bridge);
+	// guardArmLaunch schedules the fetch (async in production, synchronous
+	// under test so assertions are deterministic).
+	guardArmFetch  = guardArmFetchHost
+	guardArmLaunch = func(fn func()) { go fn() }
+)
+
+// guardArmFetchHost resolves authID -> storedAuth through the host list
+// and runs one cachedAccountDetails pass (singleflight-serialized; the
+// 45s TTL means an armed credential never re-triggers).
+func guardArmFetchHost(authID string) {
+	files, err := hostAuthList()
+	if err != nil {
+		return
+	}
+	for _, f := range files {
+		if f.ID != authID {
+			continue
+		}
+		sa, _, err := hostAuthGetBundle(f.AuthIndex)
+		if err != nil {
+			return
+		}
+		cachedAccountDetails(authID, sa, false)
+		return
+	}
+}
+
+// guardTryArm fires the async arm when guard config is live and the
+// credential has no credits snapshot. Rate-limited per credential to one
+// attempt per retry window; every attempt that actually fires logs the
+// unarmed state (issue #70: "no log ever said the guardrail was unarmed").
+func guardTryArm(authID string) {
+	if !guardAnyConfigured() {
+		return
+	}
+	// cachedCreditsScore's second return is exhausted, NOT a cache-hit
+	// flag — remain < 0 is the unknown-credits signal (no entry, or a
+	// legacy entry whose credits field is nil).
+	if remain, _ := cachedCreditsScore(authID); remain >= 0 {
+		return
+	}
+	now := time.Now()
+	guardArmMu.Lock()
+	if t, seen := guardArmLast[authID]; seen && now.Sub(t) < guardArmRetryInterval {
+		guardArmMu.Unlock()
+		return
+	}
+	guardArmLast[authID] = now
+	guardArmMu.Unlock()
+	log.Printf("workbuddy: credit guardrail configured but %s has no credits snapshot (re-registered / lifecycle off / panel not opened) — arming async, fail-open until then (issue #70)", authID)
+	guardArmLaunch(func() { guardArmFetch(authID) })
+}
+
 // guardSkipCredential reports whether the credential should be withheld from
 // scheduler candidates. Unknown credits (no cache entry yet, -1 remain) never
 // guard — a guardrail cannot judge what it cannot see. Per-credential
@@ -145,6 +228,10 @@ func guardSkipCredential(authID string) bool {
 	}
 	remain, _ := cachedCreditsScore(authID)
 	if remain < 0 {
+		// Unknown credits: fail open (a guardrail cannot judge what it
+		// cannot see) but schedule the async arm so the window closes
+		// (issue #70).
+		guardTryArm(authID)
 		return false
 	}
 	return guardSkipRemain(authID, remain, reserveOv, capOv)

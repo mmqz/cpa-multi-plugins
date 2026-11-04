@@ -113,6 +113,7 @@ func configure(raw []byte) {
 	nextCheckinAuto := true
 	nextLifecycleAuto := true
 	nextSchedulerMode := schedulerModeOff // reset to default on reconfigure
+	nextPriorityReclaim := false
 	nextKeepaliveAuto := true
 	nextTasksAuto := true
 	nextMgmtKey := ""
@@ -164,6 +165,9 @@ func configure(raw []byte) {
 				if v, present := m["scheduler_mode"]; present && configScalarString(v) == schedulerModeCredits {
 					nextSchedulerMode = schedulerModeCredits
 				}
+				if v, present := m["scheduler_priority_reclaim"]; present {
+					nextPriorityReclaim = configScalarBool(v)
+				}
 				if v, present := m["usage_report_url"]; present {
 					cfgURL = configScalarString(v)
 				}
@@ -214,6 +218,11 @@ func configure(raw []byte) {
 					if v == schedulerModeCredits {
 						nextSchedulerMode = schedulerModeCredits
 					}
+				}
+				if strings.HasPrefix(line, "scheduler_priority_reclaim:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "scheduler_priority_reclaim:"))
+					v = strings.Trim(v, "\"'")
+					nextPriorityReclaim = v == "true" || v == "1" || v == "yes" || v == "on"
 				}
 				if strings.HasPrefix(line, "usage_report_url:") {
 					v := strings.TrimSpace(strings.TrimPrefix(line, "usage_report_url:"))
@@ -345,6 +354,17 @@ func configure(raw []byte) {
 	schedulerModeMu.Lock()
 	schedulerMode = nextSchedulerMode
 	schedulerModeMu.Unlock()
+
+	priorityReclaimMu.Lock()
+	if priorityReclaim != nextPriorityReclaim {
+		if nextPriorityReclaim {
+			log.Printf("workbuddy: scheduler_priority_reclaim=true applied (first-live pick in host order, #71)")
+		} else {
+			log.Printf("workbuddy: scheduler_priority_reclaim disabled (sticky selection)")
+		}
+	}
+	priorityReclaim = nextPriorityReclaim
+	priorityReclaimMu.Unlock()
 
 	keepaliveAutoMu.Lock()
 	keepaliveAuto = nextKeepaliveAuto
