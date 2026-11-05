@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.74
+
+### The thinking dial survives shape drift (PR #73 follow-up)
+
+0.8.73 declared ThinkingSupport.Levels from the catalog's
+thinking_config.enabled.efforts — as a map, the one shape magpie documents.
+The hardened reader accepts the levels as an object OR an array, honors
+reasoning_efforts (the array spelling entries without a thinking_config
+carry), orders Levels canonically (minimal / low / medium / high / xhigh /
+max, unknown names after, alphabetically) instead of alphabetically, and
+derives ZeroAllowed from the disabled key — a model that can run without
+thinking says so. A thinking_config object that names no levels still
+declares nothing: that model thinks at upstream defaults, the pre-#73
+behavior for the shape. Parse lives in chatSceneModel.thinkingSupport with
+a dedicated test matrix.
 ## 0.8.73
 
 ### The auth.parse response carries the operator fields (issue #68)

@@ -223,6 +223,147 @@ func filterCoolingModels(sa *storedAuth, models []pluginapi.ModelInfo) []plugina
 // for_auth chain without the network. Production always uses callModelsAPI.
 var callModelsAPIFn = callModelsAPI
 
+// chatSceneModel is one entry of the models listing's "chat" scene.
+type chatSceneModel struct {
+	Key              string          `json:"key"`
+	DisplayName      string          `json:"display_name"`
+	Enable           bool            `json:"enable"`
+	IsReasoning      bool            `json:"is_reasoning"`
+	IsVL             bool            `json:"is_vl"`
+	MaxInputTokens   int64           `json:"max_input_tokens"`
+	PriceFactor      float64         `json:"price_factor"`
+	ReasoningEfforts json.RawMessage `json:"reasoning_efforts"`
+	ThinkingConfig   json.RawMessage `json:"thinking_config"`
+}
+
+// thinkingSupport declares the model's native reasoning dial for the host
+// (PR #73, hardened 0.8.74). The catalog spells the levels as an object
+// keyed by level name inside thinking_config.enabled.efforts (magpie
+// modelInfo parity); entries without a thinking_config may carry the same
+// names as a reasoning_efforts array instead. A thinking_config OBJECT
+// always wins — including when it names no levels: that model thinks at
+// upstream defaults and declares no dial, the pre-#73 behavior for the
+// shape. Levels come out in the canonical order (minimal / low / medium /
+// high / xhigh / max, unknown names after, alphabetically); ZeroAllowed
+// mirrors magpie's alwaysThinks — a disabled key beside enabled means the
+// model can run without thinking.
+func (m chatSceneModel) thinkingSupport() *pluginapi.ThinkingSupport {
+	var levels []string
+	zeroAllowed := false
+	if rawIsObject(m.ThinkingConfig) {
+		var tc struct {
+			Enabled  json.RawMessage `json:"enabled"`
+			Disabled json.RawMessage `json:"disabled"`
+		}
+		if err := json.Unmarshal(m.ThinkingConfig, &tc); err != nil {
+			return nil
+		}
+		zeroAllowed = rawPresent(tc.Disabled)
+		var enabled struct {
+			Efforts json.RawMessage `json:"efforts"`
+		}
+		if rawIsObject(tc.Enabled) {
+			if err := json.Unmarshal(tc.Enabled, &enabled); err == nil {
+				if keys := rawStringKeyMap(enabled.Efforts); keys != nil {
+					for name := range keys {
+						if name != "" {
+							levels = append(levels, name)
+						}
+					}
+				} else {
+					for _, name := range rawStringArray(enabled.Efforts) {
+						if name != "" {
+							levels = append(levels, name)
+						}
+					}
+				}
+			}
+		}
+	} else {
+		for _, name := range rawStringArray(m.ReasoningEfforts) {
+			if name != "" {
+				levels = append(levels, name)
+			}
+		}
+	}
+	if len(levels) == 0 {
+		return nil
+	}
+	sortEffortLevels(levels)
+	return &pluginapi.ThinkingSupport{Levels: levels, ZeroAllowed: zeroAllowed}
+}
+
+// rawIsObject reports whether the raw JSON value is an object (null is
+// neither an object nor an array).
+func rawIsObject(raw json.RawMessage) bool {
+	for _, b := range raw {
+		switch b {
+		case ' ', '\t', '\n', '\r':
+			continue
+		}
+		return b == '{'
+	}
+	return false
+}
+
+// rawPresent reports a present, non-null raw value.
+func rawPresent(raw json.RawMessage) bool {
+	return len(raw) > 0 && strings.TrimSpace(string(raw)) != "null"
+}
+
+// rawStringArray decodes a raw JSON array of strings, skipping members of
+// any other shape.
+func rawStringArray(raw json.RawMessage) []string {
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return nil
+	}
+	var out []string
+	for _, member := range arr {
+		var s string
+		if err := json.Unmarshal(member, &s); err == nil && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// rawStringKeyMap decodes a raw JSON object into its key set; nil when the
+// value is not an object.
+func rawStringKeyMap(raw json.RawMessage) map[string]json.RawMessage {
+	if !rawIsObject(raw) {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	return obj
+}
+
+// effortOrder is the canonical level order the wire catalog itself uses
+// (magpie EFFORT_ORDER parity).
+var effortOrder = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+
+func effortRank(level string) int {
+	for i, name := range effortOrder {
+		if name == level {
+			return i
+		}
+	}
+	return len(effortOrder)
+}
+
+func sortEffortLevels(levels []string) {
+	sort.Slice(levels, func(i, j int) bool {
+		ri, rj := effortRank(levels[i]), effortRank(levels[j])
+		if ri != rj {
+			return ri < rj
+		}
+		return levels[i] < levels[j]
+	})
+}
+
 // callModelsAPI GETs /algo/api/v2/model/list from the QoderWork gateway
 // with COSY signing (same as inference). Returns plain JSON (not QoderEncoding).
 // Falls back to wbModels() on any error.
@@ -264,20 +405,7 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 	if !ok {
 		return nil, fmt.Errorf("no chat scene in models response")
 	}
-	var models []struct {
-		Key            string  `json:"key"`
-		DisplayName    string  `json:"display_name"`
-		Enable         bool    `json:"enable"`
-		IsReasoning    bool    `json:"is_reasoning"`
-		IsVL           bool    `json:"is_vl"`
-		MaxInputTokens int64   `json:"max_input_tokens"`
-		PriceFactor    float64 `json:"price_factor"`
-		ThinkingConfig struct {
-			Enabled struct {
-				Efforts map[string]json.RawMessage `json:"efforts"`
-			} `json:"enabled"`
-		} `json:"thinking_config"`
-	}
+	var models []chatSceneModel
 	if err := json.Unmarshal(chatRaw, &models); err != nil {
 		return nil, fmt.Errorf("chat scene parse: %w", err)
 	}
@@ -290,15 +418,7 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 		if m.MaxInputTokens > 0 {
 			ctx2 = m.MaxInputTokens
 		}
-		var thinking *pluginapi.ThinkingSupport
-		if efforts := m.ThinkingConfig.Enabled.Efforts; len(efforts) > 0 {
-			levels := make([]string, 0, len(efforts))
-			for level := range efforts {
-				levels = append(levels, level)
-			}
-			sort.Strings(levels)
-			thinking = &pluginapi.ThinkingSupport{Levels: levels}
-		}
+		thinking := m.thinkingSupport()
 		out = append(out, pluginapi.ModelInfo{
 			ID:                         m.Key,
 			Name:                       m.DisplayName,

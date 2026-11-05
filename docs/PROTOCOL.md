@@ -274,6 +274,8 @@
 - **URL**: `POST https://gateway.qoder.com.cn/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`
 - Headers 和 Body 编码同 Intl
 - 模型列表: `GET https://gateway.qoder.com.cn/algo/api/v2/model/list?Encode=1`
+  - 响应为按场景分组的明文 JSON（`chat`/`developer`/...，插件取 `chat` 场景）；每项含 `key/display_name/enable/is_reasoning/is_vl/max_input_tokens/price_factor`
+  - **思考档位**（PR #73 / qoder 0.8.74）：`thinking_config.enabled.efforts` 为以档位名为键的对象（magpie qoder modelInfo 同源；值可带 `is_default`）；`thinking_config.disabled` 键存在 = 可关闭思考（→ `ThinkingSupport.ZeroAllowed`）；无 `thinking_config` 的项可携带 `reasoning_efforts` 数组兜底。`Levels` 按规范序输出（minimal/low/medium/high/xhigh/max，未知名靠后）。请求侧链路：宿主依据声明保留 `reasoning_effort` → `normalizeReasoningEffort`（low/medium/high/xhigh/max）→ body 注入 `parameters.enable_thinking=true` + `parameters.reasoning_effort`（0.8.17 起已有）
 
 ### 配额查询
 - `GET https://openapi.qoder.com.cn/api/v2/quota/usage`

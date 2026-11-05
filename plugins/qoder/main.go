@@ -356,7 +356,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.8.73"
+var version = "0.8.74"
 
 // providerName is a VAR (split flavor, issue #29): the unified build keeps
 // the default "qoder"; the split-channel builds rename it via
