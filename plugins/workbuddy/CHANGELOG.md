@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.9.86
+
+### The CN gate's hyphenated 11-128 classifies as channel risk control again (issue #75)
+
+The CN realm spells the channel-verification code hyphenated on the wire —
+capture 2026-11-02: {"code":"11-128","msg":"request illegal"} — the same
+spelling the display copy has used since 0.9.79. isChannelRiskControl only
+matched 11128 and "11128", so the hyphenated form fell through to the
+generic 4xx classification; on a 403 it hit the business-envelope branch and
+read as an account fault — the exact walk-and-cool-every-account cascade the
+400 request-scoped wrap was built to stop (chat_error.go's own comment
+described the failure mode). code now decodes as raw JSON and compares with
+hyphens stripped (11128 / "11128" / "11-128"), and the broken-envelope
+substring fallback learned the hyphenated spelling.
+
+### An exhausted pool defers the route to the host (issue #74)
+
+scheduler.pick's all-exhausted fallback still returned a credential —
+Handled:true with a zero-balance auth — so a request that also carried
+another provider's candidate for the same model never reached it (the
+OpenCode/DeepSeek key starved behind a doomed WorkBuddy attempt). The
+pickers keep their sticky-name contract — the panel card must not flip-flop
+between dead accounts, and the recovery switch keeps its anchor — but the
+ROUTE now defers (Handled:false) when the picked candidate is positively
+credit-exhausted, which by construction means the whole pool is. Unknown
+credits (a cache miss) are not exhaustion and keep routing: the belief must
+be positive before the plugin refuses to serve. Credit exhaustion is
+capacity, not policy — the veto classes (11128 pair cooling, 403+11140
+quarantine, #61 guardrails) keep their hard stop one page earlier, at the
+candidate filter.
 ## 0.9.85
 
 ### The credit guardrails arm themselves after a re-register (issue #70)

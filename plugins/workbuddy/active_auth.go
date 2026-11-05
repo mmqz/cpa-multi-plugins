@@ -81,7 +81,9 @@ func pickActiveAuth(candidates []activeAuthCandidate) string {
 		}
 	}
 	if next == "" {
-		// All exhausted or disabled — keep current if still alive, else first candidate.
+		// All exhausted or disabled — keep current if still alive, else first
+		// candidate. The NAME stays for the panel card and the recovery
+		// switch; the scheduler layer defers the route in this case (#74).
 		if cur != "" {
 			if _, ok := byID[cur]; ok {
 				return cur
@@ -119,6 +121,7 @@ func pickPriorityAuth(candidates []activeAuthCandidate) string {
 	}
 	// All exhausted or disabled — same fallback as pickActiveAuth: keep the
 	// current selection if it is still a listed candidate, else the first.
+	// (The scheduler layer defers the route when the pick is exhausted, #74.)
 	if cur != "" {
 		for _, c := range candidates {
 			if c.ID == cur {

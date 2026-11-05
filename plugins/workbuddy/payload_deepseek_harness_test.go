@@ -352,3 +352,24 @@ func outStr(t *testing.T, b []byte) string {
 	t.Helper()
 	return string(b)
 }
+
+// TestUpstreamStatusErrorHyphenated11128IsRequestScoped pins #75's payoff:
+// the CN gate's {"code":"11-128"} used to fall through isChannelRiskControl,
+// and on a 403 it hit the business-envelope branch — an account-level
+// cooldown, the host walking and cooling every account. With the hyphenated
+// spelling classified, the wrap is 400 request-scoped no matter which 4xx
+// carried it.
+func TestUpstreamStatusErrorHyphenated11128IsRequestScoped(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden} {
+		payload := `{"code":"11-128","msg":"request illegal"}`
+		inner := translateChatUpstreamErrorFull(status, payload, nil, nil)
+		wrapped := upstreamStatusError(status, payload, inner)
+		var se *statusError
+		if !errors.As(wrapped, &se) {
+			t.Fatalf("status %d: hyphenated 11-128 must wrap statusError, got %T", status, wrapped)
+		}
+		if se.StatusCode() != http.StatusBadRequest {
+			t.Fatalf("status %d: wrapped status = %d, want 400 (request-scoped)", status, se.StatusCode())
+		}
+	}
+}

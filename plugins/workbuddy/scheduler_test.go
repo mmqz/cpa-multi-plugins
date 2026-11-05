@@ -164,10 +164,14 @@ func TestSchedulerPick_StaysOnExhaustedSelection(t *testing.T) {
 	}
 }
 
-func TestSchedulerPick_AllExhausted_KeepsCurrent(t *testing.T) {
+// TestSchedulerPick_AllExhausted_DefersAndKeepsSelection covers #74: when
+// every candidate is credit-exhausted the ROUTE defers to the host (a
+// mixed-provider request reaches its other provider; a single-provider
+// deployment gets an honest "no auth" instead of a doomed attempt), while
+// the sticky selection itself stays put — the panel card must not flip-flop
+// between dead accounts, and the recovery switch keeps its anchor.
+func TestSchedulerPick_AllExhausted_DefersAndKeepsSelection(t *testing.T) {
 	resetActiveAuth(t)
-	// When ALL candidates are exhausted, keep current selection rather than
-	// flip-flopping between exhausted accounts.
 	accountCache.Store("wb-a", &accountCacheEntry{
 		credits: &creditsSummary{TotalRemain: 0, TotalUsed: 100, TotalSize: 100},
 	})
@@ -189,9 +193,88 @@ func TestSchedulerPick_AllExhausted_KeepsCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
+	if resp := parsePickResponse(t, raw); resp.Handled {
+		t.Fatalf("all-exhausted pool must defer to the host (#74), got %+v", resp)
+	}
+	if getActiveAuthID() != "wb-a" {
+		t.Fatalf("sticky selection must stay on wb-a while the pool is dry, got %q", getActiveAuthID())
+	}
+}
+
+// TestSchedulerPick_AllExhausted_MixedProvider_Defers is the #74 report
+// shape: an OpenCode/DeepSeek candidate rides the same request, and the
+// exhausted WorkBuddy pool must not swallow it — Handled:false is what lets
+// the host's built-in scheduler route the request on.
+func TestSchedulerPick_AllExhausted_MixedProvider_Defers(t *testing.T) {
+	resetActiveAuth(t)
+	accountCache.Store("wb-a", &accountCacheEntry{
+		credits: &creditsSummary{TotalRemain: 0, TotalUsed: 500, TotalSize: 500},
+	})
+	defer accountCache.Delete("wb-a")
+	raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
+		Provider: providerName,
+		Model:    "deepseek-v4.1-flash",
+		Candidates: []pluginapi.SchedulerAuthCandidate{
+			{ID: "wb-a", Provider: providerName},
+			{ID: "oc-1", Provider: "opencode"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if resp := parsePickResponse(t, raw); resp.Handled {
+		t.Fatalf("exhausted workbuddy pool must defer so the host can route the opencode candidate, got %+v", resp)
+	}
+}
+
+// TestSchedulerPick_ExhaustedPlusUnknown_PicksUnknown pins the #74 boundary:
+// a cache miss is unknown, not exhausted — the deferral needs a POSITIVE
+// exhaustion belief. A cold cache must keep routing (fail-open), matching
+// the #70 contract that picks stay free of synchronous upstream calls.
+func TestSchedulerPick_ExhaustedPlusUnknown_PicksUnknown(t *testing.T) {
+	resetActiveAuth(t)
+	accountCache.Store("wb-dead", &accountCacheEntry{
+		credits: &creditsSummary{TotalRemain: 0, TotalUsed: 90, TotalSize: 90},
+	})
+	defer accountCache.Delete("wb-dead")
+	raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
+		Provider: providerName,
+		Candidates: []pluginapi.SchedulerAuthCandidate{
+			{ID: "wb-dead", Provider: providerName},
+			{ID: "wb-cold", Provider: providerName},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
 	resp := parsePickResponse(t, raw)
-	if !resp.Handled || resp.AuthID != "wb-a" {
-		t.Fatalf("want stay on wb-a (all exhausted), got %+v", resp)
+	if !resp.Handled || resp.AuthID != "wb-cold" {
+		t.Fatalf("unknown-credits candidate must keep routing, got %+v", resp)
+	}
+}
+
+// TestSchedulerPick_AllExhausted_PriorityReclaim_Defers: the reclaim picker
+// keeps the sticky fallback verbatim ("never less available"), so the #74
+// defer applies to it exactly as it does to the sticky picker.
+func TestSchedulerPick_AllExhausted_PriorityReclaim_Defers(t *testing.T) {
+	resetActiveAuth(t)
+	restore := setPriorityReclaim(true)
+	defer restore()
+	accountCache.Store("wb-a", &accountCacheEntry{
+		credits: &creditsSummary{TotalRemain: 0, TotalUsed: 100, TotalSize: 100},
+	})
+	defer accountCache.Delete("wb-a")
+	raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
+		Provider: providerName,
+		Candidates: []pluginapi.SchedulerAuthCandidate{
+			{ID: "wb-a", Provider: providerName},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if resp := parsePickResponse(t, raw); resp.Handled {
+		t.Fatalf("priority-reclaim over a dry pool must defer too, got %+v", resp)
 	}
 }
 

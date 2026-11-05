@@ -314,17 +314,39 @@ func isPromptTooLong(statusCode int, payload string) bool {
 // backend rejects requests carrying the OpenAI `developer` role, missing
 // official-CLI request-shape fields, or bursty frequency with this code —
 // a request-shaped/transient problem, not an account failure.
+//
+// 2026-11-05 (#75): the CN gate also spells the code hyphenated on the wire
+// (capture 2026-11-02: {"code":"11-128","msg":"request illegal"}) — the same
+// spelling the display copy has used since v0.9.79. code now decodes as raw
+// JSON so int and string spellings both parse, and the comparison strips
+// hyphens: 11128 / "11128" / "11-128" all classify.
 func isChannelRiskControl(statusCode int, payload string) bool {
 	if statusCode < 400 {
 		return false
 	}
-	var shape upstreamErrorShape
-	if err := json.Unmarshal([]byte(payload), &shape); err == nil && shape.Code == 11128 {
+	var shape struct {
+		Code json.RawMessage `json:"code"`
+	}
+	if err := json.Unmarshal([]byte(payload), &shape); err == nil && wireCodeIs(shape.Code, "11128") {
 		return true
 	}
-	// 信封变体容错：JSON 解析失败但带着 "code":11128 字样（含空格变体）。
+	// 信封变体容错：JSON 解析失败但带着 "code":11128 字样（含空格与连字符变体）。
 	low := strings.ReplaceAll(payload, " ", "")
-	return strings.Contains(low, `"code":11128`) || strings.Contains(low, `"code":"11128"`)
+	return strings.Contains(low, `"code":11128`) || strings.Contains(low, `"code":"11128"`) ||
+		strings.Contains(low, `"code":"11-128"`)
+}
+
+// wireCodeIs compares a raw JSON code scalar — a number, or a string in
+// either the plain ("11128") or hyphenated ("11-128") spelling — against
+// want, after stripping quote and hyphen separators. Anything that is not
+// a bare scalar (null, objects, arrays) never matches.
+func wireCodeIs(raw json.RawMessage, want string) bool {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return false
+	}
+	s = strings.Trim(s, `"`)
+	return strings.ReplaceAll(s, "-", "") == want
 }
 
 // hasBusinessEnvelope reports whether an error body carries the upstream

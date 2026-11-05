@@ -161,6 +161,26 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 	if picked == "" {
 		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 	}
+	// #74 (2026-11-05): the pickers' all-exhausted fallback deliberately
+	// returns a live-listed credential so the panel card never flip-flops
+	// between dead accounts — but a pick is not a route. When the picked
+	// candidate is credit-exhausted (which only happens once the whole pool
+	// is; the pickers never prefer a dead one otherwise), defer to the host
+	// instead of spending the request on a zero-balance credential: a
+	// mixed-provider candidate list then reaches its other provider, and a
+	// single-provider deployment gets an honest "no auth" instead of a
+	// doomed 429/6004 round or the #35 200-with-empty-content shape. Credit
+	// exhaustion is capacity, not policy — the veto classes (11128 pair
+	// cooling, 403+11140 quarantine, #61 guardrails) keep their hard-stop
+	// posture one page earlier, at the candidate filter. Unknown credits
+	// (cache miss) are NOT exhaustion and keep routing: the belief must be
+	// positive before the plugin refuses to serve.
+	for _, c := range cands {
+		if c.ID == picked && c.Exhausted {
+			log.Printf("workbuddy: scheduler pick deferred — every %s candidate is credit-exhausted, handing the request back to the host", providerName)
+			return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
+		}
+	}
 	return okEnvelope(pluginapi.SchedulerPickResponse{
 		AuthID:  picked,
 		Handled: true,

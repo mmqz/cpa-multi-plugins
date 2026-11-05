@@ -46,10 +46,32 @@ func TestIsChannelRiskControl(t *testing.T) {
 	if !isChannelRiskControl(403, `{"code": 11128, "msg":"blocked"}`) {
 		t.Error("envelope-variant 11128 (spaces) should match")
 	}
+	// #75 (2026-11-05): the CN gate's hyphenated string spelling — capture
+	// 2026-11-02 answered {"code":"11-128","msg":"request illegal"}. Both the
+	// JSON path and the broken-envelope fallback must classify it.
+	if !isChannelRiskControl(400, `{"code":"11-128","msg":"request illegal"}`) {
+		t.Error(`hyphenated "11-128" (json string) should match`)
+	}
+	if !isChannelRiskControl(403, `{"code": "11-128", "msg":"blocked"}`) {
+		t.Error(`hyphenated "11-128" with spaces should match`)
+	}
+	if !isChannelRiskControl(400, `{"msg":"truncated","code":"11-128"`) {
+		t.Error(`hyphenated substring in a broken envelope should match`)
+	}
+	if !isChannelRiskControl(400, `{"code":"11128","msg":"string numeric"}`) {
+		t.Error(`string "11128" should match`)
+	}
 	for _, tc := range []struct {
 		status int
 		body   string
-	}{{200, `{"code":11128}`}, {400, `{"code":11102}`}, {400, `plain error`}} {
+	}{
+		{200, `{"code":11128}`},
+		{400, `{"code":11102}`},
+		{400, `plain error`},
+		{400, `{"code":11115}`},
+		{400, `{"code":"11-124"}`}, // hyphenated but a different code
+		{400, `{"code":"11115"}`},
+	} {
 		if isChannelRiskControl(tc.status, tc.body) {
 			t.Errorf("isChannelRiskControl(%d,%q)=true want false", tc.status, tc.body)
 		}
