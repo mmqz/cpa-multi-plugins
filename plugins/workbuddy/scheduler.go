@@ -116,6 +116,16 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 		if reqModel != "" && modelIsCooling(c.ID, reqModel) {
 			continue
 		}
+		// Issue #76 (v0.9.87): a recorded 6004 window is respected at pick
+		// time too. The executor would only fast-fail the pair after
+		// selection — a selection spent on a millisecond local rejection,
+		// and under scheduler_priority_reclaim the sticky picker would
+		// re-serve the dead pair until some other request establishes an
+		// ordinary cooling entry. Same canonical auth-id key the executors
+		// note under, so one recorded window gates every path.
+		if reqModel != "" && modelRateLimitActive(c.ID, reqModel) {
+			continue
+		}
 		// v0.9.73: account-restriction quarantine (403+11140) — a restricted
 		// credential is not offered as a candidate either, same invisibility
 		// contract as the guardrails: the host just sees fewer candidates.

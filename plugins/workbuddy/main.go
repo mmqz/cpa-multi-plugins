@@ -351,7 +351,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.9.86"
+var version = "0.9.87"
 
 func wbRegistration() registration {
 	return registration{
@@ -906,11 +906,15 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	if sa.Account.UID != "" {
 		authUID = sa.Account.UID
 	}
+	// v0.9.87 (#76): the 6004 registry is keyed by the canonical auth id —
+	// the same id scheduler.pick candidates and model.for_auth carry — so a
+	// recorded window is respected at every boundary, not only the fast-fail.
+	rlAuthID := modelRateLimitAuthID(req.AuthID, sa)
 	// v0.9.32: model-scoped 6004 fast-fail — a model under an active
 	// upstream rate-limit window fails here without an upstream call.
 	// Other (credential, model) pairs are untouched; the error stays
 	// plain so no host version reads it as credential-level quota.
-	if err := modelRateLimitError(authUID, upstreamModel); err != nil {
+	if err := modelRateLimitError(rlAuthID, upstreamModel); err != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
 		return nil, err
 	}
@@ -1021,7 +1025,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 			}
 		}
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, errPayload)
-		noteModelRateLimitFromPayload(authUID, upstreamModel, statusCode, errPayload)
+		noteModelRateLimitFromPayload(rlAuthID, upstreamModel, statusCode, errPayload)
 		// v0.9.73: 403+11140 quarantines the credential (account restricted
 		// upstream) — the pick filter and executor fast-fail hold it out of
 		// rotation until the backoff window lapses or a healthy answer clears it.
@@ -1065,11 +1069,14 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	if sa.Account.UID != "" {
 		authUID = sa.Account.UID
 	}
+	// v0.9.87 (#76): canonical auth-id key, shared with scheduler.pick and
+	// model.for_auth (see handleExecExecute).
+	rlAuthID := modelRateLimitAuthID(req.AuthID, sa)
 	// v0.9.32: model-scoped 6004 fast-fail — a model under an active
 	// upstream rate-limit window fails here without an upstream call.
 	// Other (credential, model) pairs are untouched; the error stays
 	// plain so no host version reads it as credential-level quota.
-	if err := modelRateLimitError(authUID, upstreamModel); err != nil {
+	if err := modelRateLimitError(rlAuthID, upstreamModel); err != nil {
 		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, err.Error())
 		return nil, err
 	}

@@ -21,11 +21,21 @@
 //  3. modelScopedRateLimitCopy — the bilingual user copy. Deliberately free
 //     of the literal "429": on some host versions a plain error whose message
 //     carries an HTTP status can still be reclassified by message scanning.
-//  4. An in-memory registry keyed (credential uid, upstream model): the first
-//     6004 records the declared reset; further requests for that pair fail
-//     FAST (no upstream call) until the reset instant. Other model pairs are
-//     untouched. Errors stay plain (no StatusCode) on every path so no host
-//     version ever reads them as credential-level 429 quota.
+//  4. An in-memory registry keyed (credential auth-id, upstream model): the
+//     first 6004 records the declared reset; further requests for that pair
+//     fail FAST (no upstream call) until the reset instant. Other model pairs
+//     are untouched. Errors stay plain (no StatusCode) on every path so no
+//     host version ever reads them as credential-level 429 quota.
+//
+// v0.9.87 (issue #76, sciman-top): the registry key is the CANONICAL auth id
+// — the host auth id the executors, model.for_auth and scheduler.pick
+// candidates all share (sanitized UID; see cooldownAuthIDFor). v0.9.32 keyed
+// it by the raw account UID, a key only the executors could reconstruct, so a
+// recorded window gated the fast-fail alone: scheduler.pick kept selecting
+// the dead pair (a selection spent on a millisecond local rejection, with
+// scheduler_priority_reclaim re-serving it), and handleModelForAuth kept
+// advertising it. Both boundaries consume the same table now, under the same
+// key the #35 cooldown table has run on in production since v0.9.57.
 package main
 
 import (
@@ -36,6 +46,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 const (
@@ -154,8 +166,11 @@ type modelRateLimitRegistry struct {
 // horizon-capped and re-armed by the next 6004 after a restart.
 var wbModelRateLimits = &modelRateLimitRegistry{entries: map[string]time.Time{}}
 
-func modelRateLimitKey(uid, model string) string {
-	return strings.TrimSpace(uid) + "\x1f" + strings.ToLower(strings.TrimSpace(model))
+// modelRateLimitKey joins the canonical auth id and the upstream model id
+// (lower-cased: model ids are matched case-insensitively everywhere else
+// in the pair-keyed tables).
+func modelRateLimitKey(authID, model string) string {
+	return strings.TrimSpace(authID) + "\x1f" + strings.ToLower(strings.TrimSpace(model))
 }
 
 func (r *modelRateLimitRegistry) note(key string, resetAt, now time.Time) {
@@ -190,38 +205,40 @@ func (r *modelRateLimitRegistry) until(key string, now time.Time) (time.Time, bo
 	return at, true
 }
 
-// noteModelRateLimit records (or extends) the hold for one (credential,
-// upstream model) pair. A zero/past resetAt falls back to the default window
-// so an unparseable envelope still gets short storm protection.
-func noteModelRateLimit(uid, model string, resetAt time.Time) {
+// noteModelRateLimit records (or extends) the hold for one (credential
+// auth-id, upstream model) pair. A zero/past resetAt falls back to the
+// default window so an unparseable envelope still gets short storm
+// protection.
+func noteModelRateLimit(authID, model string, resetAt time.Time) {
 	now := time.Now()
 	if resetAt.IsZero() || !resetAt.After(now) {
 		resetAt = now.Add(modelRateLimitDefaultWindow)
 	}
-	wbModelRateLimits.note(modelRateLimitKey(uid, model), resetAt, now)
+	wbModelRateLimits.note(modelRateLimitKey(authID, model), resetAt, now)
 }
 
 // noteModelRateLimitFromPayload is the chat-path hook: no-op unless the
-// upstream response is the 6004 model-scoped rejection.
-func noteModelRateLimitFromPayload(uid, model string, statusCode int, payload string) {
+// upstream response is the 6004 model-scoped rejection. authID is the
+// canonical auth id (see modelRateLimitAuthID).
+func noteModelRateLimitFromPayload(authID, model string, statusCode int, payload string) {
 	if !isModelScopedRateLimit(statusCode, payload) {
 		return
 	}
 	reset, _ := parseRateLimitResetAt(payload)
-	noteModelRateLimit(uid, model, reset)
+	noteModelRateLimit(authID, model, reset)
 }
 
 // modelRateLimitedUntil reports the active reset instant for the pair, if any.
-func modelRateLimitedUntil(uid, model string) (time.Time, bool) {
-	return wbModelRateLimits.until(modelRateLimitKey(uid, model), time.Now())
+func modelRateLimitedUntil(authID, model string) (time.Time, bool) {
+	return wbModelRateLimits.until(modelRateLimitKey(authID, model), time.Now())
 }
 
 // modelRateLimitError renders the fast-fail error for a pair with an active
 // window, or nil. Deliberately plain (no StatusCode() impl): every host
 // version must treat it as a transient request-level failure, never as
 // credential-level 429 quota.
-func modelRateLimitError(uid, model string) error {
-	at, ok := modelRateLimitedUntil(uid, model)
+func modelRateLimitError(authID, model string) error {
+	at, ok := modelRateLimitedUntil(authID, model)
 	if !ok {
 		return nil
 	}
@@ -229,6 +246,46 @@ func modelRateLimitError(uid, model string) error {
 		"该模型处于上游模型级限流中（code 6004）——仅此模型受限，同一凭证的其他模型不受影响，%s；上游建议期间切换其他模型继续使用。"+
 			" // This model is under an upstream model-level rate limit (code 6004) — other models on the same credential are unaffected, %s; upstream suggests switching to another model meanwhile.",
 		modelScopedRateLimitClause(at), modelScopedRateLimitClauseEN(at))
+}
+
+// modelRateLimitAuthID resolves the canonical registry key for one
+// credential: the host auth id when the request carries one (executor
+// req.AuthID, catalog req.AuthID and SchedulerAuthCandidate.ID are the same
+// sanitized-UID id), else the sanitized-UID convention shared with the #35
+// cooldown table (cooldownAuthIDFor). One key, every consumer — the join the
+// reporter asked for in #76.
+func modelRateLimitAuthID(hostAuthID string, sa *storedAuth) string {
+	if id := strings.TrimSpace(hostAuthID); id != "" {
+		return id
+	}
+	return cooldownAuthIDFor(sa)
+}
+
+// modelRateLimitActive is the boolean form of modelRateLimitError for the
+// filter paths (scheduler pick, catalog) — no error allocation per pair.
+func modelRateLimitActive(authID, model string) bool {
+	_, ok := modelRateLimitedUntil(authID, model)
+	return ok
+}
+
+// filterModelRateLimitedModels removes models with an active 6004 window
+// for THIS credential so the host's built-in scheduler is never offered a
+// pair the executor would fast-fail (issue #76). Mirrors
+// filterCoolingModels; an empty auth id is a no-op — never a
+// cross-credential drop.
+func filterModelRateLimitedModels(authID string, models []pluginapi.ModelInfo) []pluginapi.ModelInfo {
+	authID = strings.TrimSpace(authID)
+	if authID == "" || len(models) == 0 {
+		return models
+	}
+	out := make([]pluginapi.ModelInfo, 0, len(models))
+	for _, m := range models {
+		if modelRateLimitActive(authID, m.ID) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // modelScopedRateLimitClause / ClauseEN render the reset clause shared by the

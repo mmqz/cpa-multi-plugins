@@ -1480,5 +1480,17 @@ func handleModelForAuth(raw []byte) ([]byte, error) {
 	// req.AuthID follows the host auth-id convention (sanitized UID); empty
 	// (host versions without it) degrades to a no-op filter.
 	models = filterCoolingModels(req.AuthID, models)
+	// Issue #76 (v0.9.87): pairs under an active 6004 window leave the
+	// catalog too — advertising a pair the executor will fast-fail only
+	// spends the host's selection on a millisecond local rejection. Same
+	// canonical auth-id key scheduler.pick filters by; a host that sends
+	// neither AuthID nor parseable storage degrades to a no-op filter.
+	rlAuthID := strings.TrimSpace(req.AuthID)
+	if rlAuthID == "" {
+		if sa, err := parseStored(req.StorageJSON); err == nil {
+			rlAuthID = cooldownAuthIDFor(sa)
+		}
+	}
+	models = filterModelRateLimitedModels(rlAuthID, models)
 	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: models})
 }

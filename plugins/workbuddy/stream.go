@@ -291,7 +291,9 @@ func pumpUpstreamStream(httpReq *http.Request, buildReq func(*storedAuth) (*http
 			verdict.RenewedRefused = true
 		}
 		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, errText)
-		noteModelRateLimitFromPayload(authUID, upstreamModel, statusCode, errText)
+		// v0.9.87 (#76): the note rides the canonical auth-id key so
+		// scheduler.pick and model.for_auth see the same window.
+		noteModelRateLimitFromPayload(modelRateLimitAuthID(authID, sa), upstreamModel, statusCode, errText)
 		// v0.9.73: 403+11140 quarantines the credential (account restricted
 		// upstream) on the async path too.
 		noteAccountRestrictionFromPayload(authID, sa, statusCode, errText)
@@ -542,7 +544,9 @@ func collectUpstreamStream(body []byte, sa *storedAuth, authID string, sseFramed
 			}
 		}
 		if sa != nil {
-			noteModelRateLimitFromPayload(sa.Account.UID, upstreamModel, statusCode, errText)
+			// v0.9.87 (#76): canonical auth-id key (authID may be empty on
+			// hosts that do not populate it — cooldownAuthIDFor resolves).
+			noteModelRateLimitFromPayload(modelRateLimitAuthID(authID, sa), upstreamModel, statusCode, errText)
 		}
 		if sa != nil && sa.Account.UID != "" {
 			go reconcileByUID(sa.Account.UID, statusCode, errText)

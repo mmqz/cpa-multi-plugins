@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.9.87
+
+### A recorded 6004 window is now respected at every boundary (issue #76)
+
+sciman-top's audit: the model-scoped 6004 registry (v0.9.32) was keyed by
+the raw account UID — a key only the executors could reconstruct. A
+recorded (credential, model) window gated the executor fast-fail alone:
+
+- `scheduler.pick` kept selecting the dead pair — the selection was spent
+  on a millisecond local rejection while the healthy siblings waited
+  behind it, and under `scheduler_priority_reclaim` the sticky picker
+  re-served the same dead pair until some other request happened to
+  establish an ordinary cooling entry;
+- `model.for_auth` kept advertising the pair, so the host's built-in
+  scheduler was offered a degraded pair it could only discover by failing.
+
+The registry is re-keyed to the canonical auth id — the sanitized-UID
+identifier the host already carries in `SchedulerAuthCandidate.ID`,
+executor `req.AuthID` and model.for_auth `req.AuthID` (the same contract
+the #35 cooldown table has run on since v0.9.57; the
+`workbuddy-intl-<uid>.json` names the reporter observed are the FILE
+layer — ids never carry the prefix). `scheduler.pick` skips a windowed
+pair at candidate-filter time and `handleModelForAuth` drops it from the
+catalog, both under the same key the executors note into. A host that
+sends no AuthID derives the key from the stored credential
+(`cooldownAuthIDFor`), so the join holds on every host version. The
+reporter's candidate patch shape (a `filterModelRateLimitedModels` at the
+catalog boundary) is preserved in spirit; the join-key question it
+deferred to the maintainer is answered above.
+
 ## 0.9.86
 
 ### The CN gate's hyphenated 11-128 classifies as channel risk control again (issue #75)

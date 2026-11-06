@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // The exact upstream shape observed on 2026-09-22 (issue round): the gateway
@@ -225,5 +228,179 @@ func TestModelRateLimitErrorFastFail(t *testing.T) {
 	// A different model on the same credential is untouched.
 	if err := modelRateLimitError(uid, "glm-5.2"); err != nil {
 		t.Fatalf("sibling model must be unaffected, got %v", err)
+	}
+}
+
+// withModelRateLimitEntry notes a 6004 window and returns via cleanup.
+func withModelRateLimitEntry(t *testing.T, authID, model string, reset time.Time) {
+	t.Helper()
+	noteModelRateLimit(authID, model, reset)
+	key := modelRateLimitKey(authID, model)
+	t.Cleanup(func() {
+		wbModelRateLimits.mu.Lock()
+		delete(wbModelRateLimits.entries, key)
+		wbModelRateLimits.mu.Unlock()
+	})
+}
+
+// catalogIDsFor drives handleModelForAuth and returns the advertised ids.
+func catalogIDsFor(t *testing.T, req pluginapi.AuthModelRequest) []string {
+	t.Helper()
+	raw, err := handleModelForAuth(mustMarshal(t, req))
+	if err != nil {
+		t.Fatalf("handleModelForAuth: %v", err)
+	}
+	var env struct {
+		OK     bool                    `json:"ok"`
+		Result pluginapi.ModelResponse `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
+		t.Fatalf("envelope: %v raw=%s", err, raw)
+	}
+	return modelIDsOf(env.Result.Models)
+}
+
+// TestModelRateLimitSchedulerSkipsWindowedPair (issue #76): a candidate
+// whose (auth, model) pair has an active 6004 window is not selectable —
+// the pick lands on the healthy sibling instead of burning a selection on
+// the executor's local fast-fail. Priority reclaim must not resurrect the
+// dead pair either, and an all-windowed pool defers to the host like every
+// other veto class.
+func TestModelRateLimitSchedulerSkipsWindowedPair(t *testing.T) {
+	resetActiveAuth(t)
+	const model = "deepseek-v4.1-flash"
+	withModelRateLimitEntry(t, "wb-76-a", model, time.Now().Add(20*time.Minute))
+
+	pick := func(t *testing.T) pluginapi.SchedulerPickResponse {
+		t.Helper()
+		raw, err := handleSchedulerPick(mustMarshal(t, pluginapi.SchedulerPickRequest{
+			Provider: providerName,
+			Model:    model,
+			Candidates: []pluginapi.SchedulerAuthCandidate{
+				{ID: "wb-76-a", Provider: providerName},
+				{ID: "wb-76-b", Provider: providerName},
+			},
+		}))
+		if err != nil {
+			t.Fatalf("handleSchedulerPick: %v", err)
+		}
+		return parsePickResponse(t, raw)
+	}
+
+	// Sticky mode with the panel selection ON the windowed pair: the pair
+	// loses the pick, the healthy sibling serves.
+	setActiveAuthID("wb-76-a")
+	resp := pick(t)
+	if !resp.Handled || resp.AuthID != "wb-76-b" {
+		t.Fatalf("windowed pair must lose the pick, got %+v", resp)
+	}
+
+	// Priority reclaim serves the first live candidate in host order —
+	// wb-76-a is first, but the 6004 window must still veto it.
+	restore := setPriorityReclaim(true)
+	defer restore()
+	resp = pick(t)
+	if !resp.Handled || resp.AuthID != "wb-76-b" {
+		t.Fatalf("priority reclaim must not resurrect a windowed pair, got %+v", resp)
+	}
+
+	// Every candidate windowed → defer to the host (Handled:false).
+	withModelRateLimitEntry(t, "wb-76-b", model, time.Now().Add(20*time.Minute))
+	resp = pick(t)
+	if resp.Handled {
+		t.Fatalf("all-windowed pool must defer to the host, got %+v", resp)
+	}
+}
+
+// TestModelRateLimitCatalogHidesWindowedPair (issue #76): model.for_auth
+// stops advertising a pair under an active 6004 window for THIS credential;
+// another credential's catalog is untouched; a host that sends no AuthID
+// still resolves the same key from the stored credential.
+func TestModelRateLimitCatalogHidesWindowedPair(t *testing.T) {
+	resetPinnedModels()
+	resetDynamicModelsCache()
+	defer func() { resetPinnedModels(); resetDynamicModelsCache() }()
+	pinnedModelsMu.Lock()
+	pinnedModels["cn"] = []string{"glm-5.3-flash", "deepseek-v4.1-flash"}
+	pinnedModelsMu.Unlock()
+
+	const model = "deepseek-v4.1-flash"
+	withModelRateLimitEntry(t, "acct-76", model, time.Now().Add(20*time.Minute))
+
+	storage := []byte(`{"auth":{"domain":"copilot.tencent.com","accessToken":"tok"},"account":{"uid":"acct-76"}}`)
+	ids := catalogIDsFor(t, pluginapi.AuthModelRequest{
+		AuthID:       "acct-76",
+		AuthProvider: providerName,
+		StorageJSON:  storage,
+	})
+	if len(ids) != 1 || ids[0] != "glm-5.3-flash" {
+		t.Fatalf("windowed pair must be hidden from the catalog: %v", ids)
+	}
+
+	// Another credential keeps the pair — the window is per (credential,
+	// model), never global.
+	ids = catalogIDsFor(t, pluginapi.AuthModelRequest{
+		AuthID:       "acct-77",
+		AuthProvider: providerName,
+		StorageJSON:  []byte(`{"auth":{"domain":"copilot.tencent.com","accessToken":"tok"},"account":{"uid":"acct-77"}}`),
+	})
+	if len(ids) != 2 {
+		t.Fatalf("sibling credential must keep the pair: %v", ids)
+	}
+
+	// Host without AuthID: the key derives from the stored credential —
+	// the same sanitized UID, so the window still hides the pair.
+	ids = catalogIDsFor(t, pluginapi.AuthModelRequest{
+		AuthProvider: providerName,
+		StorageJSON:  storage,
+	})
+	if len(ids) != 1 || ids[0] != "glm-5.3-flash" {
+		t.Fatalf("storage-derived key must match the recorded window: %v", ids)
+	}
+}
+
+// TestModelRateLimitJoinKeyMatchesHostConvention (issue #76): the canonical
+// join key the reporter asked the maintainer to confirm. A credential whose
+// raw UID carries filename-unsafe characters records its window under the
+// SANITIZED form (the host auth id); scheduler candidates and the
+// storage-derived catalog key resolve to that same string. The
+// workbuddy-intl-<uid>.json names the reporter observed are the FILE layer —
+// ids never carry the prefix, so the join holds on every host version.
+func TestModelRateLimitJoinKeyMatchesHostConvention(t *testing.T) {
+	const rawUID = "user@tenant|42"
+	const model = "glm-5.3-flash"
+	sa := &storedAuth{}
+	sa.Account.UID = rawUID
+
+	// An old host that sends no AuthID: the note falls back to the
+	// sanitized-UID convention (cooldownAuthIDFor).
+	noted := modelRateLimitAuthID("", sa)
+	if noted != "user_tenant_42" {
+		t.Fatalf("sanitized auth id = %q, want user_tenant_42", noted)
+	}
+	withModelRateLimitEntry(t, noted, model, time.Now().Add(20*time.Minute))
+
+	// The scheduler's candidate id (the host auth id) resolves the window.
+	if !modelRateLimitActive("user_tenant_42", model) {
+		t.Fatal("scheduler candidate id must resolve the window")
+	}
+	// The raw UID is no longer a live key (the v0.9.32 keying is gone).
+	if modelRateLimitActive(rawUID, model) {
+		t.Fatal("raw UID must not be a registry key")
+	}
+
+	// The catalog derives the same key from storage when AuthID is absent.
+	resetPinnedModels()
+	resetDynamicModelsCache()
+	defer func() { resetPinnedModels(); resetDynamicModelsCache() }()
+	pinnedModelsMu.Lock()
+	pinnedModels["cn"] = []string{"glm-5.3-flash", "deepseek-v4.1-flash"}
+	pinnedModelsMu.Unlock()
+	ids := catalogIDsFor(t, pluginapi.AuthModelRequest{
+		AuthProvider: providerName,
+		StorageJSON:  []byte(`{"auth":{"domain":"copilot.tencent.com","accessToken":"tok"},"account":{"uid":"user@tenant|42"}}`),
+	})
+	if len(ids) != 1 || ids[0] != "deepseek-v4.1-flash" {
+		t.Fatalf("storage-derived catalog key must hide the windowed pair: %v", ids)
 	}
 }
