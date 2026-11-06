@@ -51,9 +51,14 @@ jobs:
           # the arm64 runner: Apple's clang accepts -arch x86_64 on Apple
           # Silicon and the Go cgo toolchain drives it via CC. optional:true
           # keeps a toolchain regression from blocking the other four assets.
+          # 2026-11-06: macos-14 itself retired from GitHub Actions on
+          # 2026-11-02 (actions/runner-images#13518) — jobs requesting it are
+          # terminated before any step runs, which cancelled the darwin legs
+          # (and with them the whole run) from 11-06 on. Both darwin legs move
+          # to macos-15 (Apple Silicon, same cross-build story as above).
           - os: darwin
             arch: amd64
-            runner: macos-14
+            runner: macos-15
             goos: darwin
             goarch: amd64
             cc: "clang -arch x86_64"
@@ -61,7 +66,7 @@ jobs:
             optional: true
           - os: darwin
             arch: arm64
-            runner: macos-14
+            runner: macos-15
             goos: darwin
             goarch: arm64
             cc: clang
