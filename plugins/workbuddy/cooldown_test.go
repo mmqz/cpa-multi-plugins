@@ -30,6 +30,15 @@ func withFrozenCooldown(t *testing.T, now time.Time) {
 	})
 }
 
+// withFrozenHoldTables freezes BOTH per-(credential, model) hold tables
+// for tests that exercise the merged management surface (issue #77):
+// the #35 cooldown table and the 6004 model-rate-limit registry.
+func withFrozenHoldTables(t *testing.T, now time.Time) {
+	t.Helper()
+	withFrozenCooldown(t, now)
+	withFrozenModelRateLimits(t, now)
+}
+
 // TestRecordUpstreamFailureMatrix locks the issue #35 classification:
 //
 //	6004               -> NOT tabled (model_ratelimit.go owns it)
@@ -350,7 +359,7 @@ func TestSchedulerPickSkipsCoolingPair(t *testing.T) {
 
 // TestCooldownManagementEndpoints: list / list-one / clear round-trip.
 func TestCooldownManagementEndpoints(t *testing.T) {
-	withFrozenCooldown(t, time.Now())
+	withFrozenHoldTables(t, time.Now())
 	markModelCooldown("acct-a", "m1", cooldownReasonRateLimit)
 	markModelCooldown("acct-b", "m2", cooldownReasonUnknown)
 
@@ -385,4 +394,95 @@ func modelIDsOf(models []pluginapi.ModelInfo) []string {
 		out = append(out, m.ID)
 	}
 	return out
+}
+
+// TestCooldownListMergesRateLimitWindows: one operator surface, both tables
+// (issue #77) — 6004 windows ride along in the same row shape and the merged
+// order is deterministic.
+func TestCooldownListMergesRateLimitWindows(t *testing.T) {
+	now := time.Now()
+	withFrozenHoldTables(t, now)
+
+	markModelCooldownUntil("acct-a", "m1", cooldownReasonRateLimit, now.Add(300*time.Second))
+	markModelCooldownUntil("acct-a", "m2", cooldownReasonDailyQuota, now.Add(time.Hour))
+	noteModelRateLimit("acct-a", "m3", now.Add(40*time.Minute))
+	noteModelRateLimit("acct-b", "m1", now.Add(5*time.Minute))
+
+	all := handleCooldownList(pluginapi.ManagementRequest{Query: map[string][]string{}})
+	if all["count"].(int) != 4 {
+		t.Fatalf("merged list = %#v", all)
+	}
+	entries := all["entries"].([]map[string]any)
+	wantOrder := []struct{ auth, model, reason string }{
+		{"acct-a", "m1", "rate_limit"},
+		{"acct-a", "m2", "daily_quota"},
+		{"acct-a", "m3", modelRateLimitViewReason},
+		{"acct-b", "m1", modelRateLimitViewReason},
+	}
+	for i, w := range wantOrder {
+		if entries[i]["auth_id"] != w.auth || entries[i]["model"] != w.model || entries[i]["reason"] != w.reason {
+			t.Fatalf("row %d = %#v, want %v", i, entries[i], w)
+		}
+	}
+
+	// The per-account view merges too, and its rows carry no auth_id.
+	one := handleCooldownList(pluginapi.ManagementRequest{Query: map[string][]string{"auth_id": {"acct-a"}}})
+	if one["count"].(int) != 3 {
+		t.Fatalf("merged per-account list = %#v", one)
+	}
+	for _, row := range one["entries"].([]map[string]any) {
+		if _, has := row["auth_id"]; has {
+			t.Fatal("per-account rows must not carry auth_id")
+		}
+	}
+}
+
+// TestCooldownClearRemovesBothTables: the panel's "give this pair another
+// chance now" must lift both holds — a pair can sit in both tables at once
+// (a short cooldown under a longer 6004 window).
+func TestCooldownClearRemovesBothTables(t *testing.T) {
+	now := time.Now()
+	withFrozenHoldTables(t, now)
+
+	markModelCooldownUntil("acct-a", "m1", cooldownReasonUnknown, now.Add(60*time.Second))
+	noteModelRateLimit("acct-a", "m1", now.Add(40*time.Minute))
+	markModelCooldownUntil("acct-b", "m2", cooldownReasonRateLimit, now.Add(300*time.Second))
+
+	// Pair clear removes both holds and reports the total.
+	res := handleCooldownClear(pluginapi.ManagementRequest{Body: []byte(`{"auth_id":"acct-a","model":"m1"}`)})
+	if res["removed"].(int) != 2 {
+		t.Fatalf("pair clear = %#v", res)
+	}
+	if len(cooldownSnapshotFor("acct-a")) != 0 || len(modelRateLimitSnapshotFor("acct-a")) != 0 {
+		t.Fatal("acct-a must be fully released")
+	}
+
+	// Account clear sweeps whatever is left for the account.
+	res2 := handleCooldownClear(pluginapi.ManagementRequest{Body: []byte(`{"auth_id":"acct-b"}`)})
+	if res2["removed"].(int) != 1 {
+		t.Fatalf("account clear = %#v", res2)
+	}
+	final := handleCooldownList(pluginapi.ManagementRequest{Query: map[string][]string{}})
+	if final["count"].(int) != 0 {
+		t.Fatalf("both tables must be empty after clears: %#v", final)
+	}
+}
+
+// TestCooldownRoutesRegistered: the endpoints are advertised to the host the
+// same way qoder's are (issue #77) — otherwise operators can't discover them.
+func TestCooldownRoutesRegistered(t *testing.T) {
+	reg := managementRegistration()
+	base := "/plugins/" + providerName
+	var get, post bool
+	for _, r := range reg.Routes {
+		if r.Path == base+"/cooldowns" && r.Method == http.MethodGet {
+			get = true
+		}
+		if r.Path == base+"/cooldowns/clear" && r.Method == http.MethodPost {
+			post = true
+		}
+	}
+	if !get || !post {
+		t.Fatalf("cooldowns routes not registered: get=%v post=%v", get, post)
+	}
 }

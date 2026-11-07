@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.9.88
+
+### 6004 windows are now operator-visible: one merged cooldown surface (issue #77)
+
+The #76 rework left the 6004 registry a black box: `GET /cooldowns` read
+only the #35 cooldown table (an active model-rate-limit window never
+appeared — the model just silently vanished from the catalog), and
+`POST /cooldowns/clear` — the panel's "give this pair another chance now"
+— could not lift a 6004 hold. The two routes were not even declared in
+`managementRegistration()` (qoder declares its equivalents).
+
+- `model_ratelimit.go` now owns its own management views:
+  `modelRateLimitSnapshotFor/All` render active windows in the same row
+  shape `cooldownEntryView` produces (reason `model_rate_limit`,
+  distinct from every `cooldownReason`), and `clearModelRateLimit` is
+  the manual exit. Entries carry `NotedAt` (rendered as `updated_at`),
+  the registry clock is the `modelRateLimitNowFn` var (one clock per
+  table, mirroring `cooldownNowFn`), and expired entries sweep lazily on
+  read — no file outside this one reaches into the map.
+- `handleCooldownList` merges both tables behind the same endpoint, in
+  one deterministic order (`sortCooldownViewRows`: account, model,
+  reason — a pair can legitimately sit in both tables at once, e.g. a
+  short cooldown under a longer 6004 window). `handleCooldownClear`
+  clears both and reports the total.
+- The two routes are registered in `managementRegistration()`, the same
+  shape qoder registers — discoverable from the host route listing.
+- `panel.html` gains a collapsible 冷却/限频 card: active windows grouped
+  by account with reason badges (模型限流 6004 / 每日限额 / 频率限制 /
+  上游异常), reset instants and remaining time, per-row 立即重试 and
+  per-account 清除该账号.
+
+No protocol, fast-fail, scheduler.pick or catalog behavior changed —
+the listing/clear surface is purely additive for operators.
+
 ## 0.9.87
 
 ### A recorded 6004 window is now respected at every boundary (issue #76)

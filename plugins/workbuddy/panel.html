@@ -197,6 +197,7 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
     <button class="sec" onclick="vouchersAll(this)" title="开学季券码查询（仅 CN · 活动期）">开学季</button>
     <button class="sec" onclick="claimTrialAll(this)" title="仅 Global · 一次性">全部领取</button>
     <button class="sec" onclick="modelCtlToggle(this)" title="按渠道勾选启用/禁用模型（写入 oauth-excluded-models 子键）">模型禁用</button>
+    <button class="sec" onclick="coolCtlToggle(this)" title="当前被冷却 / 6004 限流暂停的 (账号, 模型) 组合，可手动解除">冷却状态</button>
     <label class="toggle" title="仅 CN 账号 09:00 / 21:00"><input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)"> 自动签到(CN)</label>
     <span class="toggle" id="svtime"></span>
   </div>
@@ -221,6 +222,16 @@ button .spin{border-color:var(--on-acc);border-top-color:transparent}
       <button onclick="modelGroupsSave(this)">保存排除</button>
       <span class="toggle">改动写入 config.yaml 的 oauth-excluded-models.workbuddy-&lt;realm&gt;，宿主热加载后数秒内生效</span>
     </div>
+  </div>
+  <div class="card" id="coolCtlCard" style="display:none;margin:0 0 14px">
+    <h2>冷却 / 限频状态
+      <span style="display:flex;gap:6px">
+        <button class="sec" onclick="coolCtlLoad(this)">刷新</button>
+        <button class="sec" onclick="coolCtlToggle(this)">收起</button>
+      </span>
+    </h2>
+    <div class="sub" style="margin:6px 0 10px">两类被暂停的 (账号, 模型) 组合：冷却（频率限制 / 每日限额 / 上游异常）与 6004 模型级限流窗口。「立即重试」手动解除——上游仍在限制时会再次记录；状态为进程内存，宿主重启后清空。</div>
+    <div id="coolBox"><div class="loading">加载中…</div></div>
   </div>
   <div id="grid" class="grid"><div class="loading">加载中…</div></div>
 </div>
@@ -1175,6 +1186,75 @@ async function modelGroupsSave(btn){
   }catch(e){toast("保存失败","err",e.message)}
   busy(btn,false);
 }
+/* ===== 冷却/限频状态（v0.9.88, issue #77）=====
+   列表：GET /plugins/workbuddy/cooldowns —— #35 冷却表 + 6004 模型级限流
+   登记表的合并视图（reason=model_rate_limit 即 6004 窗口）。
+   解除：POST /cooldowns/clear {auth_id[, model]} —— 两表同清。 */
+let coolCtlOpen=false;
+const COOL_REASON={"model_rate_limit":"模型限流 6004","daily_quota":"每日限额","rate_limit":"频率限制","upstream_error":"上游异常"};
+function coolCtlToggle(btn){
+  const c=document.getElementById("coolCtlCard");
+  coolCtlOpen=!coolCtlOpen;
+  c.style.display=coolCtlOpen?"block":"none";
+  if(coolCtlOpen)coolCtlLoad();
+  if(btn)btn.blur();
+}
+async function coolCtlLoad(btn){
+  if(btn)busy(btn,true);
+  const box=document.getElementById("coolBox");
+  try{
+    const d=await api("/cooldowns");
+    coolRender(d);
+  }catch(e){box.innerHTML='<div class="row"><span class="v err">'+esc(e.message||String(e))+'</span></div>'}
+  if(btn)busy(btn,false);
+}
+function fmtCoolSecs(s){
+  s=Math.max(0,Math.round(Number(s)||0));
+  if(s<60)return s+" 秒";
+  const m=Math.floor(s/60),h=Math.floor(m/60),dd=Math.floor(h/24);
+  if(dd)return dd+" 天 "+(h%24)+" 时";
+  if(h)return h+" 时 "+(m%60)+" 分";
+  return m+" 分 "+(s%60)+" 秒";
+}
+function coolTime(iso){return String(iso||"").replace("T"," ").replace("Z"," UTC")}
+function coolRender(d){
+  const box=document.getElementById("coolBox");
+  const rows=(d&&d.entries)||[];
+  if(!rows.length){box.innerHTML='<div class="row"><span class="v">没有活跃的冷却或限频窗口</span></div>';return}
+  const groups=new Map();
+  for(const r of rows){const k=r.auth_id||"—";if(!groups.has(k))groups.set(k,[]);groups.get(k).push(r)}
+  box.innerHTML=[...groups.entries()].map(([auth,rs])=>{
+    return `<div class="mg-group">
+      <div class="mg-hd"><b>${esc(auth)}</b><span class="mg-meta">${rs.length} 个窗口 · <button type="button" class="sec" style="padding:1px 8px;font-size:11px" data-cool-clear="account" data-cool-auth="${esc(auth)}">清除该账号</button></span></div>
+      <div class="mg-list">${rs.map(coolRow).join("")}</div>
+    </div>`;
+  }).join("");
+}
+function coolRow(r){
+  const label=COOL_REASON[r.reason]||r.reason||"-";
+  const badgeCls=r.reason==="model_rate_limit"?"pro":(r.reason==="daily_quota"?"global":"cn");
+  return `<label class="mg-item" title="记录于 ${esc(coolTime(r.updated_at))}">
+    <span class="badge ${badgeCls}">${esc(label)}</span>
+    <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.model||"-")}</span>
+    <span style="color:var(--mut);font-size:11px;white-space:nowrap">剩 ${esc(fmtCoolSecs(r.seconds))} · 至 ${esc(coolTime(r.until))}</span>
+    <button type="button" class="sec" style="margin-left:auto;padding:1px 8px;font-size:11px" data-cool-clear="pair" data-cool-auth="${esc(r.auth_id||"")}" data-cool-model="${esc(r.model||"")}">立即重试</button>
+  </label>`;
+}
+async function coolClear(btn,authId,model){
+  busy(btn,true);
+  const payload=model?{auth_id:authId,model:model}:{auth_id:authId};
+  try{
+    const d=await api("/cooldowns/clear",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    if(d.error){toast("解除失败","err",d.error);busy(btn,false);return}
+    toast("已解除","ok","共清除 "+(d.removed||0)+" 个窗口"+(model?"":"（该账号全部）"));
+    coolCtlLoad();
+  }catch(e){toast("解除请求失败","err",e.message);busy(btn,false)}
+}
+document.getElementById("coolBox").addEventListener("click",e=>{
+  const btn=e.target.closest("[data-cool-clear]");
+  if(!btn)return;
+  coolClear(btn,btn.dataset.coolAuth||"",btn.dataset.coolModel||"");
+});
 document.getElementById("keyInput").addEventListener("keydown",e=>{if(e.key==="Enter")saveKey()});
 document.addEventListener("keydown",e=>{
   if(e.key=="Escape"&&document.getElementById("importModal").classList.contains("show")) closeImportModal();

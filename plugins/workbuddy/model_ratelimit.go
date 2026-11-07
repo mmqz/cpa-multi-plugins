@@ -36,6 +36,13 @@
 // scheduler_priority_reclaim re-serving it), and handleModelForAuth kept
 // advertising it. Both boundaries consume the same table now, under the same
 // key the #35 cooldown table has run on in production since v0.9.57.
+//
+// v0.9.88 (issue #77): the registry is no longer a black box to operators.
+// It owns its own management views — modelRateLimitSnapshotFor/All render
+// active windows in the same row shape the #35 cooldown table lists, and
+// clearModelRateLimit is the manual "give this pair another chance now"
+// exit. The cooldown listing/clear endpoints merge both tables; no file
+// outside this one reaches into the map.
 package main
 
 import (
@@ -157,14 +164,23 @@ func modelScopedRateLimitCopy(resetAt time.Time, resetKnown bool) string {
 // -----------------------------------------------------------------------------
 // registry
 
+type modelRateLimitEntry struct {
+	ResetAt time.Time
+	NotedAt time.Time
+}
+
 type modelRateLimitRegistry struct {
 	mu      sync.Mutex
-	entries map[string]time.Time
+	entries map[string]modelRateLimitEntry
 }
 
 // wbModelRateLimits is the process-wide registry. In-memory only: resets are
 // horizon-capped and re-armed by the next 6004 after a restart.
-var wbModelRateLimits = &modelRateLimitRegistry{entries: map[string]time.Time{}}
+var wbModelRateLimits = &modelRateLimitRegistry{entries: map[string]modelRateLimitEntry{}}
+
+// modelRateLimitNowFn is the registry clock — a var so tests can freeze it
+// (mirrors cooldownNowFn; one clock per table).
+var modelRateLimitNowFn = time.Now
 
 // modelRateLimitKey joins the canonical auth id and the upstream model id
 // (lower-cased: model ids are matched case-insensitively everywhere else
@@ -178,31 +194,31 @@ func (r *modelRateLimitRegistry) note(key string, resetAt, now time.Time) {
 	defer r.mu.Unlock()
 	if len(r.entries) >= modelRateLimitMaxEntries {
 		for k, at := range r.entries {
-			if !at.After(now) {
+			if !at.ResetAt.After(now) {
 				delete(r.entries, k)
 			}
 		}
 	}
 	// Never shorten an active window: a second 6004 with a smaller parsed
 	// reset must not release the earlier (larger) hold.
-	if existing, ok := r.entries[key]; ok && existing.After(resetAt) {
+	if existing, ok := r.entries[key]; ok && existing.ResetAt.After(resetAt) {
 		return
 	}
-	r.entries[key] = resetAt
+	r.entries[key] = modelRateLimitEntry{ResetAt: resetAt, NotedAt: now}
 }
 
 func (r *modelRateLimitRegistry) until(key string, now time.Time) (time.Time, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	at, ok := r.entries[key]
+	e, ok := r.entries[key]
 	if !ok {
 		return time.Time{}, false
 	}
-	if !at.After(now) {
+	if !e.ResetAt.After(now) {
 		delete(r.entries, key) // lazy expiry
 		return time.Time{}, false
 	}
-	return at, true
+	return e.ResetAt, true
 }
 
 // noteModelRateLimit records (or extends) the hold for one (credential
@@ -210,7 +226,7 @@ func (r *modelRateLimitRegistry) until(key string, now time.Time) (time.Time, bo
 // default window so an unparseable envelope still gets short storm
 // protection.
 func noteModelRateLimit(authID, model string, resetAt time.Time) {
-	now := time.Now()
+	now := modelRateLimitNowFn()
 	if resetAt.IsZero() || !resetAt.After(now) {
 		resetAt = now.Add(modelRateLimitDefaultWindow)
 	}
@@ -230,7 +246,7 @@ func noteModelRateLimitFromPayload(authID, model string, statusCode int, payload
 
 // modelRateLimitedUntil reports the active reset instant for the pair, if any.
 func modelRateLimitedUntil(authID, model string) (time.Time, bool) {
-	return wbModelRateLimits.until(modelRateLimitKey(authID, model), time.Now())
+	return wbModelRateLimits.until(modelRateLimitKey(authID, model), modelRateLimitNowFn())
 }
 
 // modelRateLimitError renders the fast-fail error for a pair with an active
@@ -259,6 +275,112 @@ func modelRateLimitAuthID(hostAuthID string, sa *storedAuth) string {
 		return id
 	}
 	return cooldownAuthIDFor(sa)
+}
+
+// -----------------------------------------------------------------------------
+// management views (issue #77)
+
+// modelRateLimitViewReason is the row reason the cooldown listing renders for
+// 6004 windows — deliberately distinct from every cooldownReason so consumers
+// can tell the two tables apart in one merged list.
+const modelRateLimitViewReason = "model_rate_limit"
+
+// splitModelRateLimitKey unpacks a registry key into (auth id, model). The
+// separator cannot occur in a sanitized auth id; the model half keeps its
+// recorded lower-casing.
+func splitModelRateLimitKey(key string) (authID, model string) {
+	halves := strings.SplitN(key, "\x1f", 2)
+	if len(halves) != 2 {
+		return key, ""
+	}
+	return halves[0], halves[1]
+}
+
+// modelRateLimitEntryView renders one registry row in the SAME shape
+// cooldownEntryView produces, so the panel and API consumers read one list.
+func modelRateLimitEntryView(authID, model string, e modelRateLimitEntry, now time.Time, withAuth bool) map[string]any {
+	row := map[string]any{
+		"model":      model,
+		"reason":     modelRateLimitViewReason,
+		"until":      e.ResetAt.UTC().Format(time.RFC3339),
+		"seconds":    int(e.ResetAt.Sub(now).Round(time.Second) / time.Second),
+		"updated_at": e.NotedAt.UTC().Format(time.RFC3339),
+	}
+	if withAuth {
+		row["auth_id"] = authID
+	}
+	return row
+}
+
+// modelRateLimitSnapshotFor lists the account's still-active 6004 windows.
+// Expired entries are swept lazily, mirroring until().
+func modelRateLimitSnapshotFor(authID string) []map[string]any {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil
+	}
+	now := modelRateLimitNowFn()
+	wbModelRateLimits.mu.Lock()
+	out := make([]map[string]any, 0)
+	for k, e := range wbModelRateLimits.entries {
+		if keyAuth, model := splitModelRateLimitKey(k); keyAuth == authID {
+			if !e.ResetAt.After(now) {
+				delete(wbModelRateLimits.entries, k)
+				continue
+			}
+			out = append(out, modelRateLimitEntryView(authID, model, e, now, false))
+		}
+	}
+	wbModelRateLimits.mu.Unlock()
+	sortCooldownViewRows(out, false)
+	return out
+}
+
+// modelRateLimitSnapshotAll lists every active 6004 window across accounts.
+func modelRateLimitSnapshotAll() []map[string]any {
+	now := modelRateLimitNowFn()
+	wbModelRateLimits.mu.Lock()
+	out := make([]map[string]any, 0)
+	for k, e := range wbModelRateLimits.entries {
+		if !e.ResetAt.After(now) {
+			delete(wbModelRateLimits.entries, k)
+			continue
+		}
+		authID, model := splitModelRateLimitKey(k)
+		out = append(out, modelRateLimitEntryView(authID, model, e, now, true))
+	}
+	wbModelRateLimits.mu.Unlock()
+	sortCooldownViewRows(out, true)
+	return out
+}
+
+// clearModelRateLimit removes one pair's 6004 window, or every window for the
+// account when model is empty — the manual exit the panel's "retry now"
+// needed (issue #77). Returns how many windows were removed.
+func clearModelRateLimit(authID, model string) int {
+	authID = strings.TrimSpace(authID)
+	model = strings.ToLower(strings.TrimSpace(model))
+	if authID == "" {
+		return 0
+	}
+	wbModelRateLimits.mu.Lock()
+	defer wbModelRateLimits.mu.Unlock()
+	removed := 0
+	if model != "" {
+		key := modelRateLimitKey(authID, model)
+		if _, ok := wbModelRateLimits.entries[key]; ok {
+			delete(wbModelRateLimits.entries, key)
+			removed++
+		}
+		return removed
+	}
+	for k := range wbModelRateLimits.entries {
+		if keyAuth, _ := splitModelRateLimitKey(k); keyAuth == authID {
+			delete(wbModelRateLimits.entries, k)
+			removed++
+		}
+	}
+	return removed
 }
 
 // modelRateLimitActive is the boolean form of modelRateLimitError for the
