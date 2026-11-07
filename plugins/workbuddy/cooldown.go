@@ -38,6 +38,10 @@
 // rotating that pair for a minute is mild, self-expiring, and strictly
 // better than silently hammering the drained credential.
 //
+// v0.9.88 (issue #77): the management listing/clear endpoints merge the 6004
+// model-rate-limit windows in — one operator surface for every
+// per-(credential, model) hold, whichever table owns it.
+//
 // State is process-local: it survives config reloads but not a host restart.
 package main
 
@@ -217,6 +221,25 @@ func clearModelCooldown(authID, model string) int {
 	return removed
 }
 
+// sortCooldownViewRows orders listing rows deterministically: account, then
+// model, then reason — a pair can legitimately sit in both tables at once
+// (a short cooldown under a longer 6004 window, or the reverse), and the
+// merged listing needs one order. withAuth=false is the per-account view.
+func sortCooldownViewRows(rows []map[string]any, withAuth bool) {
+	str := func(row map[string]any, key string) string { s, _ := row[key].(string); return s }
+	sort.Slice(rows, func(i, j int) bool {
+		if withAuth {
+			if a, b := str(rows[i], "auth_id"), str(rows[j], "auth_id"); a != b {
+				return a < b
+			}
+		}
+		if a, b := str(rows[i], "model"), str(rows[j], "model"); a != b {
+			return a < b
+		}
+		return str(rows[i], "reason") < str(rows[j], "reason")
+	})
+}
+
 // cooldownSnapshotFor lists the still-active pairs for one account.
 func cooldownSnapshotFor(authID string) []map[string]any {
 	authID = strings.TrimSpace(authID)
@@ -233,11 +256,7 @@ func cooldownSnapshotFor(authID string) []map[string]any {
 		out = append(out, cooldownEntryView(k, v, now, false))
 	}
 	cooldownMu.Unlock()
-	sort.Slice(out, func(i, j int) bool {
-		a, _ := out[i]["model"].(string)
-		b, _ := out[j]["model"].(string)
-		return a < b
-	})
+	sortCooldownViewRows(out, false)
 	return out
 }
 
@@ -253,16 +272,7 @@ func cooldownSnapshotAll() []map[string]any {
 		out = append(out, cooldownEntryView(k, v, now, true))
 	}
 	cooldownMu.Unlock()
-	sort.Slice(out, func(i, j int) bool {
-		a, _ := out[i]["auth_id"].(string)
-		b, _ := out[j]["auth_id"].(string)
-		if a != b {
-			return a < b
-		}
-		am, _ := out[i]["model"].(string)
-		bm, _ := out[j]["model"].(string)
-		return am < bm
-	})
+	sortCooldownViewRows(out, true)
 	return out
 }
 
@@ -521,10 +531,15 @@ func filterCoolingModels(authID string, models []pluginapi.ModelInfo) []pluginap
 }
 
 // handleCooldownList reports every active pair, or one account's pairs when
-// auth_id is given. State lives in memory, so the response says so.
+// auth_id is given. Since v0.9.88 (issue #77) the 6004 model-rate-limit
+// windows ride along in the same row shape (reason "model_rate_limit").
+// Both tables live in memory, so the response says so.
 func handleCooldownList(req pluginapi.ManagementRequest) map[string]any {
 	if vals := req.Query["auth_id"]; len(vals) > 0 && strings.TrimSpace(vals[0]) != "" {
-		entries := cooldownSnapshotFor(vals[0])
+		authID := strings.TrimSpace(vals[0])
+		entries := cooldownSnapshotFor(authID)
+		entries = append(entries, modelRateLimitSnapshotFor(authID)...)
+		sortCooldownViewRows(entries, false)
 		return map[string]any{
 			"entries":    entries,
 			"count":      len(entries),
@@ -532,6 +547,8 @@ func handleCooldownList(req pluginapi.ManagementRequest) map[string]any {
 		}
 	}
 	entries := cooldownSnapshotAll()
+	entries = append(entries, modelRateLimitSnapshotAll()...)
+	sortCooldownViewRows(entries, true)
 	return map[string]any{
 		"entries":    entries,
 		"count":      len(entries),
@@ -540,7 +557,9 @@ func handleCooldownList(req pluginapi.ManagementRequest) map[string]any {
 }
 
 // handleCooldownClear clears one pair (auth_id + model) or the whole account
-// (auth_id only). Panel action: "give this model another chance now".
+// (auth_id only) from BOTH tables — the #35 cooldown holds and the 6004
+// model-rate-limit windows (issue #77). Panel action: "give this model
+// another chance now".
 func handleCooldownClear(req pluginapi.ManagementRequest) map[string]any {
 	var body struct {
 		AuthID string `json:"auth_id"`
@@ -552,6 +571,7 @@ func handleCooldownClear(req pluginapi.ManagementRequest) map[string]any {
 		return map[string]any{"error": "auth_id required"}
 	}
 	removed := clearModelCooldown(authID, body.Model)
+	removed += clearModelRateLimit(authID, body.Model)
 	return map[string]any{"success": true, "removed": removed}
 }
 

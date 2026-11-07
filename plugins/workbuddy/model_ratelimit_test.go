@@ -15,6 +15,26 @@ import (
 // itself declares the limit model-scoped by advising "switch to another model".
 const modelRateLimitSamplePayload = `{"code":6004,"msg":"您的使用量已超出频率限制，将在 2026-09-22 09:46:39 UTC+8 重置，您也可以切换其他模型继续使用。","requestId":"055d655c-f97b-4d00-aba8-9d55a4e588f6"}`
 
+// resetModelRateLimits empties the global registry between tests.
+func resetModelRateLimits() {
+	wbModelRateLimits.mu.Lock()
+	wbModelRateLimits.entries = make(map[string]modelRateLimitEntry)
+	wbModelRateLimits.mu.Unlock()
+}
+
+// withFrozenModelRateLimits freezes the registry clock for one test and
+// restores both clock and registry afterwards.
+func withFrozenModelRateLimits(t *testing.T, now time.Time) {
+	t.Helper()
+	resetModelRateLimits()
+	orig := modelRateLimitNowFn
+	modelRateLimitNowFn = func() time.Time { return now }
+	t.Cleanup(func() {
+		modelRateLimitNowFn = orig
+		resetModelRateLimits()
+	})
+}
+
 func TestIsModelScopedRateLimit(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -402,5 +422,90 @@ func TestModelRateLimitJoinKeyMatchesHostConvention(t *testing.T) {
 	})
 	if len(ids) != 1 || ids[0] != "deepseek-v4.1-flash" {
 		t.Fatalf("storage-derived catalog key must hide the windowed pair: %v", ids)
+	}
+}
+
+// TestModelRateLimitSnapshotAndClear locks the issue #77 operator surface:
+// the registry's own views list active windows in the cooldown row shape,
+// and clearModelRateLimit is the manual "retry now" exit.
+func TestModelRateLimitSnapshotAndClear(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	withFrozenModelRateLimits(t, now)
+
+	noteModelRateLimit("acct-a", "deepseek-v4.1-flash", now.Add(40*time.Minute))
+	noteModelRateLimit("acct-a", "glm-5.2-air", now.Add(25*time.Minute))
+	noteModelRateLimit("acct-b", "deepseek-v4.1-flash", now.Add(5*time.Minute))
+
+	// Per-account view: only acct-a's pairs, no auth_id key, model-sorted.
+	rows := modelRateLimitSnapshotFor("acct-a")
+	if len(rows) != 2 {
+		t.Fatalf("snapshotFor(acct-a) = %#v", rows)
+	}
+	if rows[0]["model"] != "deepseek-v4.1-flash" || rows[1]["model"] != "glm-5.2-air" {
+		t.Fatalf("model order = %#v", rows)
+	}
+	for _, row := range rows {
+		if row["reason"] != modelRateLimitViewReason {
+			t.Fatalf("reason = %#v", row)
+		}
+		if _, has := row["auth_id"]; has {
+			t.Fatal("per-account rows must not carry auth_id")
+		}
+		if got := row["updated_at"]; got != now.UTC().Format(time.RFC3339) {
+			t.Fatalf("updated_at = %v, want %v", got, now.UTC().Format(time.RFC3339))
+		}
+	}
+	if secs := rows[0]["seconds"].(int); secs < 2395 || secs > 2405 {
+		t.Fatalf("seconds = %d, want ~2400", secs)
+	}
+
+	// All-accounts view: three rows, auth_id present, account-then-model order.
+	all := modelRateLimitSnapshotAll()
+	if len(all) != 3 {
+		t.Fatalf("snapshotAll = %#v", all)
+	}
+	if all[0]["auth_id"] != "acct-a" || all[2]["auth_id"] != "acct-b" {
+		t.Fatalf("account order = %#v", all)
+	}
+
+	// Blank auth id: no rows, no panic.
+	if got := modelRateLimitSnapshotFor("  "); got != nil {
+		t.Fatalf("blank auth snapshot = %#v", got)
+	}
+
+	// Expired entries are swept lazily by the snapshot.
+	wbModelRateLimits.note(modelRateLimitKey("acct-c", "kimi-k2.7"), now.Add(-time.Minute), now.Add(-2*time.Minute))
+	if swept := modelRateLimitSnapshotFor("acct-c"); len(swept) != 0 {
+		t.Fatalf("expired entry must not list: %#v", swept)
+	}
+	wbModelRateLimits.mu.Lock()
+	if _, ok := wbModelRateLimits.entries[modelRateLimitKey("acct-c", "kimi-k2.7")]; ok {
+		t.Fatal("expired entry must be swept from the map")
+	}
+	wbModelRateLimits.mu.Unlock()
+
+	// Clear one pair — case and padding normalize exactly like the key join.
+	if n := clearModelRateLimit("acct-a", " DeepSeek-V4.1-FLASH "); n != 1 {
+		t.Fatalf("clear pair removed %d", n)
+	}
+	if len(modelRateLimitSnapshotFor("acct-a")) != 1 {
+		t.Fatal("acct-a must have one window left")
+	}
+	// Unknown pair / blank account: zero removed, nothing else disturbed.
+	if n := clearModelRateLimit("acct-a", "nope"); n != 0 {
+		t.Fatalf("clear unknown removed %d", n)
+	}
+	if n := clearModelRateLimit("", "deepseek-v4.1-flash"); n != 0 {
+		t.Fatalf("blank auth removed %d", n)
+	}
+	// Clear the whole account.
+	if n := clearModelRateLimit("acct-a", ""); n != 1 {
+		t.Fatalf("clear account removed %d", n)
+	}
+	if len(modelRateLimitSnapshotFor("acct-a")) != 0 {
+		t.Fatal("acct-a must be empty after the account clear")
+	}
+	if len(modelRateLimitSnapshotAll()) != 1 {
+		t.Fatal("acct-b must survive the acct-a clear")
 	}
 }

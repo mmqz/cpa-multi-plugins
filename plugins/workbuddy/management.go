@@ -166,6 +166,11 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: base + "/select", Description: "Select the active account card used for chat routing (body: {auth_index})."},
 			{Method: http.MethodPost, Path: base + "/keepalive", Description: "Manually refresh access tokens for all accounts (or one with auth_index)."},
 			{Method: http.MethodGet, Path: base + "/keepalive/status", Description: "Last keepalive run summary + config."},
+			// Issue #35 (v0.9.57) / issue #77 (v0.9.88): per-(credential, model)
+			// holds — the #35 cooldown table and the 6004 model-rate-limit windows,
+			// one merged operator surface (same shape qoder registers).
+			{Method: http.MethodGet, Path: base + "/cooldowns", Description: "List active per-(credential, model) holds: cooldown entries and 6004 model-rate-limit windows (in-memory)."},
+			{Method: http.MethodPost, Path: base + "/cooldowns/clear", Description: "Clear holds for one pair (auth_id + model) or one account (auth_id) — cooldown and 6004 windows alike."},
 			{Method: http.MethodGet, Path: base + "/models/groups", Description: "Per-realm model catalog (model_cache snapshots; ?refresh=1 re-discovers) for the panel's exclusion picker."},
 			{Method: http.MethodGet, Path: base + "/excluded-models", Description: "Per-credential model exclusion list (?auth_index=) — the account-level narrowing channel rules can't express."},
 			{Method: http.MethodPost, Path: base + "/excluded-models", Description: "Set one credential's excluded model list ({auth_index, models:[]}); empty list removes the field."},
